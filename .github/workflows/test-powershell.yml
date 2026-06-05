@@ -1,0 +1,42 @@
+name: Test PowerShell
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse PowerShell files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' }
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              Write-Host "::error file=$($file.FullName)::PowerShell parse errors found"
+              $errors | Format-List | Out-String | Write-Host
+              throw "PowerShell parse failed for $($file.FullName)"
+            }
+            Write-Host "OK $($file.FullName)"
+          }
+
+      - name: Validate manifest JSON
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content -Raw -Path manifest.json | ConvertFrom-Json
+          foreach ($tool in $manifest.tools) {
+            if (-not (Test-Path -LiteralPath $tool.path)) {
+              throw "Manifest tool path not found: $($tool.path)"
+            }
+          }
+          Write-Host "Manifest OK"

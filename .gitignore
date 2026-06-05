@@ -1,0 +1,17 @@
+# Runtime output
+*.zip
+*.log
+*.dmp
+outputs/
+work/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+
+# PowerShell temp files
+*.ps1xml.bak

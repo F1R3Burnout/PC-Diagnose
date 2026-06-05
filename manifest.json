@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "name": "PC-Diagnose",
+  "repository": "F1R3Burnout/PC-Diagnose",
+  "defaultBranch": "main",
+  "description": "PowerShell-basierte Diagnose- und Wartungstools fuer Windows-PCs und kleine Server.",
+  "tools": [
+    {
+      "id": "serverdiag",
+      "name": "ServerDiagLite",
+      "category": "diagnostics",
+      "description": "Sammelt ein schlankes Diagnosepaket mit System-, Storage-, Netzwerk-, Power- und Eventlogdaten.",
+      "path": "scripts/diagnostics/ServerDiagLite.ps1",
+      "kind": "powershell",
+      "requiresAdmin": true,
+      "safeMode": "collect-only",
+      "parameters": [
+        {
+          "name": "DaysBack",
+          "type": "int",
+          "default": 30,
+          "description": "Zeitraum fuer Event-Auswertungen."
+        },
+        {
+          "name": "OutputRoot",
+          "type": "string",
+          "default": "C:\\Temp",
+          "description": "Zielordner fuer Diagnosepakete."
+        },
+        {
+          "name": "PrivacyMode",
+          "type": "switch",
+          "default": false,
+          "description": "Maskiert typische sensible Werte vor dem ZIP."
+        }
+      ]
+    }
+  ]
+}
