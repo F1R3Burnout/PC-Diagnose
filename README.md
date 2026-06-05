@@ -13,7 +13,7 @@ irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/s|iex
 Menue starten:
 
 ```powershell
-irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/bootstrap.ps1 | iex
+irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/b|iex
 ```
 
 ServerDiagLite direkt starten:
