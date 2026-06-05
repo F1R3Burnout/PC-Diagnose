@@ -7,13 +7,13 @@ PowerShell-basierte Diagnose- und Wartungstools fuer Windows-PCs und kleine Serv
 Kurzbefehl fuer ServerDiagLite:
 
 ```powershell
-irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/d|iex
+irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/g|iex
 ```
 
 Menue starten:
 
 ```powershell
-irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/b|iex
+irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/p|iex
 ```
 
 ServerDiagLite direkt starten:

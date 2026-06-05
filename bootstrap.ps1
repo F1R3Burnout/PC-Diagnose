@@ -29,7 +29,7 @@ $ProgressPreference = "SilentlyContinue"
 $RepoOwner = "F1R3Burnout"
 $RepoName = "PC-Diagnose"
 $RawBase = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$Branch"
-$BootstrapUrl = "$RawBase/bootstrap.ps1"
+$BootstrapUrl = "$RawBase/b"
 $ManifestUrl = "$RawBase/manifest.json"
 
 try {
@@ -78,7 +78,7 @@ function Start-ElevatedBootstrap {
     ) -join "; "
 
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" -Verb RunAs | Out-Null
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoExit -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" -Verb RunAs | Out-Null
 }
 
 function Show-ToolList {
