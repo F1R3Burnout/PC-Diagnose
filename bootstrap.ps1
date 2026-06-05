@@ -45,7 +45,8 @@ function Test-IsAdmin {
 function Get-RemoteText {
     param([Parameter(Mandatory=$true)][string]$Uri)
 
-    return (Invoke-WebRequest -UseBasicParsing -Uri $Uri).Content
+    $text = (Invoke-WebRequest -UseBasicParsing -Uri $Uri).Content
+    return ([string]$text).TrimStart([char]0xFEFF)
 }
 
 function Get-Manifest {

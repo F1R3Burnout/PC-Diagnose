@@ -16,7 +16,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' -or $_.Name -in 'b', 'd', 'g', 'p', 's' }
+          $files = Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' -or $_.Name -in 'b', 'd', 'g', 'i', 'p', 'r', 's' }
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null
