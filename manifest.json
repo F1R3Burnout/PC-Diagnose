@@ -9,7 +9,7 @@
       "id": "serverdiag",
       "name": "ServerDiagLite",
       "category": "diagnostics",
-      "description": "Sammelt ein schlankes Diagnosepaket und zeigt danach eine lokale Ersteinschaetzung an.",
+      "description": "Sammelt ein schlankes Diagnosepaket und öffnet danach eine lokale Ergebnisansicht.",
       "path": "scripts/diagnostics/ServerDiagLite.ps1",
       "kind": "powershell",
       "requiresAdmin": true,

@@ -16,7 +16,7 @@ Das Menue liest `manifest.json` und zeigt alle eingetragenen Tools zur Auswahl a
 
 | Tool-ID | Name | Zweck | Admin |
 | --- | --- | --- | --- |
-| `serverdiag` | ServerDiagLite | Diagnosepaket sammeln und lokale Ersteinschaetzung anzeigen | Ja |
+| `serverdiag` | ServerDiagLite | Diagnosepaket sammeln und lokale Ergebnisansicht öffnen | Ja |
 
 ## ServerDiagLite
 
@@ -24,6 +24,7 @@ ServerDiagLite sammelt ein ZIP unter `C:\Temp` mit:
 
 - automatischer Ersteinschaetzung
 - lokaler Ergebnisanzeige nach der Datensammlung
+- automatisch geoeffnetem Ergebnisfenster mit Status und naechsten Schritten
 - HTML-Report
 - Manifest
 - System- und Hardwaredaten
@@ -33,7 +34,7 @@ ServerDiagLite sammelt ein ZIP unter `C:\Temp` mit:
 - begrenzte System/Application-Eventauswertung
 - Minidumps, falls vorhanden
 
-Das Tool ist in der aktuellen Version bewusst `collect-only`: Es sammelt Diagnoseinformationen, bewertet typische Muster lokal und nimmt keine Reparaturen am System vor.
+Das Tool ist in der aktuellen Version bewusst `collect-only`: Es sammelt Diagnoseinformationen, bewertet typische Muster lokal, oeffnet danach eine Ergebnisansicht und nimmt keine Reparaturen am System vor.
 
 ## Datenschutz
 

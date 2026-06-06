@@ -681,6 +681,61 @@ function New-HtmlTable {
     return $sb.ToString()
 }
 
+function Get-StatusCssClass {
+    param([AllowNull()][string]$Status)
+
+    switch ([string]$Status) {
+        "Kritisch"    { return "status-critical" }
+        "Auffällig"   { return "status-high" }
+        "Warnung"     { return "status-medium" }
+        "Unauffällig" { return "status-ok" }
+        default       { return "status-neutral" }
+    }
+}
+
+function Get-SeverityCssClass {
+    param([AllowNull()][string]$Severity)
+
+    switch ([string]$Severity) {
+        "Kritisch" { return "sev-critical" }
+        "Hoch"     { return "sev-high" }
+        "Mittel"   { return "sev-medium" }
+        "Info"     { return "sev-info" }
+        default    { return "sev-info" }
+    }
+}
+
+function New-FindingCardsHtml {
+    param(
+        [object[]]$Findings,
+        [int]$MaxRows = 6
+    )
+
+    $items = @(Get-SortedFindings $Findings | Select-Object -First $MaxRows)
+    if ($items.Count -eq 0) {
+        return '<p class="muted">Keine Findings vorhanden.</p>'
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('<div class="finding-list">')
+
+    foreach ($finding in $items) {
+        $class = Get-SeverityCssClass $finding.Severity
+        [void]$sb.AppendLine("<section class=""finding $class"">")
+        [void]$sb.AppendLine('  <div class="finding-head">')
+        [void]$sb.AppendLine("    <span class=""badge"">$(Escape-Html $finding.Severity)</span>")
+        [void]$sb.AppendLine("    <span class=""category"">$(Escape-Html $finding.Category)</span>")
+        [void]$sb.AppendLine('  </div>')
+        [void]$sb.AppendLine("  <h3>$(Escape-Html $finding.Title)</h3>")
+        [void]$sb.AppendLine("  <p><strong>Hinweis:</strong> $(Escape-Html $finding.Evidence)</p>")
+        [void]$sb.AppendLine("  <p><strong>Nächster Schritt:</strong> $(Escape-Html $finding.Recommendation)</p>")
+        [void]$sb.AppendLine('</section>')
+    }
+
+    [void]$sb.AppendLine('</div>')
+    return $sb.ToString()
+}
+
 function Write-InitialFindingsReport {
     $findings = @()
 
@@ -963,6 +1018,103 @@ function Write-HtmlReport {
 </body>
 </html>
 "@ | Out-File $htmlPath -Encoding UTF8
+}
+
+function Write-ResultWindowReport {
+    param(
+        [string]$OutputPath = (Join-Path $Dirs.Root "00_Ergebnis.html"),
+        [string]$PackagePath = ""
+    )
+
+    $findings = Read-CsvSafe (Join-Path $Dirs.Runtime "Befund_Findings.csv")
+    $sortedFindings = @(Get-SortedFindings $findings)
+    $analysisStatus = Get-AnalysisStatus $sortedFindings
+    $statusClass = Get-StatusCssClass $analysisStatus.Label
+    $findingCardsHtml = New-FindingCardsHtml -Findings $sortedFindings -MaxRows 6
+    $allFindingsHtml = New-HtmlTable $sortedFindings @("Severity","Category","Title","Evidence","Recommendation") 80
+    $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Wird nach Abschluss erstellt." } else { $PackagePath }
+    $reportPath = "00_Report.html"
+    $textReportPath = "00_Befund_Ersteinschaetzung.txt"
+
+@"
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <title>ServerDiagLite Ergebnis</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#607083; --line:#d7dee8; --soft:#f5f7fa; --ok:#0f766e; --warn:#a16207; --high:#b45309; --bad:#b42318; --info:#475569; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: Segoe UI, Arial, sans-serif; color:var(--ink); background:#ffffff; }
+    header { padding:30px 34px 22px; border-bottom:1px solid var(--line); background:#f8fafc; }
+    main { padding:24px 34px 42px; max-width:1180px; }
+    h1 { margin:0 0 8px; font-size:28px; font-weight:700; letter-spacing:0; }
+    h2 { margin:30px 0 12px; font-size:19px; }
+    h3 { margin:8px 0 9px; font-size:16px; }
+    p { line-height:1.45; margin:7px 0; }
+    table { border-collapse:collapse; width:100%; font-size:12px; table-layout:auto; }
+    th, td { border:1px solid var(--line); padding:7px 8px; text-align:left; vertical-align:top; overflow-wrap:anywhere; }
+    th { background:var(--soft); font-weight:650; }
+    .meta { color:var(--muted); font-size:13px; }
+    .status { margin-top:18px; padding:16px 18px; border-radius:8px; border:1px solid var(--line); background:#fff; border-left-width:6px; }
+    .status-critical { border-left-color:var(--bad); }
+    .status-high { border-left-color:var(--high); }
+    .status-medium { border-left-color:var(--warn); }
+    .status-ok { border-left-color:var(--ok); }
+    .status-neutral { border-left-color:var(--info); }
+    .status-label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+    .status-value { margin-top:4px; font-size:25px; font-weight:750; }
+    .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-top:16px; }
+    .summary-item { border:1px solid var(--line); border-radius:8px; padding:12px 13px; background:#fff; }
+    .summary-item .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    .summary-item .value { margin-top:5px; font-size:16px; font-weight:650; }
+    .finding-list { display:grid; gap:12px; }
+    .finding { border:1px solid var(--line); border-radius:8px; padding:14px 15px; background:#fff; border-left-width:5px; }
+    .sev-critical { border-left-color:var(--bad); }
+    .sev-high { border-left-color:var(--high); }
+    .sev-medium { border-left-color:var(--warn); }
+    .sev-info { border-left-color:var(--info); }
+    .finding-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .badge { display:inline-block; min-width:72px; text-align:center; border-radius:999px; padding:3px 9px; background:#eef2f7; font-size:12px; font-weight:650; }
+    .category { color:var(--muted); font-size:13px; }
+    .paths { border:1px solid var(--line); border-radius:8px; padding:12px 13px; background:#f8fafc; overflow-wrap:anywhere; }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ServerDiagLite Ergebnis</h1>
+    <div class="meta">$ToolVersion | Erstellt: $(Escape-Html (Get-Date)) | Computer: $(Escape-Html $env:COMPUTERNAME) | Zeitraum: letzte $DaysBack Tage</div>
+    <section class="status $statusClass">
+      <div class="status-label">Gesamtstatus</div>
+      <div class="status-value">$(Escape-Html $analysisStatus.Label)</div>
+      <p>$(Escape-Html $analysisStatus.Text)</p>
+    </section>
+    <div class="summary-grid">
+      <div class="summary-item"><div class="label">Findings</div><div class="value">$(Escape-Html (Get-FindingCountsText $sortedFindings))</div></div>
+      <div class="summary-item"><div class="label">Hauptbereiche</div><div class="value">$(Escape-Html (Get-PrimaryCategoriesText $sortedFindings))</div></div>
+      <div class="summary-item"><div class="label">Privacy-Modus</div><div class="value">$([bool]$PrivacyMode)</div></div>
+    </div>
+  </header>
+  <main>
+    <h2>Wichtigste Treffer und nächste Schritte</h2>
+    $findingCardsHtml
+
+    <h2>Alle Findings</h2>
+    $allFindingsHtml
+
+    <h2>Dateien</h2>
+    <div class="paths">
+      <p><strong>ZIP-Paket:</strong> $(Escape-Html $packageDisplay)</p>
+      <p><strong>Detailreport im Paket:</strong> $(Escape-Html $reportPath)</p>
+      <p><strong>Textbefund im Paket:</strong> $(Escape-Html $textReportPath)</p>
+    </div>
+  </main>
+</body>
+</html>
+"@ | Out-File $OutputPath -Encoding UTF8
+
+    return $OutputPath
 }
 
 function Write-Manifest {
@@ -1559,6 +1711,10 @@ Invoke-Step "HTML-Report erstellen" {
     Write-HtmlReport
 }
 
+Invoke-Step "Ergebnisfenster vorbereiten" {
+    Write-ResultWindowReport | Out-Null
+}
+
 Invoke-Step "Lokales Analyse-Ergebnis anzeigen" {
     Show-LocalAnalysisResult -Findings $script:LatestFindings
 }
@@ -1588,6 +1744,8 @@ Write-Host ""
 Write-ProgressLine "Erstelle ZIP-Datei..." "Cyan"
 
 $Zip = "$Out.zip"
+$ResultWindowSource = Join-Path $Out "00_Ergebnis.html"
+$ResultWindow = "${Out}_Ergebnis.html"
 
 try {
     if (Test-Path $Zip) {
@@ -1595,6 +1753,20 @@ try {
     }
 
     Compress-Archive -Path (Join-Path $Out "*") -DestinationPath $Zip -Force
+
+    try {
+        if (Test-Path -LiteralPath $ResultWindowSource) {
+            Write-ResultWindowReport -OutputPath $ResultWindow -PackagePath $Zip | Out-Null
+            if ($PrivacyMode -and (Test-Path -LiteralPath $ResultWindow)) {
+                $tokens = @(Get-RedactionTokens)
+                $content = [System.IO.File]::ReadAllText($ResultWindow, [System.Text.Encoding]::UTF8)
+                $content = Protect-TextValue $content $tokens
+                [System.IO.File]::WriteAllText($ResultWindow, $content, [System.Text.UTF8Encoding]::new($true))
+            }
+        }
+    } catch {
+        Write-Warning "Ergebnisfenster-Datei konnte nicht erstellt werden: $($_.Exception.Message)"
+    }
 
     # Nach erfolgreichem ZIP wird der Arbeitsordner gelöscht.
     # Dadurch bleiben keine alten Rohdatenordner liegen und spätere Läufe starten sauberer.
@@ -1611,8 +1783,28 @@ try {
     Write-Host $Zip -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Diese ZIP-Datei reicht für die erste Analyse meistens aus." -ForegroundColor Cyan
+    if (Test-Path -LiteralPath $ResultWindow) {
+        Write-Host ""
+        Write-Host "Ergebnisfenster:"
+        Write-Host $ResultWindow -ForegroundColor Yellow
+        try {
+            Start-Process -FilePath $ResultWindow
+        } catch {
+            Write-Warning "Ergebnisfenster konnte nicht automatisch geöffnet werden: $($_.Exception.Message)"
+        }
+    }
 } catch {
     Write-Warning "ZIP konnte nicht erstellt werden: $($_.Exception.Message)"
     Write-Host "Der unkomprimierte Ordner liegt hier:"
     Write-Host $Out -ForegroundColor Yellow
+    $fallbackResultWindow = Join-Path $Out "00_Ergebnis.html"
+    if (Test-Path -LiteralPath $fallbackResultWindow) {
+        Write-Host "Ergebnisfenster:"
+        Write-Host $fallbackResultWindow -ForegroundColor Yellow
+        try {
+            Start-Process -FilePath $fallbackResultWindow
+        } catch {
+            Write-Warning "Ergebnisfenster konnte nicht automatisch geöffnet werden: $($_.Exception.Message)"
+        }
+    }
 }
