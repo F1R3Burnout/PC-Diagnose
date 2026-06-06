@@ -9,7 +9,7 @@
       "id": "serverdiag",
       "name": "ServerDiagLite",
       "category": "diagnostics",
-      "description": "Collects a lightweight diagnostics package and opens a local result view.",
+      "description": "Collects a lightweight diagnostics package and opens a local result view with clickable Event Viewer details.",
       "path": "scripts/diagnostics/ServerDiagLite.ps1",
       "kind": "powershell",
       "requiresAdmin": true,

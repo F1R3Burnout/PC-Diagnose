@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "ServerDiagLite"
-$ToolVersion = "Lite v7 Local Analysis"
+$ToolVersion = "Lite v8 Clickable Event Details"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -190,8 +190,8 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-ServerDiagLite v7 Local Analysis
-================================
+ServerDiagLite v8 Clickable Event Details
+=========================================
 
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
@@ -425,7 +425,8 @@ function Add-Finding {
         [object[]]$EventRows = @(),
         [string]$TimeContext = "",
         [AllowNull()][string]$FirstSeen = "",
-        [AllowNull()][string]$LastSeen = ""
+        [AllowNull()][string]$LastSeen = "",
+        [string]$DetailText = ""
     )
 
     if ($EventRows.Count -gt 0) {
@@ -433,10 +434,15 @@ function Add-Finding {
         $FirstSeen = $eventTimeInfo.FirstSeen
         $LastSeen = $eventTimeInfo.LastSeen
         $TimeContext = $eventTimeInfo.TimeContext
+        $DetailText = New-EventDetailsText -Rows $EventRows
     }
 
     if ([string]::IsNullOrWhiteSpace($TimeContext)) {
         $TimeContext = "Observed during this run: $(Format-FindingDate (Get-Date))"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($DetailText)) {
+        $DetailText = "No Event Viewer event details are available for this finding. It is based on current inventory or collection state."
     }
 
     $Findings.Value += [PSCustomObject]@{
@@ -448,6 +454,7 @@ function Add-Finding {
         LastSeen       = $LastSeen
         Evidence       = $Evidence
         Recommendation = $Recommendation
+        Details        = $DetailText
     }
 }
 
@@ -508,6 +515,75 @@ function Get-EventTimeInfo {
         LastSeen = Format-FindingDate $last
         TimeContext = "First seen: $(Format-FindingDate $first); last seen: $(Format-FindingDate $last)"
     }
+}
+
+function New-EventDetailsText {
+    param([object[]]$Rows)
+
+    $items = @($Rows | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) }; Descending = $true })
+    if ($items.Count -eq 0) {
+        return "No matching Event Viewer records were captured for this finding."
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("Matching captured Event Viewer records: $($items.Count)")
+    [void]$sb.AppendLine("")
+
+    $index = 1
+    foreach ($row in $items) {
+        $eventTime = ConvertTo-DateTimeSafe ([string]$row.TimeCreated)
+        $timeText = if ($null -ne $eventTime) { Format-FindingDate $eventTime } else { [string]$row.TimeCreated }
+        $levelText = [string]$row.Level
+        if (-not [string]::IsNullOrWhiteSpace([string]$row.LevelDisplayName)) {
+            $levelText = "$levelText ($($row.LevelDisplayName))"
+        }
+
+        [void]$sb.AppendLine("===== Event $index of $($items.Count) =====")
+        [void]$sb.AppendLine("Log Name:      $($row.LogName)")
+        [void]$sb.AppendLine("Source:        $($row.ProviderName)")
+        [void]$sb.AppendLine("Event ID:      $($row.Id)")
+        [void]$sb.AppendLine("Level:         $levelText")
+        [void]$sb.AppendLine("Date and Time: $timeText")
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("Message:")
+        if ([string]::IsNullOrWhiteSpace([string]$row.Message)) {
+            [void]$sb.AppendLine("(No message text was captured for this record.)")
+        } else {
+            [void]$sb.AppendLine([string]$row.Message)
+        }
+        [void]$sb.AppendLine("")
+        $index++
+    }
+
+    return $sb.ToString().TrimEnd()
+}
+
+function New-ObjectDetailsText {
+    param(
+        [object[]]$Rows,
+        [string]$Title = "Captured detail rows"
+    )
+
+    $items = @($Rows)
+    if ($items.Count -eq 0) {
+        return "No detail rows were captured for this finding."
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("$Title`: $($items.Count)")
+    [void]$sb.AppendLine("")
+
+    $index = 1
+    foreach ($row in $items) {
+        [void]$sb.AppendLine("===== Row $index of $($items.Count) =====")
+        foreach ($prop in $row.PSObject.Properties) {
+            [void]$sb.AppendLine("$($prop.Name): $($prop.Value)")
+        }
+        [void]$sb.AppendLine("")
+        $index++
+    }
+
+    return $sb.ToString().TrimEnd()
 }
 
 function Get-MatchCount {
@@ -807,16 +883,28 @@ function New-FindingCardsHtml {
 
     foreach ($finding in $items) {
         $class = Get-SeverityCssClass $finding.Severity
-        [void]$sb.AppendLine("<section class=""finding $class"">")
-        [void]$sb.AppendLine('  <div class="finding-head">')
-        [void]$sb.AppendLine("    <span class=""badge"">$(Escape-Html $finding.Severity)</span>")
-        [void]$sb.AppendLine("    <span class=""category"">$(Escape-Html $finding.Category)</span>")
+        $detailsText = [string]$finding.Details
+        if ([string]::IsNullOrWhiteSpace($detailsText)) {
+            $detailsText = "No further details were captured for this finding."
+        }
+
+        [void]$sb.AppendLine("<details class=""finding $class"">")
+        [void]$sb.AppendLine('  <summary>')
+        [void]$sb.AppendLine('    <div class="finding-head">')
+        [void]$sb.AppendLine("      <span class=""badge"">$(Escape-Html $finding.Severity)</span>")
+        [void]$sb.AppendLine("      <span class=""category"">$(Escape-Html $finding.Category)</span>")
+        [void]$sb.AppendLine('    </div>')
+        [void]$sb.AppendLine("    <h3>$(Escape-Html $finding.Title)</h3>")
+        [void]$sb.AppendLine("    <p><strong>Time:</strong> $(Escape-Html $finding.TimeContext)</p>")
+        [void]$sb.AppendLine("    <p><strong>Evidence:</strong> $(Escape-Html $finding.Evidence)</p>")
+        [void]$sb.AppendLine("    <p><strong>Next step:</strong> $(Escape-Html $finding.Recommendation)</p>")
+        [void]$sb.AppendLine('    <div class="open-hint">Click to show captured Event Viewer details</div>')
+        [void]$sb.AppendLine('  </summary>')
+        [void]$sb.AppendLine('  <div class="finding-details">')
+        [void]$sb.AppendLine('    <h4>Captured Details</h4>')
+        [void]$sb.AppendLine("    <pre class=""event-details"">$(Escape-Html $detailsText)</pre>")
         [void]$sb.AppendLine('  </div>')
-        [void]$sb.AppendLine("  <h3>$(Escape-Html $finding.Title)</h3>")
-        [void]$sb.AppendLine("  <p><strong>Time:</strong> $(Escape-Html $finding.TimeContext)</p>")
-        [void]$sb.AppendLine("  <p><strong>Evidence:</strong> $(Escape-Html $finding.Evidence)</p>")
-        [void]$sb.AppendLine("  <p><strong>Next step:</strong> $(Escape-Html $finding.Recommendation)</p>")
-        [void]$sb.AppendLine('</section>')
+        [void]$sb.AppendLine('</details>')
     }
 
     [void]$sb.AppendLine('</div>')
@@ -889,7 +977,7 @@ function Write-InitialFindingsReport {
         (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'Online|OK|No Media'))
     })
     if ($badDisks.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Storage" "Disk status is not healthy" "$($badDisks.Count) disk row(s) have HealthStatus or OperationalStatus other than Healthy/Online." "Review Disks.csv and PhysicalDisks.csv and prioritize the affected disk(s)." -TimeContext $currentObservation
+        Add-Finding ([ref]$findings) "High" "Storage" "Disk status is not healthy" "$($badDisks.Count) disk row(s) have HealthStatus or OperationalStatus other than Healthy/Online." "Review Disks.csv and PhysicalDisks.csv and prioritize the affected disk(s)." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $badDisks -Title "Affected disk rows")
     }
 
     $physicalDisks = Read-CsvSafe (Join-Path $Dirs.Storage "PhysicalDisks.csv")
@@ -898,7 +986,7 @@ function Write-InitialFindingsReport {
         (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'OK|No Media'))
     })
     if ($badPhysical.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Storage" "PhysicalDisk status is suspicious" "$($badPhysical.Count) PhysicalDisk row(s) look suspicious." "Review Storage Reliability Counter output and run the vendor diagnostic tool." -TimeContext $currentObservation
+        Add-Finding ([ref]$findings) "High" "Storage" "PhysicalDisk status is suspicious" "$($badPhysical.Count) PhysicalDisk row(s) look suspicious." "Review Storage Reliability Counter output and run the vendor diagnostic tool." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $badPhysical -Title "Affected PhysicalDisk rows")
     }
 
     $volumes = Read-CsvSafe (Join-Path $Dirs.Storage "Volumes.csv")
@@ -907,7 +995,7 @@ function Write-InitialFindingsReport {
         (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'OK|Online|No Media'))
     })
     if ($badVolumes.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Medium" "Storage" "Volume status is not healthy" "$($badVolumes.Count) volume row(s) have HealthStatus or OperationalStatus other than Healthy/OK." "Review Volumes.csv. For Full Repair Needed, verify file system health and identify the affected partition." -TimeContext $currentObservation
+        Add-Finding ([ref]$findings) "Medium" "Storage" "Volume status is not healthy" "$($badVolumes.Count) volume row(s) have HealthStatus or OperationalStatus other than Healthy/OK." "Review Volumes.csv. For Full Repair Needed, verify file system health and identify the affected partition." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $badVolumes -Title "Affected volume rows")
     }
 
     $lowVolumes = @($volumes | Where-Object {
@@ -920,27 +1008,29 @@ function Write-InitialFindingsReport {
             $drive = if ([string]::IsNullOrWhiteSpace([string]$_.DriveLetter)) { "(no drive letter)" } else { "$($_.DriveLetter):" }
             "{0} {1} GB free ({2}% free)" -f $drive, (Format-NumberInvariant $_.FreeGB), (Format-NumberInvariant $_.FreePercent)
         }) -join "; ")
-        Add-Finding ([ref]$findings) "Medium" "Storage" "Low free disk space" "$($lowVolumes.Count) volume(s) of at least 10 GB are below 10% free. $lowVolumeSummary" "Free disk space, review logs/temp data, and identify growth drivers. Because this is a current-state finding, rerun the tool after cleanup to confirm it is gone." -TimeContext $currentObservation
+        Add-Finding ([ref]$findings) "Medium" "Storage" "Low free disk space" "$($lowVolumes.Count) volume(s) of at least 10 GB are below 10% free. $lowVolumeSummary" "Free disk space, review logs/temp data, and identify growth drivers. Because this is a current-state finding, rerun the tool after cleanup to confirm it is gone." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $lowVolumes -Title "Low-free-space volume rows")
     }
 
     $dumpRows = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpFiles.csv")
     $copiedDumps = @($dumpRows | Where-Object { $_.Type -match 'Minidump copied' })
     if ($copiedDumps.Count -gt 0) {
         $dumpEvents = @($copiedDumps | ForEach-Object { [PSCustomObject]@{ TimeCreated = $_.LastWriteTime } })
-        Add-Finding ([ref]$findings) "High" "Crash" "Minidumps are included in the package" "$($copiedDumps.Count) minidump(s) copied." "Analyze minidumps with WinDbg/DebugDiag. The driver name and BugCheck code are often the fastest next clue." -EventRows $dumpEvents
+        $dumpTimeInfo = Get-EventTimeInfo -Rows $dumpEvents
+        Add-Finding ([ref]$findings) "High" "Crash" "Minidumps are included in the package" "$($copiedDumps.Count) minidump(s) copied." "Analyze minidumps with WinDbg/DebugDiag. The driver name and BugCheck code are often the fastest next clue." -TimeContext $dumpTimeInfo.TimeContext -FirstSeen $dumpTimeInfo.FirstSeen -LastSeen $dumpTimeInfo.LastSeen -DetailText (New-ObjectDetailsText -Rows $copiedDumps -Title "Captured dump files")
     }
 
     $memoryDump = @($dumpRows | Where-Object { $_.Type -match 'MEMORY\.DMP' })
     if ($memoryDump.Count -gt 0) {
         $memoryDumpEvents = @($memoryDump | ForEach-Object { [PSCustomObject]@{ TimeCreated = $_.LastWriteTime } })
-        Add-Finding ([ref]$findings) "Info" "Crash" "Large MEMORY.DMP exists but was not copied" "MEMORY.DMP was listed only for size and privacy reasons." "Request it only if minidumps are not enough." -EventRows $memoryDumpEvents
+        $memoryDumpTimeInfo = Get-EventTimeInfo -Rows $memoryDumpEvents
+        Add-Finding ([ref]$findings) "Info" "Crash" "Large MEMORY.DMP exists but was not copied" "MEMORY.DMP was listed only for size and privacy reasons." "Request it only if minidumps are not enough." -TimeContext $memoryDumpTimeInfo.TimeContext -FirstSeen $memoryDumpTimeInfo.FirstSeen -LastSeen $memoryDumpTimeInfo.LastSeen -DetailText (New-ObjectDetailsText -Rows $memoryDump -Title "Listed dump files")
     }
 
     $timeoutsPath = Join-Path $Dirs.Runtime "timeouts.txt"
     if (Test-Path -LiteralPath $timeoutsPath) {
         $timeoutLines = @(Get-Content -LiteralPath $timeoutsPath -ErrorAction SilentlyContinue)
         if ($timeoutLines.Count -gt 0) {
-            Add-Finding ([ref]$findings) "Medium" "Collection" "One or more collection steps timed out" "$($timeoutLines.Count) timeout line(s) in 99_Runtime\timeouts.txt." "Review the timeout file. A hanging provider can itself be a symptom." -TimeContext $currentObservation
+            Add-Finding ([ref]$findings) "Medium" "Collection" "One or more collection steps timed out" "$($timeoutLines.Count) timeout line(s) in 99_Runtime\timeouts.txt." "Review the timeout file. A hanging provider can itself be a symptom." -TimeContext $currentObservation -DetailText ($timeoutLines -join "`r`n")
         }
     }
 
@@ -948,7 +1038,7 @@ function Write-InitialFindingsReport {
     if (Test-Path -LiteralPath $errorsPath) {
         $errorLines = @(Get-Content -LiteralPath $errorsPath -ErrorAction SilentlyContinue)
         if ($errorLines.Count -gt 0) {
-            Add-Finding ([ref]$findings) "Info" "Collection" "Collection errors were logged" "$($errorLines.Count) line(s) in 99_Runtime\errors.txt." "Review errors.txt. Individual missing providers are not automatically critical." -TimeContext $currentObservation
+            Add-Finding ([ref]$findings) "Info" "Collection" "Collection errors were logged" "$($errorLines.Count) line(s) in 99_Runtime\errors.txt." "Review errors.txt. Individual missing providers are not automatically critical." -TimeContext $currentObservation -DetailText ($errorLines -join "`r`n")
         }
     }
 
@@ -1050,7 +1140,7 @@ function Write-HtmlReport {
 
 @"
 <!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>ServerDiagLite Report</title>
@@ -1126,7 +1216,7 @@ function Write-ResultWindowReport {
     $sortedFindings = @(Get-SortedFindings $findings)
     $analysisStatus = Get-AnalysisStatus $sortedFindings
     $statusClass = Get-StatusCssClass $analysisStatus.Label
-    $findingCardsHtml = New-FindingCardsHtml -Findings $sortedFindings -MaxRows 6
+    $findingCardsHtml = New-FindingCardsHtml -Findings $sortedFindings -MaxRows 80
     $allFindingsHtml = New-HtmlTable $sortedFindings @("Severity","Category","Title","TimeContext","Evidence","Recommendation") 80
     $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Will be created after completion." } else { $PackagePath }
     $reportPath = "00_Report.html"
@@ -1134,7 +1224,7 @@ function Write-ResultWindowReport {
 
 @"
 <!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>ServerDiagLite Result</title>
@@ -1165,7 +1255,11 @@ function Write-ResultWindowReport {
     .summary-item .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
     .summary-item .value { margin-top:5px; font-size:16px; font-weight:650; }
     .finding-list { display:grid; gap:12px; }
-    .finding { border:1px solid var(--line); border-radius:8px; padding:14px 15px; background:#fff; border-left-width:5px; }
+    .finding { border:1px solid var(--line); border-radius:8px; padding:0; background:#fff; border-left-width:5px; overflow:hidden; }
+    .finding > summary { list-style:none; cursor:pointer; padding:14px 15px; }
+    .finding > summary::-webkit-details-marker { display:none; }
+    .finding > summary:hover { background:#f8fafc; }
+    .finding[open] > summary { border-bottom:1px solid var(--line); background:#f8fafc; }
     .sev-critical { border-left-color:var(--bad); }
     .sev-high { border-left-color:var(--high); }
     .sev-medium { border-left-color:var(--warn); }
@@ -1173,6 +1267,10 @@ function Write-ResultWindowReport {
     .finding-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     .badge { display:inline-block; min-width:72px; text-align:center; border-radius:999px; padding:3px 9px; background:#eef2f7; font-size:12px; font-weight:650; }
     .category { color:var(--muted); font-size:13px; }
+    .open-hint { margin-top:9px; color:var(--muted); font-size:12px; }
+    .finding-details { padding:14px 15px 16px; background:#fbfcfe; }
+    .finding-details h4 { margin:0 0 9px; font-size:14px; }
+    .event-details { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; background:#101827; color:#e5e7eb; padding:13px; border-radius:8px; font-size:12px; line-height:1.45; max-height:620px; overflow:auto; }
     .paths { border:1px solid var(--line); border-radius:8px; padding:12px 13px; background:#f8fafc; overflow-wrap:anywhere; }
     .muted { color:var(--muted); }
   </style>
@@ -1193,7 +1291,7 @@ function Write-ResultWindowReport {
     </div>
   </header>
   <main>
-    <h2>Most Important Findings and Next Steps</h2>
+    <h2>Findings and Next Steps</h2>
     $findingCardsHtml
 
     <h2>All Findings</h2>
