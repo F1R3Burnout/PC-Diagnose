@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v11 Desktop PC Analysis"
+$ToolVersion = "Lite v12 Desktop Network and Remote Checks"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -190,8 +190,8 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-PCDiagLite v11 Desktop PC Analysis
-==================================
+PCDiagLite v12 Desktop Network and Remote Checks
+================================================
 
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
@@ -434,7 +434,9 @@ function Add-Finding {
         $FirstSeen = $eventTimeInfo.FirstSeen
         $LastSeen = $eventTimeInfo.LastSeen
         $TimeContext = $eventTimeInfo.TimeContext
-        $DetailText = New-EventDetailsText -Rows $EventRows
+        if ([string]::IsNullOrWhiteSpace($DetailText)) {
+            $DetailText = New-EventDetailsText -Rows $EventRows
+        }
     }
 
     if ([string]::IsNullOrWhiteSpace($TimeContext)) {
@@ -1047,6 +1049,15 @@ function Write-InitialFindingsReport {
         Add-Finding ([ref]$findings) "High" "Network" "Network computer name conflict detected" "$($nameConflictEvents.Count) NetBT 4321 event(s)." "Make sure this PC has a unique computer name on the network. Check cloned Windows installations, stale DHCP/DNS records, and other PCs using the same NetBIOS name." -EventRows $nameConflictEvents
     }
 
+    $dnsClientConfigEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        $_.ProviderName -match 'Microsoft-Windows-DNS-Client|DNS Client Events' -and
+        $_.Id -in @('1012','1023')
+    })
+    if ($dnsClientConfigEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Network" "DNS client hosts or NRPT configuration errors found" "$($dnsClientConfigEvents.Count) DNS client event(s) with ID 1012 or 1023." "Check C:\Windows\System32\drivers\etc\hosts permissions/content and review Get-DnsClientNrptRule. VPN, DNS filtering, and remote-access tools can create NRPT rules, so inspect before deleting anything." -EventRows $dnsClientConfigEvents
+    }
+
     $dnsTimeEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         (
@@ -1056,6 +1067,27 @@ function Write-InitialFindingsReport {
     })
     if ($dnsTimeEvents.Count -gt 0) {
         Add-Finding ([ref]$findings) "Medium" "Network" "DNS or time synchronization failures found" "$($dnsTimeEvents.Count) matching DNS/time event(s)." "Review DNS servers, DHCP options, local firewall/VPN behavior, and Windows time settings. Time and DNS problems can break updates, logons, certificates, and remote tools." -EventRows $dnsTimeEvents
+    }
+
+    $i225LinkEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        $_.ProviderName -match 'e2fnexpress|e2fexpress|e2f' -and
+        $_.Id -eq '27' -and
+        $_.Message -match 'I225|I226|Ethernet Controller|Network link is disconnected'
+    })
+    if ($i225LinkEvents.Count -gt 0) {
+        $adapterRowsForFinding = @()
+        try {
+            $adapterRowsForFinding = @(Read-CsvSafe (Join-Path $Dirs.Network "NetAdapters.csv") | Where-Object {
+                "$($_.InterfaceDescription) $($_.DriverFileName)" -match 'I225|I226|e2fn|e2f'
+            })
+        } catch {}
+        $detailParts = @()
+        $detailParts += (New-EventDetailsText -Rows $i225LinkEvents)
+        if ($adapterRowsForFinding.Count -gt 0) {
+            $detailParts += (New-ObjectDetailsText -Rows $adapterRowsForFinding -Title "Matching Intel I225/I226 adapter rows")
+        }
+        Add-Finding ([ref]$findings) "Medium" "Network" "Intel I225/I226 link disconnect events found" "$($i225LinkEvents.Count) link disconnect event(s), usually around boot/shutdown unless timestamps show otherwise." "Update the Intel LAN driver and motherboard firmware if available. If dropouts occur during normal use, review Energy Efficient Ethernet, speed/duplex, cable, switch port, and NIC power/offload settings." -EventRows $i225LinkEvents -DetailText ($detailParts -join "`r`n`r`n")
     }
 
     if ($networkEvents.Count -gt 0) {
@@ -1186,6 +1218,22 @@ function Write-InitialFindingsReport {
     $lowLevelRows = @(@($lowLevelDrivers) + @($lowLevelServices))
     if ($lowLevelRows.Count -gt 0) {
         Add-Finding ([ref]$findings) "Info" "Drivers" "Low-level hardware access drivers are installed" "$($lowLevelRows.Count) driver/service row(s) mention inpout, WinRing0, IOMap, OpenLibSys, or similar components." "These components are often installed by monitoring, RGB, fan-control, benchmark, or overclocking tools. They are not automatically bad, but review them if crashes, hangs, or driver service events occur around the same timestamps." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $lowLevelRows -Title "Low-level driver and service rows")
+    }
+
+    $remoteToolRows = Read-CsvSafe (Join-Path $Dirs.System "Remote_Virtualization_Network_Tools.csv")
+    if ($remoteToolRows.Count -ge 5) {
+        Add-Finding ([ref]$findings) "Info" "Drivers" "Many remote, VPN, or virtualization components are installed" "$($remoteToolRows.Count) matching driver/service row(s) were collected." "This is not automatically a fault on a desktop PC. If remote control, USB redirection, input devices, VPN, or display capture behave oddly, simplify the stack and test with only the required tools enabled." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $remoteToolRows -Title "Remote, VPN, and virtualization related rows")
+    }
+
+    $rdpRows = Read-CsvSafe (Join-Path $Dirs.System "RemoteDesktop_Basic_Check.csv")
+    $badRdpRows = @($rdpRows | Where-Object {
+        ([string]$_.TermddSysExists -notmatch 'True') -or
+        ([string]$_.TermDDStatus -match 'Missing') -or
+        ([string]$_.TermServiceStatus -match 'Missing') -or
+        ([string]$_.RdpTcp3389Listening -notmatch 'True')
+    })
+    if ($badRdpRows.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Info" "Remote Access" "Remote Desktop host baseline is incomplete or not listening" "The basic RDP check found termdd.sys, TermService, TermDD, or TCP 3389 not in the expected host-ready state." "Only treat this as a problem if this PC should accept inbound Remote Desktop connections. Check termdd.sys, TermDD, TermService, firewall rules, Remote Desktop settings, and qwinsta." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $badRdpRows -Title "Remote Desktop basic check")
     }
 
     $reliabilityRows = Read-CsvSafe (Join-Path $Dirs.Storage "StorageReliabilityCounter.csv")
@@ -1743,6 +1791,24 @@ Get-ComputerInfo |
                   BiosFirmwareType, CsManufacturer, CsModel, CsProcessors, CsTotalPhysicalMemory |
     Format-List |
     Out-File (Join-Path $Dirs.System "ComputerInfo_Short.txt") -Encoding UTF8
+
+$termddFile = "C:\Windows\System32\drivers\termdd.sys"
+$termService = Get-Service -Name TermService -ErrorAction SilentlyContinue
+$termddService = Get-Service -Name TermDD -ErrorAction SilentlyContinue
+$rdpTcpListening = $false
+try {
+    $rdpTcpListening = [bool](Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
+} catch {}
+
+[PSCustomObject]@{
+    TermddSysExists = Test-Path -LiteralPath $termddFile
+    TermddSysPath = $termddFile
+    TermServiceStatus = if ($termService) { $termService.Status } else { "Missing" }
+    TermServiceStartType = if ($termService) { $termService.StartType } else { "" }
+    TermDDStatus = if ($termddService) { $termddService.Status } else { "Missing" }
+    TermDDStartType = if ($termddService) { $termddService.StartType } else { "" }
+    RdpTcp3389Listening = $rdpTcpListening
+} | Export-Csv (Join-Path $Dirs.System "RemoteDesktop_Basic_Check.csv") -NoTypeInformation -Encoding UTF8
 '@
 
 Invoke-ChildPowerShellWithTimeout -Name "OS, uptime, and basic hardware inventory" -ScriptContent $SystemInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
@@ -1998,6 +2064,41 @@ Get-Service |
     Where-Object { "$($_.Name) $($_.DisplayName)" -match 'inpout|WinRing|WinRing0|IOMap|OpenLibSys' } |
     Select-Object Name, DisplayName, Status, StartType, ServiceType |
     Export-Csv (Join-Path $Dirs.System "LowLevel_Hardware_Access_Services.csv") -NoTypeInformation -Encoding UTF8
+
+$remoteVirtualPattern = 'Tailscale|Surfshark|OpenVPN|WireGuard|Wintun|VMware|Hyper-V|Parsec|RustDesk|Nefarius|ViGEm|Virtual Gamepad|Logitech.*Virtual|hcmon|usbip|Virtual Display|DCO'
+
+$remoteDrivers = Get-CimInstance Win32_PnPSignedDriver |
+    Where-Object { "$($_.DeviceName) $($_.Manufacturer) $($_.InfName) $($_.DeviceID)" -match $remoteVirtualPattern } |
+    Select-Object DeviceName, DeviceClass, Manufacturer, DriverVersion, DriverDate, InfName, DeviceID
+
+$remoteServices = Get-CimInstance Win32_Service |
+    Where-Object { "$($_.Name) $($_.DisplayName) $($_.PathName)" -match $remoteVirtualPattern } |
+    Select-Object Name, DisplayName, State, StartMode, PathName
+
+@(
+    $remoteDrivers | ForEach-Object {
+        [PSCustomObject]@{
+            Source = "Driver"
+            Name = $_.DeviceName
+            Class = $_.DeviceClass
+            Status = ""
+            Version = $_.DriverVersion
+            Date = $_.DriverDate
+            Detail = "$($_.Manufacturer) $($_.InfName) $($_.DeviceID)"
+        }
+    }
+    $remoteServices | ForEach-Object {
+        [PSCustomObject]@{
+            Source = "Service"
+            Name = $_.DisplayName
+            Class = $_.Name
+            Status = $_.State
+            Version = ""
+            Date = ""
+            Detail = "$($_.StartMode) $($_.PathName)"
+        }
+    }
+) | Export-Csv (Join-Path $Dirs.System "Remote_Virtualization_Network_Tools.csv") -NoTypeInformation -Encoding UTF8
 
 Get-HotFix |
     Sort-Object InstalledOn -Descending |
