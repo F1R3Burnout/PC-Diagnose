@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v13 Result Timeline"
+$ToolVersion = "Lite v14 Clickable Result Timeline"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -190,8 +190,8 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-PCDiagLite v13 Result Timeline
-==============================
+PCDiagLite v14 Clickable Result Timeline
+========================================
 
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
@@ -472,10 +472,12 @@ function Add-Finding {
                 Severity         = $Severity
                 Category         = $Category
                 FindingTitle     = $Title
+                LogName          = [string]$eventRow.LogName
                 ProviderName     = [string]$eventRow.ProviderName
                 EventId          = [string]$eventRow.Id
                 LevelDisplayName = [string]$eventRow.LevelDisplayName
                 Message          = $message
+                EventDetails     = New-EventDetailsText -Rows @($eventRow)
             }
         }
     }
@@ -1030,18 +1032,28 @@ function New-TimelineHtml {
         $source = [string]$item.ProviderName
         $eventId = [string]$item.EventId
         $sourceText = if ([string]::IsNullOrWhiteSpace($eventId)) { $source } else { "$source $eventId" }
+        $eventDetails = [string]$item.EventDetails
+        if ([string]::IsNullOrWhiteSpace($eventDetails)) {
+            $eventDetails = "No Event Viewer event details are available for this timeline entry."
+        }
 
-        [void]$sb.AppendLine("<article class=""timeline-item $class"">")
-        [void]$sb.AppendLine('  <div class="timeline-marker"></div>')
-        [void]$sb.AppendLine('  <div class="timeline-card">')
+        [void]$sb.AppendLine("<details class=""timeline-item $class"">")
+        [void]$sb.AppendLine('  <summary class="timeline-summary">')
+        [void]$sb.AppendLine('    <div class="timeline-marker"></div>')
+        [void]$sb.AppendLine('    <div class="timeline-card">')
         [void]$sb.AppendLine("    <div class=""timeline-time"">$(Escape-Html $timeLabel)</div>")
         [void]$sb.AppendLine("    <div class=""timeline-title"">$(Escape-Html $item.FindingTitle)</div>")
         [void]$sb.AppendLine("    <div class=""timeline-source"">$(Escape-Html $sourceText) | $(Escape-Html $item.Category) | $(Escape-Html $item.Severity)</div>")
         if (-not [string]::IsNullOrWhiteSpace([string]$item.Message)) {
             [void]$sb.AppendLine("    <p>$(Escape-Html $item.Message)</p>")
         }
+        [void]$sb.AppendLine('      <div class="timeline-open-hint">Click to show exact Event Viewer details</div>')
+        [void]$sb.AppendLine('    </div>')
+        [void]$sb.AppendLine('  </summary>')
+        [void]$sb.AppendLine('  <div class="timeline-detail">')
+        [void]$sb.AppendLine("    <pre class=""event-details"">$(Escape-Html $eventDetails)</pre>")
         [void]$sb.AppendLine('  </div>')
-        [void]$sb.AppendLine('</article>')
+        [void]$sb.AppendLine('</details>')
     }
 
     [void]$sb.AppendLine('</div>')
@@ -1657,13 +1669,20 @@ function Write-ResultWindowReport {
     .timeline-list { position:relative; padding-left:18px; }
     .timeline-list::before { content:""; position:absolute; left:6px; top:4px; bottom:4px; width:2px; background:#cbd5e1; }
     .timeline-date { position:relative; z-index:1; display:inline-block; margin:10px 0 8px -18px; padding:4px 9px; border-radius:999px; background:#eef2f7; color:#334155; font-size:12px; font-weight:700; }
-    .timeline-item { position:relative; display:grid; grid-template-columns:16px minmax(0,1fr); gap:10px; margin:0 0 12px; }
+    .timeline-item { position:relative; margin:0 0 12px; }
+    .timeline-summary { list-style:none; cursor:pointer; display:grid; grid-template-columns:16px minmax(0,1fr); gap:10px; }
+    .timeline-summary::-webkit-details-marker { display:none; }
     .timeline-marker { position:relative; z-index:2; width:12px; height:12px; margin-top:8px; border:3px solid #fff; border-radius:50%; background:var(--info); box-shadow:0 0 0 2px var(--info); }
     .timeline-card { border:1px solid var(--line); border-radius:8px; padding:10px 11px; background:#fbfcfe; }
+    .timeline-summary:hover .timeline-card { background:#f8fafc; }
+    .timeline-item[open] .timeline-card { background:#f8fafc; border-bottom-left-radius:0; border-bottom-right-radius:0; }
     .timeline-time { color:#0f766e; font-size:12px; font-weight:750; }
     .timeline-title { margin-top:3px; font-weight:750; font-size:13px; line-height:1.25; }
     .timeline-source { margin-top:4px; color:var(--muted); font-size:11px; line-height:1.25; overflow-wrap:anywhere; }
     .timeline-card p { margin:7px 0 0; color:#334155; font-size:12px; line-height:1.35; }
+    .timeline-open-hint { margin-top:7px; color:var(--muted); font-size:11px; }
+    .timeline-detail { margin:0 0 0 26px; border:1px solid var(--line); border-top:0; border-radius:0 0 8px 8px; background:#fbfcfe; padding:10px; }
+    .timeline-detail .event-details { max-height:420px; font-size:11px; }
     .timeline-empty { color:var(--muted); border:1px dashed var(--line); border-radius:8px; padding:12px; background:#f8fafc; font-size:13px; }
     .timeline-item.sev-critical .timeline-marker { background:var(--bad); box-shadow:0 0 0 2px var(--bad); }
     .timeline-item.sev-high .timeline-marker { background:var(--high); box-shadow:0 0 0 2px var(--high); }
