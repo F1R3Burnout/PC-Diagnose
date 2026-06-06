@@ -1,39 +1,39 @@
 ﻿<#
 .SYNOPSIS
-    Erstellt ein kleines, robustes Diagnosepaket für einen instabilen Windows-PC / Headless-Server.
+    Creates a small, robust diagnostics package for an unstable Windows PC or headless server.
 
 .DESCRIPTION
-    Diese Version ist bewusst "ChatGPT-/Analyse-freundlich":
-    - keine vollständigen EVTX-Exporte
-    - keine optionalen Operational-Logs
-    - kein Security-Log
-    - keine große MEMORY.DMP
-    - begrenzte Event-Anzahl
-    - Timeout für potenziell hängende Teilschritte
-    - deutlich mehr Fortschrittsanzeige mit Laufzeit
-    - erster automatischer Befundbericht mit lokaler Ergebnisanzeige
-    - optionaler Privacy-Modus zum Maskieren typischer personenbezogener/gerätebezogener Werte
-    - HTML-Report und Manifest für Support-Übergaben
+    This version is intentionally analysis-friendly:
+    - no full EVTX exports
+    - no optional Operational logs
+    - no Security log
+    - no large MEMORY.DMP copy
+    - limited event count
+    - timeouts for potentially hanging steps
+    - detailed progress output with runtime
+    - local findings summary with a result window
+    - optional privacy mode for masking typical personal and device values
+    - HTML report and manifest for support handoff
 
-    Wenn ein Schritt hängt, wird er nach einer festen Zeit abgebrochen und das Script macht weiter.
+    If a step hangs, it is skipped after a fixed timeout and the script continues.
 
 .PARAMETER DaysBack
-    Zeitraum für Event-Auswertungen. Standard: 30 Tage.
+    Event range in days. Default: 30 days.
 
 .PARAMETER OutputRoot
-    Zielordner. Standard: C:\Temp
+    Output folder. Default: C:\Temp
 
 .PARAMETER MaxEvents
-    Maximale Anzahl detaillierter Events pro Event-Auswertung. Standard: 2000.
+    Maximum number of detailed events per event query. Default: 2000.
 
 .PARAMETER EventTimeoutSeconds
-    Timeout für die Eventlog-Auswertung. Standard: 180 Sekunden.
+    Timeout for event log collection. Default: 180 seconds.
 
 .PARAMETER StepTimeoutSeconds
-    Timeout für größere lokale Sammelschritte. Standard: 90 Sekunden.
+    Timeout for larger local collection steps. Default: 90 seconds.
 
 .PARAMETER PrivacyMode
-    Maskiert typische IP-Adressen, Benutzernamen, Computernamen, MACs, Seriennummern und Geräte-IDs vor dem ZIP.
+    Masks typical IP addresses, user names, computer names, MACs, serial numbers, and device IDs before ZIP creation.
 #>
 
 [CmdletBinding()]
@@ -47,14 +47,14 @@ param(
 )
 
 # ==================================================================================================
-# Abschnitt 1: Start, Admin-Prüfung und Ordnerstruktur
+# Section 1: Start, admin check, and folder structure
 # ==================================================================================================
-# Warum:
-# Für Eventlogs, Treiberinfos, powercfg und Minidumps sind Adminrechte hilfreich bzw. nötig.
+# Why:
+# Admin rights are helpful or required for event logs, driver information, powercfg, and minidumps.
 
 $ErrorActionPreference = "Continue"
 $ToolName = "ServerDiagLite"
-$ToolVersion = "Lite v6 Lokale Analyse"
+$ToolVersion = "Lite v7 Local Analysis"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -64,7 +64,7 @@ function Test-IsAdmin {
 }
 
 if (-not (Test-IsAdmin)) {
-    Write-Host "FEHLER: Bitte als Administrator ausführen." -ForegroundColor Red
+    Write-Host "ERROR: Please run this tool as Administrator." -ForegroundColor Red
     exit 1
 }
 
@@ -108,9 +108,8 @@ function Stop-ProcessTreeSafe {
     )
 
     # Beendet einen Prozess inklusive Kindprozessen.
-    # Warum:
-    # Wenn z. B. ein PowerShell-Kindprozess oder cmd.exe hängt, bleibt manchmal ein Unterprozess übrig.
-    # Danach können weitere Scriptläufe blockieren. Deshalb wird hier rekursiv der ganze Prozessbaum beendet.
+    # Why:
+    # Stop the full child process tree so older stuck runs cannot block a new run.
     try {
         $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue
         foreach ($child in $children) {
@@ -119,21 +118,17 @@ function Stop-ProcessTreeSafe {
 
         if ($ProcessId -ne $PID) {
             Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
-            Write-ProgressLine "Prozess beendet: PID $ProcessId ($Reason)" "Yellow"
+            Write-ProgressLine "Process stopped: PID $ProcessId ($Reason)" "Yellow"
         }
     } catch {
-        Write-ProgressLine "Konnte Prozessbaum PID $ProcessId nicht beenden: $($_.Exception.Message)" "DarkYellow"
+        Write-ProgressLine "Could not stop process tree PID $ProcessId`: $($_.Exception.Message)" "DarkYellow"
     }
 }
 
 function Stop-OldDiagnosticProcesses {
-    # Räumt hängende Diagnoseprozesse aus früheren Läufen auf.
-    # Wichtig:
-    # Es werden NICHT pauschal alle PowerShell-Prozesse beendet.
-    # Beendet werden nur Prozesse, deren CommandLine eindeutig zu diesem Diagnose-Script passt.
-    # Das verhindert, dass ein alter hängen gebliebener Lauf einen neuen Lauf blockiert.
+    # Cleans up clearly related diagnostics processes from older runs.
 
-    Write-ProgressLine "Prüfe auf hängende alte Diagnoseprozesse..." "Cyan"
+    Write-ProgressLine "Checking for stuck diagnostics processes from older runs..." "Cyan"
 
     $currentScript = ""
     try { $currentScript = [string]$PSCommandPath } catch {}
@@ -170,63 +165,62 @@ function Stop-OldDiagnosticProcesses {
         }
 
     if (-not $old) {
-        Write-ProgressLine "Keine alten Diagnoseprozesse gefunden." "Green"
+        Write-ProgressLine "No old diagnostics processes found." "Green"
         return
     }
 
     foreach ($p in $old) {
-        Write-ProgressLine "Alter Diagnoseprozess gefunden: PID $($p.ProcessId), $($p.Name)" "Yellow"
+        Write-ProgressLine "Old diagnostics process found: PID $($p.ProcessId), $($p.Name)" "Yellow"
         Write-ProgressLine "CommandLine: $($p.CommandLine)" "DarkGray"
-        Stop-ProcessTreeSafe -ProcessId ([int]$p.ProcessId) -Reason "alter Diagnoseprozess"
+        Stop-ProcessTreeSafe -ProcessId ([int]$p.ProcessId) -Reason "old diagnostics process"
     }
 }
 
 Write-Host ""
-Write-ProgressLine "Erstelle schlankes Diagnosepaket..." "Cyan"
-Write-ProgressLine "Zielordner: $Out" "Gray"
-Write-ProgressLine "Event-Zeitraum: letzte $DaysBack Tage" "Gray"
-Write-ProgressLine "Max. Detail-Events pro Auswertung: $MaxEvents" "Gray"
-Write-ProgressLine "Event-Timeout: $EventTimeoutSeconds Sekunden" "Gray"
-Write-ProgressLine "Schritt-Timeout: $StepTimeoutSeconds Sekunden" "Gray"
-Write-ProgressLine "Privacy-Modus: $([bool]$PrivacyMode)" "Gray"
+Write-ProgressLine "Creating lightweight diagnostics package..." "Cyan"
+Write-ProgressLine "Output folder: $Out" "Gray"
+Write-ProgressLine "Event range: last $DaysBack days" "Gray"
+Write-ProgressLine "Max detailed events per query: $MaxEvents" "Gray"
+Write-ProgressLine "Event timeout: $EventTimeoutSeconds seconds" "Gray"
+Write-ProgressLine "Step timeout: $StepTimeoutSeconds seconds" "Gray"
+Write-ProgressLine "Privacy mode: $([bool]$PrivacyMode)" "Gray"
 Write-Host ""
 
 Stop-OldDiagnosticProcesses
 
 
 @"
-ServerDiagLite v6 Lokale Analyse
-=========================
+ServerDiagLite v7 Local Analysis
+================================
 
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
-Export time:   $(Get-Date)
+Export time:   $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 DaysBack:      $DaysBack
 MaxEvents:     $MaxEvents
 Output folder: $Out
 Privacy mode:  $([bool]$PrivacyMode)
 
-Hinweis:
-Dieses Paket enthält nur die wichtigsten Diagnoseinformationen für eine erste Analyse.
-Es kann trotzdem IP-Adressen, Gerätenamen, Benutzernamen, Seriennummern und Pfade enthalten.
-Nicht öffentlich hochladen.
+Note:
+This package contains only the most important diagnostics information for an initial analysis.
+It may still contain IP addresses, device names, user names, serial numbers, and paths.
+Do not upload it publicly.
 
-Privacy-Modus:
-Wenn dieses Script mit -PrivacyMode gestartet wurde, werden typische sensible Werte vor dem ZIP maskiert.
-Das ist ein Hilfsfilter, ersetzt aber keine manuelle Prüfung vor öffentlicher Weitergabe.
+Privacy mode:
+If this script was started with -PrivacyMode, typical sensitive values are masked before ZIP creation.
+This is a helper filter and does not replace manual review before public sharing.
 
-Wichtig:
-Diese Version speichert keine vollständigen EVTX-Logs und keine riesige MEMORY.DMP. Alte hängende Diagnoseprozesse werden beim Start bereinigt.
-Falls später wirklich nötig, kann man danach gezielt nachfordern.
+Important:
+This version does not store full EVTX logs and does not copy a large MEMORY.DMP file. Stuck old diagnostics processes are cleaned up at startup.
+If more detail is needed later, it can be requested deliberately.
 "@ | Out-File (Join-Path $Dirs.Root "README.txt") -Encoding UTF8
 
 # ==================================================================================================
-# Abschnitt 2: Hilfsfunktionen mit Feedback und Timeout
+# Section 2: Helper functions with feedback and timeouts
 # ==================================================================================================
-# Warum:
-# Einige Windows-Abfragen können auf beschädigten Logs, defektem Storage oder problematischen Providern
-# hängen. Normale Schritte bekommen genaue Start/OK/Fehler-Ausgaben. Riskante Schritte laufen in einem
-# Kindprozess mit Timeout.
+# Why:
+# Some Windows queries can hang on damaged logs, faulty storage, or problematic providers.
+# Normal steps get clear start/OK/error output. Risky steps run in a child process with a timeout.
 
 function Invoke-Step {
     param(
@@ -243,7 +237,7 @@ function Invoke-Step {
         Write-ProgressLine ("OK: {0} ({1:n1}s)" -f $Name, $sw.Elapsed.TotalSeconds) "Green"
     } catch {
         $sw.Stop()
-        $msg = "FEHLER: $Name nach $([math]::Round($sw.Elapsed.TotalSeconds,1))s - $($_.Exception.Message)"
+        $msg = "ERROR: $Name after $([math]::Round($sw.Elapsed.TotalSeconds,1))s - $($_.Exception.Message)"
         Write-ProgressLine $msg "Red"
         $msg | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
         ($_ | Out-String) | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
@@ -273,7 +267,7 @@ function Invoke-ExternalWithTimeout {
             if ($sw.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
                 Stop-ProcessTreeSafe -ProcessId ([int]$p.Id) -Reason "Timeout"
                 $sw.Stop()
-                $msg = "ÜBERSPRUNGEN/TIMEOUT: $Name nach $TimeoutSeconds Sekunden"
+                $msg = "SKIPPED/TIMEOUT: $Name after $TimeoutSeconds seconds"
                 Write-ProgressLine $msg "Yellow"
                 $msg | Out-File $OutputFile -Encoding UTF8 -Append
                 return
@@ -284,7 +278,7 @@ function Invoke-ExternalWithTimeout {
         Write-ProgressLine ("OK: {0} ({1:n1}s)" -f $Name, $sw.Elapsed.TotalSeconds) "Green"
     } catch {
         $sw.Stop()
-        $msg = "FEHLER: $Name - $($_.Exception.Message)"
+        $msg = "ERROR: $Name - $($_.Exception.Message)"
         Write-ProgressLine $msg "Red"
         $msg | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
     }
@@ -320,13 +314,13 @@ function Invoke-ChildPowerShellWithTimeout {
 
             if (($elapsed - $lastInfo) -ge 15) {
                 $lastInfo = $elapsed
-                Write-ProgressLine "LÄUFT NOCH: $Name seit ${elapsed}s..." "DarkGray"
+                Write-ProgressLine "STILL RUNNING: $Name for ${elapsed}s..." "DarkGray"
             }
 
             if ($elapsed -ge $TimeoutSeconds) {
                 Stop-ProcessTreeSafe -ProcessId ([int]$p.Id) -Reason "Timeout"
                 $sw.Stop()
-                $msg = "ÜBERSPRUNGEN/TIMEOUT: $Name nach $TimeoutSeconds Sekunden"
+                $msg = "SKIPPED/TIMEOUT: $Name after $TimeoutSeconds seconds"
                 Write-ProgressLine $msg "Yellow"
                 $msg | Out-File (Join-Path $Dirs.Runtime "timeouts.txt") -Encoding UTF8 -Append
                 return $false
@@ -354,8 +348,8 @@ function Invoke-ChildPowerShellWithTimeout {
                 return $true
             }
 
-            Write-ProgressLine "WARNUNG: $Name beendet, ExitCode nicht verfügbar" "Yellow"
-            "ExitCode nicht verfügbar" | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
+            Write-ProgressLine "WARNING: $Name finished, exit code unavailable" "Yellow"
+            "Exit code unavailable" | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
             $stderrText | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
             return $false
         }
@@ -364,7 +358,7 @@ function Invoke-ChildPowerShellWithTimeout {
             Write-ProgressLine ("OK: {0} ({1:n1}s)" -f $Name, $sw.Elapsed.TotalSeconds) "Green"
             return $true
         } else {
-            Write-ProgressLine "WARNUNG: $Name beendet mit ExitCode $exitCode" "Yellow"
+            Write-ProgressLine "WARNING: $Name finished with exit code $exitCode" "Yellow"
             "ExitCode $exitCode" | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
             if (Test-Path $stderr) {
                 Get-Content $stderr -ErrorAction SilentlyContinue | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
@@ -373,7 +367,7 @@ function Invoke-ChildPowerShellWithTimeout {
         }
     } catch {
         $sw.Stop()
-        $msg = "FEHLER: $Name - $($_.Exception.Message)"
+        $msg = "ERROR: $Name - $($_.Exception.Message)"
         Write-ProgressLine $msg "Red"
         $msg | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
         return $false
@@ -427,15 +421,92 @@ function Add-Finding {
         [Parameter(Mandatory=$true)][string]$Category,
         [Parameter(Mandatory=$true)][string]$Title,
         [Parameter(Mandatory=$true)][string]$Evidence,
-        [Parameter(Mandatory=$true)][string]$Recommendation
+        [Parameter(Mandatory=$true)][string]$Recommendation,
+        [object[]]$EventRows = @(),
+        [string]$TimeContext = "",
+        [AllowNull()][string]$FirstSeen = "",
+        [AllowNull()][string]$LastSeen = ""
     )
+
+    if ($EventRows.Count -gt 0) {
+        $eventTimeInfo = Get-EventTimeInfo -Rows $EventRows
+        $FirstSeen = $eventTimeInfo.FirstSeen
+        $LastSeen = $eventTimeInfo.LastSeen
+        $TimeContext = $eventTimeInfo.TimeContext
+    }
+
+    if ([string]::IsNullOrWhiteSpace($TimeContext)) {
+        $TimeContext = "Observed during this run: $(Format-FindingDate (Get-Date))"
+    }
 
     $Findings.Value += [PSCustomObject]@{
         Severity       = $Severity
         Category       = $Category
         Title          = $Title
+        TimeContext    = $TimeContext
+        FirstSeen      = $FirstSeen
+        LastSeen       = $LastSeen
         Evidence       = $Evidence
         Recommendation = $Recommendation
+    }
+}
+
+function ConvertTo-DateTimeSafe {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+
+    $text = ([string]$Value).Trim()
+    $cultures = @(
+        [System.Globalization.CultureInfo]::CurrentCulture,
+        [System.Globalization.CultureInfo]::GetCultureInfo("de-DE"),
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+
+    foreach ($culture in $cultures) {
+        $date = [datetime]::MinValue
+        if ([datetime]::TryParse($text, $culture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$date)) {
+            return $date
+        }
+    }
+
+    return $null
+}
+
+function Format-FindingDate {
+    param([AllowNull()][datetime]$Date)
+
+    if ($null -eq $Date -or $Date -eq [datetime]::MinValue) { return "" }
+    return $Date.ToString("yyyy-MM-dd HH:mm:ss")
+}
+
+function Get-EventTimeInfo {
+    param([object[]]$Rows)
+
+    $dates = @()
+    foreach ($row in @($Rows)) {
+        $date = ConvertTo-DateTimeSafe ([string]$row.TimeCreated)
+        if ($null -ne $date) {
+            $dates += $date
+        }
+    }
+
+    if ($dates.Count -eq 0) {
+        return [PSCustomObject]@{
+            FirstSeen = ""
+            LastSeen = ""
+            TimeContext = "No event timestamp available"
+        }
+    }
+
+    $ordered = @($dates | Sort-Object)
+    $first = $ordered[0]
+    $last = $ordered[-1]
+
+    return [PSCustomObject]@{
+        FirstSeen = Format-FindingDate $first
+        LastSeen = Format-FindingDate $last
+        TimeContext = "First seen: $(Format-FindingDate $first); last seen: $(Format-FindingDate $last)"
     }
 }
 
@@ -465,9 +536,9 @@ function Get-FindingSeverityRank {
     param([AllowNull()][string]$Severity)
 
     switch ([string]$Severity) {
-        "Kritisch" { return 4 }
-        "Hoch"     { return 3 }
-        "Mittel"   { return 2 }
+        "Critical" { return 4 }
+        "High"     { return 3 }
+        "Medium"   { return 2 }
         "Info"     { return 1 }
         default    { return 0 }
     }
@@ -477,9 +548,9 @@ function Get-FindingSeverityColor {
     param([AllowNull()][string]$Severity)
 
     switch ([string]$Severity) {
-        "Kritisch" { return "Red" }
-        "Hoch"     { return "Yellow" }
-        "Mittel"   { return "DarkYellow" }
+        "Critical" { return "Red" }
+        "High"     { return "Yellow" }
+        "Medium"   { return "DarkYellow" }
         "Info"     { return "Gray" }
         default    { return "Gray" }
     }
@@ -501,14 +572,14 @@ function Get-FindingCountsText {
     param([object[]]$Findings)
 
     $parts = @()
-    foreach ($severity in @("Kritisch", "Hoch", "Mittel", "Info")) {
+    foreach ($severity in @("Critical", "High", "Medium", "Info")) {
         $count = @($Findings | Where-Object { $_.Severity -eq $severity }).Count
         if ($count -gt 0) {
             $parts += ("{0}: {1}" -f $severity, $count)
         }
     }
 
-    if ($parts.Count -eq 0) { return "keine" }
+    if ($parts.Count -eq 0) { return "none" }
     return ($parts -join ", ")
 }
 
@@ -517,7 +588,7 @@ function Get-PrimaryCategoriesText {
 
     $important = @($Findings | Where-Object { (Get-FindingSeverityRank $_.Severity) -ge 2 })
     if ($important.Count -eq 0) {
-        return "Keine stark auffälligen Kategorien."
+        return "No major categories."
     }
 
     $groups = @($important | Group-Object Category)
@@ -538,32 +609,32 @@ function Get-AnalysisStatus {
 
     if ($maxRank -ge 4) {
         return [PSCustomObject]@{
-            Label = "Kritisch"
+            Label = "Critical"
             Color = "Red"
-            Text  = "Es gibt mindestens einen kritischen Hinweis. Absturz-/Hardware-/Storage-Spuren zuerst prüfen."
+            Text  = "At least one critical finding was detected. Review crash, hardware, and storage signals first."
         }
     }
 
     if ($maxRank -eq 3) {
         return [PSCustomObject]@{
-            Label = "Auffällig"
+            Label = "Attention"
             Color = "Yellow"
-            Text  = "Es gibt deutliche Auffälligkeiten. Die wichtigsten Treffer sollten zeitnah eingeordnet werden."
+            Text  = "Notable findings were detected. Review the highest priority items soon."
         }
     }
 
     if ($maxRank -eq 2) {
         return [PSCustomObject]@{
-            Label = "Warnung"
+            Label = "Warning"
             Color = "DarkYellow"
-            Text  = "Es gibt mittlere Auffälligkeiten, aber keine klare Hochrisiko-Signatur in der Heuristik."
+            Text  = "Medium-priority findings were detected, but the heuristic did not find a clear high-risk pattern."
         }
     }
 
     return [PSCustomObject]@{
-        Label = "Unauffällig"
+        Label = "OK"
         Color = "Green"
-        Text  = "Die lokale Heuristik hat keine klaren kritischen Muster in den Kerndaten gefunden."
+        Text  = "The local heuristic did not find clear critical patterns in the core data."
     }
 }
 
@@ -588,26 +659,27 @@ function Show-LocalAnalysisResult {
     $topFindings = @($items | Select-Object -First 5)
 
     Write-AnalysisResultLine "" "Gray"
-    Write-AnalysisResultLine "Lokales Analyse-Ergebnis" "Cyan"
+    Write-AnalysisResultLine "Local Analysis Result" "Cyan"
     Write-AnalysisResultLine "========================" "Cyan"
-    Write-AnalysisResultLine ("Gesamtstatus: {0}" -f $status.Label) $status.Color
-    Write-AnalysisResultLine ("Kurzfazit: {0}" -f $status.Text) "Gray"
+    Write-AnalysisResultLine ("Overall status: {0}" -f $status.Label) $status.Color
+    Write-AnalysisResultLine ("Summary: {0}" -f $status.Text) "Gray"
     Write-AnalysisResultLine ("Findings: {0}" -f (Get-FindingCountsText $items)) "Gray"
-    Write-AnalysisResultLine ("Hauptbereiche: {0}" -f (Get-PrimaryCategoriesText $items)) "Gray"
+    Write-AnalysisResultLine ("Primary areas: {0}" -f (Get-PrimaryCategoriesText $items)) "Gray"
 
     if ($topFindings.Count -gt 0) {
         Write-AnalysisResultLine "" "Gray"
-        Write-AnalysisResultLine "Wichtigste Treffer:" "Cyan"
+        Write-AnalysisResultLine "Most important findings:" "Cyan"
         foreach ($finding in $topFindings) {
             $color = Get-FindingSeverityColor $finding.Severity
             Write-AnalysisResultLine ("- [{0}] {1}: {2}" -f $finding.Severity, $finding.Category, $finding.Title) $color
-            Write-AnalysisResultLine ("  Hinweis: {0}" -f $finding.Evidence) "Gray"
-            Write-AnalysisResultLine ("  Naechster Schritt: {0}" -f $finding.Recommendation) "Gray"
+            Write-AnalysisResultLine ("  Time: {0}" -f $finding.TimeContext) "Gray"
+            Write-AnalysisResultLine ("  Evidence: {0}" -f $finding.Evidence) "Gray"
+            Write-AnalysisResultLine ("  Next step: {0}" -f $finding.Recommendation) "Gray"
         }
     }
 
     Write-AnalysisResultLine "" "Gray"
-    Write-AnalysisResultLine "Details im ZIP: 00_Befund_Ersteinschaetzung.txt und 00_Report.html" "Cyan"
+    Write-AnalysisResultLine "Details in the ZIP: 00_Findings_Summary.txt and 00_Report.html" "Cyan"
 }
 
 function ConvertTo-NumberSafe {
@@ -640,6 +712,20 @@ function ConvertTo-NumberSafe {
     return $null
 }
 
+function Format-NumberInvariant {
+    param(
+        [AllowNull()][string]$Value,
+        [string]$Format = "0.##"
+    )
+
+    $number = ConvertTo-NumberSafe $Value
+    if ($null -eq $number) {
+        return [string]$Value
+    }
+
+    return $number.ToString($Format, [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Escape-Html {
     param([AllowNull()][string]$Text)
 
@@ -655,7 +741,7 @@ function New-HtmlTable {
     )
 
     if (-not $Rows -or $Rows.Count -eq 0) {
-        return "<p class=""muted"">Keine Daten gefunden.</p>"
+        return "<p class=""muted"">No data found.</p>"
     }
 
     $sb = New-Object System.Text.StringBuilder
@@ -685,11 +771,11 @@ function Get-StatusCssClass {
     param([AllowNull()][string]$Status)
 
     switch ([string]$Status) {
-        "Kritisch"    { return "status-critical" }
-        "Auffällig"   { return "status-high" }
-        "Warnung"     { return "status-medium" }
-        "Unauffällig" { return "status-ok" }
-        default       { return "status-neutral" }
+        "Critical"  { return "status-critical" }
+        "Attention" { return "status-high" }
+        "Warning"   { return "status-medium" }
+        "OK"        { return "status-ok" }
+        default     { return "status-neutral" }
     }
 }
 
@@ -697,9 +783,9 @@ function Get-SeverityCssClass {
     param([AllowNull()][string]$Severity)
 
     switch ([string]$Severity) {
-        "Kritisch" { return "sev-critical" }
-        "Hoch"     { return "sev-high" }
-        "Mittel"   { return "sev-medium" }
+        "Critical" { return "sev-critical" }
+        "High"     { return "sev-high" }
+        "Medium"   { return "sev-medium" }
         "Info"     { return "sev-info" }
         default    { return "sev-info" }
     }
@@ -713,7 +799,7 @@ function New-FindingCardsHtml {
 
     $items = @(Get-SortedFindings $Findings | Select-Object -First $MaxRows)
     if ($items.Count -eq 0) {
-        return '<p class="muted">Keine Findings vorhanden.</p>'
+        return '<p class="muted">No findings available.</p>'
     }
 
     $sb = New-Object System.Text.StringBuilder
@@ -727,8 +813,9 @@ function New-FindingCardsHtml {
         [void]$sb.AppendLine("    <span class=""category"">$(Escape-Html $finding.Category)</span>")
         [void]$sb.AppendLine('  </div>')
         [void]$sb.AppendLine("  <h3>$(Escape-Html $finding.Title)</h3>")
-        [void]$sb.AppendLine("  <p><strong>Hinweis:</strong> $(Escape-Html $finding.Evidence)</p>")
-        [void]$sb.AppendLine("  <p><strong>Nächster Schritt:</strong> $(Escape-Html $finding.Recommendation)</p>")
+        [void]$sb.AppendLine("  <p><strong>Time:</strong> $(Escape-Html $finding.TimeContext)</p>")
+        [void]$sb.AppendLine("  <p><strong>Evidence:</strong> $(Escape-Html $finding.Evidence)</p>")
+        [void]$sb.AppendLine("  <p><strong>Next step:</strong> $(Escape-Html $finding.Recommendation)</p>")
         [void]$sb.AppendLine('</section>')
     }
 
@@ -738,6 +825,7 @@ function New-FindingCardsHtml {
 
 function Write-InitialFindingsReport {
     $findings = @()
+    $currentObservation = "Observed during this run: $(Format-FindingDate (Get-Date))"
 
     $targetedPath = Join-Path $Dirs.Events "System_Targeted_Stability_Storage_Network_${DaysBack}d.csv"
     $systemPath = Join-Path $Dirs.Events "System_WARN_ERR_CRIT_${DaysBack}d.csv"
@@ -750,49 +838,49 @@ function Write-InitialFindingsReport {
         Group-Object { "$($_.TimeCreated)|$($_.LogName)|$($_.ProviderName)|$($_.Id)" } |
         ForEach-Object { $_.Group[0] }
 
-    $bugChecks = Get-MatchCount $allEvents { (Test-EventLevelAtMost $_ 3) -and ($_.ProviderName -match 'BugCheck' -or $_.Id -eq '1001') }
-    if ($bugChecks -gt 0) {
-        Add-Finding ([ref]$findings) "Kritisch" "Absturz" "BugCheck/Bluescreen-Hinweise gefunden" "$bugChecks passende Event(s), z. B. Provider BugCheck oder Event-ID 1001." "Minidumps in 06_Minidumps mit Treiber-/Hardwarefokus auswerten. Danach Storage-, RAM- und Treiberstände prüfen."
+    $bugCheckEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and ($_.ProviderName -match 'BugCheck' -or $_.Id -eq '1001') })
+    if ($bugCheckEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Critical" "Crash" "BugCheck / blue screen indicators found" "$($bugCheckEvents.Count) matching event(s), for example BugCheck provider or event ID 1001." "Analyze minidumps in 06_Minidumps with a driver and hardware focus. Then check storage, RAM, and driver versions." -EventRows $bugCheckEvents
     }
 
-    $kernelPower41 = Get-MatchCount $allEvents { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Kernel-Power' -and $_.Id -eq '41' }
-    if ($kernelPower41 -gt 0) {
-        Add-Finding ([ref]$findings) "Hoch" "Stabilität" "Unerwartete Neustarts/Power-Verluste" "$kernelPower41 Event(s) Kernel-Power 41." "Auf Stromversorgung, Netzteil/USV, thermische Abschaltung, BIOS/UEFI, RAM/CPU und vorausgehende Fehler direkt vor dem Neustart achten."
+    $kernelPowerEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Kernel-Power' -and $_.Id -eq '41' })
+    if ($kernelPowerEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Stability" "Unexpected restart or power loss" "$($kernelPowerEvents.Count) Kernel-Power 41 event(s)." "Check PSU/UPS, thermals, BIOS/UEFI, RAM/CPU, and the events immediately before the restart." -EventRows $kernelPowerEvents
     }
 
-    $unexpectedShutdown = Get-MatchCount $allEvents { (Test-EventLevelAtMost $_ 3) -and ($_.Id -eq '6008' -or ($_.ProviderName -match 'EventLog' -and $_.Id -eq '6008')) }
-    if ($unexpectedShutdown -gt 0) {
-        Add-Finding ([ref]$findings) "Hoch" "Stabilität" "Windows meldet unerwartetes Herunterfahren" "$unexpectedShutdown Event(s) 6008." "Zeitpunkte mit Kernel-Power, BugCheck, WHEA, Disk/Ntfs und Service-Fehlern abgleichen."
+    $unexpectedShutdownEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and ($_.Id -eq '6008' -or ($_.ProviderName -match 'EventLog' -and $_.Id -eq '6008')) })
+    if ($unexpectedShutdownEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Stability" "Windows reports an unexpected shutdown" "$($unexpectedShutdownEvents.Count) event(s) with ID 6008." "Correlate these timestamps with Kernel-Power, BugCheck, WHEA, Disk/Ntfs, and service errors." -EventRows $unexpectedShutdownEvents
     }
 
-    $whea = Get-MatchCount $allEvents { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'WHEA-Logger' }
-    if ($whea -gt 0) {
-        Add-Finding ([ref]$findings) "Hoch" "Hardware" "WHEA-Hardwarefehler gefunden" "$whea WHEA-Logger Event(s)." "CPU/RAM/PCIe/NVMe/GPU und BIOS/UEFI prüfen. Bei wiederholten WHEA-Events sind Hardware, Firmware oder Übertaktung/XMP typische Kandidaten."
+    $wheaEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'WHEA-Logger' })
+    if ($wheaEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Hardware" "WHEA hardware error events found" "$($wheaEvents.Count) WHEA-Logger event(s)." "Check CPU/RAM/PCIe/NVMe/GPU and BIOS/UEFI. Repeated WHEA events often point to hardware, firmware, or overclocking/XMP instability." -EventRows $wheaEvents
     }
 
-    $storage = Get-MatchCount $allEvents {
+    $storageEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         (
             ($_.ProviderName -match 'disk|Ntfs|storahci|stornvme|iaStor|volmgr') -or
             ($_.Id -in @('51','55','98','129','153','154','157','161','162'))
         )
-    }
-    if ($storage -gt 0) {
-        Add-Finding ([ref]$findings) "Hoch" "Storage" "Storage-/Dateisystem-Ereignisse gefunden" "$storage passende Event(s) aus Disk/Ntfs/Storage/volmgr oder typischen Storage-IDs." "SMART/Herstellerdiagnose, Kabel/Backplane, Controller-/NVMe-/SATA-Treiber und Dateisystem prüfen. Bei NTFS 55/98 oder Disk 51/153 zeitnah Backupstatus prüfen."
-    }
-
-    $network = Get-MatchCount $allEvents { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Tcpip|Dhcp|DNS Client Events|NDIS|Netwtw|e1|e2f|e2fnexpress' }
-    if ($network -gt 0) {
-        Add-Finding ([ref]$findings) "Mittel" "Netzwerk" "Netzwerk-/Treiberereignisse gefunden" "$network passende Netzwerk-Event(s)." "NIC-Treiber/Firmware, Energiesparoptionen, Link-Speed, Switch-Port und DHCP/DNS prüfen."
+    })
+    if ($storageEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Storage" "Storage or file system events found" "$($storageEvents.Count) matching Disk/Ntfs/Storage/volmgr event(s) or typical storage event ID(s)." "Check SMART/vendor diagnostics, cables/backplane, controller/NVMe/SATA drivers, and file system health. For NTFS 55/98 or Disk 51/153, verify backups soon." -EventRows $storageEvents
     }
 
-    $service = Get-MatchCount $allEvents {
+    $networkEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Tcpip|Dhcp|DNS Client Events|NDIS|Netwtw|e1|e2f|e2fnexpress' })
+    if ($networkEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Medium" "Network" "Network or NIC driver events found" "$($networkEvents.Count) matching network event(s)." "Check NIC driver/firmware, power saving settings, link speed, switch port, DHCP, and DNS." -EventRows $networkEvents
+    }
+
+    $serviceEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         $_.ProviderName -match 'Service Control Manager' -and
         $_.Id -in @('7000','7001','7009','7011','7022','7023','7024','7031','7032','7034')
-    }
-    if ($service -gt 0) {
-        Add-Finding ([ref]$findings) "Mittel" "Dienste" "Dienstfehler oder Dienstabstürze gefunden" "$service Service-Control-Manager Event(s)." "TopEvents öffnen und prüfen, ob ein bestimmter Dienst wiederholt hängt, abstürzt oder beim Start blockiert."
+    })
+    if ($serviceEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Medium" "Services" "Service errors or crashes found" "$($serviceEvents.Count) Service Control Manager event(s)." "Open the top events and check whether a specific service repeatedly hangs, crashes, or blocks startup." -EventRows $serviceEvents
     }
 
     $disks = Read-CsvSafe (Join-Path $Dirs.Storage "Disks.csv")
@@ -801,7 +889,7 @@ function Write-InitialFindingsReport {
         (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'Online|OK|No Media'))
     })
     if ($badDisks.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Hoch" "Storage" "Datenträger melden auffälligen Status" "$($badDisks.Count) Disk-Eintrag/E mit HealthStatus oder OperationalStatus ungleich Healthy/Online." "Disks.csv und PhysicalDisks.csv prüfen und betroffene Datenträger priorisieren."
+        Add-Finding ([ref]$findings) "High" "Storage" "Disk status is not healthy" "$($badDisks.Count) disk row(s) have HealthStatus or OperationalStatus other than Healthy/Online." "Review Disks.csv and PhysicalDisks.csv and prioritize the affected disk(s)." -TimeContext $currentObservation
     }
 
     $physicalDisks = Read-CsvSafe (Join-Path $Dirs.Storage "PhysicalDisks.csv")
@@ -810,7 +898,7 @@ function Write-InitialFindingsReport {
         (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'OK|No Media'))
     })
     if ($badPhysical.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Hoch" "Storage" "PhysicalDisk meldet auffälligen Status" "$($badPhysical.Count) PhysicalDisk-Eintrag/E auffällig." "Storage Reliability Counter und Herstellerdiagnose prüfen."
+        Add-Finding ([ref]$findings) "High" "Storage" "PhysicalDisk status is suspicious" "$($badPhysical.Count) PhysicalDisk row(s) look suspicious." "Review Storage Reliability Counter output and run the vendor diagnostic tool." -TimeContext $currentObservation
     }
 
     $volumes = Read-CsvSafe (Join-Path $Dirs.Storage "Volumes.csv")
@@ -819,7 +907,7 @@ function Write-InitialFindingsReport {
         (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'OK|Online|No Media'))
     })
     if ($badVolumes.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Mittel" "Storage" "Volume meldet auffälligen Status" "$($badVolumes.Count) Volume-Eintrag/E mit HealthStatus oder OperationalStatus ungleich Healthy/OK." "Volumes.csv prüfen. Bei Full Repair Needed chkdsk/Dateisystemstatus und betroffene Partition einordnen."
+        Add-Finding ([ref]$findings) "Medium" "Storage" "Volume status is not healthy" "$($badVolumes.Count) volume row(s) have HealthStatus or OperationalStatus other than Healthy/OK." "Review Volumes.csv. For Full Repair Needed, verify file system health and identify the affected partition." -TimeContext $currentObservation
     }
 
     $lowVolumes = @($volumes | Where-Object {
@@ -828,25 +916,31 @@ function Write-InitialFindingsReport {
         $null -ne $freePercent -and $null -ne $sizeGb -and $sizeGb -ge 10 -and $freePercent -lt 10
     })
     if ($lowVolumes.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Mittel" "Storage" "Wenig freier Speicherplatz" "$($lowVolumes.Count) Volume(s) ab 10 GB Größe unter 10 Prozent frei." "Freien Speicher schaffen, Logs/Temp prüfen und Wachstumstreiber identifizieren."
+        $lowVolumeSummary = (($lowVolumes | Select-Object -First 5 | ForEach-Object {
+            $drive = if ([string]::IsNullOrWhiteSpace([string]$_.DriveLetter)) { "(no drive letter)" } else { "$($_.DriveLetter):" }
+            "{0} {1} GB free ({2}% free)" -f $drive, (Format-NumberInvariant $_.FreeGB), (Format-NumberInvariant $_.FreePercent)
+        }) -join "; ")
+        Add-Finding ([ref]$findings) "Medium" "Storage" "Low free disk space" "$($lowVolumes.Count) volume(s) of at least 10 GB are below 10% free. $lowVolumeSummary" "Free disk space, review logs/temp data, and identify growth drivers. Because this is a current-state finding, rerun the tool after cleanup to confirm it is gone." -TimeContext $currentObservation
     }
 
     $dumpRows = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpFiles.csv")
     $copiedDumps = @($dumpRows | Where-Object { $_.Type -match 'Minidump copied' })
     if ($copiedDumps.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Hoch" "Absturz" "Minidumps im Paket enthalten" "$($copiedDumps.Count) Minidump(s) kopiert." "Minidumps mit WinDbg/DebugDiag auswerten; Treibername und BugCheck-Code sind oft der schnellste nächste Hinweis."
+        $dumpEvents = @($copiedDumps | ForEach-Object { [PSCustomObject]@{ TimeCreated = $_.LastWriteTime } })
+        Add-Finding ([ref]$findings) "High" "Crash" "Minidumps are included in the package" "$($copiedDumps.Count) minidump(s) copied." "Analyze minidumps with WinDbg/DebugDiag. The driver name and BugCheck code are often the fastest next clue." -EventRows $dumpEvents
     }
 
     $memoryDump = @($dumpRows | Where-Object { $_.Type -match 'MEMORY\.DMP' })
     if ($memoryDump.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Info" "Absturz" "Großer MEMORY.DMP vorhanden, nicht kopiert" "MEMORY.DMP wurde aus Größen-/Datenschutzgründen nur aufgelistet." "Nur gezielt nachfordern, wenn Minidumps nicht ausreichen."
+        $memoryDumpEvents = @($memoryDump | ForEach-Object { [PSCustomObject]@{ TimeCreated = $_.LastWriteTime } })
+        Add-Finding ([ref]$findings) "Info" "Crash" "Large MEMORY.DMP exists but was not copied" "MEMORY.DMP was listed only for size and privacy reasons." "Request it only if minidumps are not enough." -EventRows $memoryDumpEvents
     }
 
     $timeoutsPath = Join-Path $Dirs.Runtime "timeouts.txt"
     if (Test-Path -LiteralPath $timeoutsPath) {
         $timeoutLines = @(Get-Content -LiteralPath $timeoutsPath -ErrorAction SilentlyContinue)
         if ($timeoutLines.Count -gt 0) {
-            Add-Finding ([ref]$findings) "Mittel" "Datensammlung" "Ein oder mehrere Sammelschritte liefen in einen Timeout" "$($timeoutLines.Count) Timeout-Zeile(n) in 99_Runtime\timeouts.txt." "Timeout-Datei prüfen; ein hängender Provider kann selbst ein Symptom sein."
+            Add-Finding ([ref]$findings) "Medium" "Collection" "One or more collection steps timed out" "$($timeoutLines.Count) timeout line(s) in 99_Runtime\timeouts.txt." "Review the timeout file. A hanging provider can itself be a symptom." -TimeContext $currentObservation
         }
     }
 
@@ -854,74 +948,76 @@ function Write-InitialFindingsReport {
     if (Test-Path -LiteralPath $errorsPath) {
         $errorLines = @(Get-Content -LiteralPath $errorsPath -ErrorAction SilentlyContinue)
         if ($errorLines.Count -gt 0) {
-            Add-Finding ([ref]$findings) "Info" "Datensammlung" "Sammelfehler protokolliert" "$($errorLines.Count) Zeile(n) in 99_Runtime\errors.txt." "errors.txt prüfen. Einzelne fehlende Provider sind nicht automatisch kritisch."
+            Add-Finding ([ref]$findings) "Info" "Collection" "Collection errors were logged" "$($errorLines.Count) line(s) in 99_Runtime\errors.txt." "Review errors.txt. Individual missing providers are not automatically critical." -TimeContext $currentObservation
         }
     }
 
     if ($findings.Count -eq 0) {
-        Add-Finding ([ref]$findings) "Info" "Überblick" "Keine klaren Hochrisiko-Muster in der automatischen Ersteinschätzung" "Die Heuristik fand keine der typischen Signaturen in den gesammelten Kerndaten." "Trotzdem TopEvents, gezielte Events und konkrete Fehlerzeitpunkte prüfen."
+        Add-Finding ([ref]$findings) "Info" "Overview" "No clear high-risk pattern found by the local heuristic" "The heuristic did not find the typical signatures in the collected core data." "Still review top events, targeted events, and exact incident timestamps." -TimeContext $currentObservation
     }
 
-    $findingsPath = Join-Path $Dirs.Runtime "Befund_Findings.csv"
+    $findingsPath = Join-Path $Dirs.Runtime "Findings.csv"
     $findings | Export-Csv $findingsPath -NoTypeInformation -Encoding UTF8
 
     $analysisStatus = Get-AnalysisStatus $findings
     $sortedFindings = @(Get-SortedFindings $findings)
     $topFindings = @($sortedFindings | Select-Object -First 5)
 
-    $reportPath = Join-Path $Dirs.Root "00_Befund_Ersteinschaetzung.txt"
+    $reportPath = Join-Path $Dirs.Root "00_Findings_Summary.txt"
 @"
-Automatische Ersteinschaetzung
-=============================
+Local Findings Summary
+======================
 
 Tool:          $ToolName $ToolVersion
-Erstellt:      $(Get-Date)
+Created:       $(Format-FindingDate (Get-Date))
 Computer:      $env:COMPUTERNAME
-Zeitraum:      letzte $DaysBack Tage
+Event range:   last $DaysBack days
 PrivacyMode:   $([bool]$PrivacyMode)
 
-Wichtig:
-Diese Datei ist eine heuristische Ersteinschaetzung auf Basis der gesammelten Daten.
-Sie ersetzt keine manuelle Analyse, priorisiert aber die wahrscheinlich relevanten Spuren.
+Important:
+This file is a heuristic first assessment based on the collected data.
+It does not replace manual analysis, but it prioritizes the likely relevant signals.
 
-Gesamtstatus:  $($analysisStatus.Label)
-Kurzfazit:     $($analysisStatus.Text)
+Overall status: $($analysisStatus.Label)
+Summary:        $($analysisStatus.Text)
 Findings:      $(Get-FindingCountsText $findings)
-Hauptbereiche: $(Get-PrimaryCategoriesText $findings)
+Primary areas: $(Get-PrimaryCategoriesText $findings)
 
 "@ | Out-File $reportPath -Encoding UTF8
 
     if ($topFindings.Count -gt 0) {
-        "Wichtigste Treffer:`r`n" | Out-File $reportPath -Encoding UTF8 -Append
+        "Most Important Findings:`r`n" | Out-File $reportPath -Encoding UTF8 -Append
         foreach ($finding in $topFindings) {
 @"
 [$($finding.Severity)] $($finding.Category): $($finding.Title)
-Hinweis:        $($finding.Evidence)
-Naechster Schritt: $($finding.Recommendation)
+Time:          $($finding.TimeContext)
+Evidence:      $($finding.Evidence)
+Next step:     $($finding.Recommendation)
 
 "@ | Out-File $reportPath -Encoding UTF8 -Append
         }
     }
 
-    "Alle Treffer:`r`n" | Out-File $reportPath -Encoding UTF8 -Append
+    "All Findings:`r`n" | Out-File $reportPath -Encoding UTF8 -Append
 
     foreach ($finding in $sortedFindings) {
 @"
 [$($finding.Severity)] $($finding.Category): $($finding.Title)
-Hinweis:        $($finding.Evidence)
-Naechster Schritt: $($finding.Recommendation)
+Time:          $($finding.TimeContext)
+Evidence:      $($finding.Evidence)
+Next step:     $($finding.Recommendation)
 
 "@ | Out-File $reportPath -Encoding UTF8 -Append
     }
 
 @"
-Dateien fuer die manuelle Pruefung:
-- 00_Kurzuebersicht.txt
+Files for manual review:
+- 00_Quick_Summary.txt
 - 00_Report.html
 - 01_Events\System_Targeted_Stability_Storage_Network_${DaysBack}d.csv
 - 01_Events\System_Targeted_TopEvents_${DaysBack}d.csv
 - 99_Runtime\runtime.log
-- 99_Runtime\errors.txt und timeouts.txt, falls vorhanden
+- 99_Runtime\errors.txt and timeouts.txt, if present
 "@ | Out-File $reportPath -Encoding UTF8 -Append
 
     return $findings
@@ -929,7 +1025,7 @@ Dateien fuer die manuelle Pruefung:
 
 function Write-HtmlReport {
     $htmlPath = Join-Path $Dirs.Root "00_Report.html"
-    $findings = Read-CsvSafe (Join-Path $Dirs.Runtime "Befund_Findings.csv")
+    $findings = Read-CsvSafe (Join-Path $Dirs.Runtime "Findings.csv")
     $analysisStatus = Get-AnalysisStatus $findings
     $disks = Read-CsvSafe (Join-Path $Dirs.Storage "Disks.csv")
     $volumes = Read-CsvSafe (Join-Path $Dirs.Storage "Volumes.csv")
@@ -944,7 +1040,7 @@ function Write-HtmlReport {
         $osText = (Get-Content -LiteralPath $overviewPath -ErrorAction SilentlyContinue | Select-Object -First 40) -join "`r`n"
     }
 
-    $findingsHtml = New-HtmlTable $findings @("Severity","Category","Title","Evidence","Recommendation") 50
+    $findingsHtml = New-HtmlTable $findings @("Severity","Category","Title","TimeContext","Evidence","Recommendation") 50
     $diskHtml = New-HtmlTable $disks @("Number","FriendlyName","HealthStatus","OperationalStatus","BusType","SizeGB") 20
     $volumeHtml = New-HtmlTable $volumes @("DriveLetter","FileSystemLabel","FileSystem","HealthStatus","OperationalStatus","SizeGB","FreeGB","FreePercent") 30
     $netHtml = New-HtmlTable $netAdapters @("Name","InterfaceDescription","Status","LinkSpeed","DriverVersion","DriverDate") 30
@@ -982,35 +1078,35 @@ function Write-HtmlReport {
 <body>
   <header>
     <h1>ServerDiagLite Report</h1>
-    <div class="meta">$ToolVersion | Erstellt: $(Escape-Html (Get-Date)) | Zeitraum: letzte $DaysBack Tage | PrivacyMode: $([bool]$PrivacyMode)</div>
+    <div class="meta">$ToolVersion | Created: $(Escape-Html (Format-FindingDate (Get-Date))) | Event range: last $DaysBack days | PrivacyMode: $([bool]$PrivacyMode)</div>
     <div class="grid">
       <div class="stat"><div class="label">Computer</div><div class="value">$(Escape-Html $env:COMPUTERNAME)</div></div>
-      <div class="stat"><div class="label">Gesamtstatus</div><div class="value">$(Escape-Html $analysisStatus.Label)</div></div>
+      <div class="stat"><div class="label">Overall Status</div><div class="value">$(Escape-Html $analysisStatus.Label)</div></div>
       <div class="stat"><div class="label">Findings</div><div class="value">$($findings.Count)</div></div>
       <div class="stat"><div class="label">Disks</div><div class="value">$($disks.Count)</div></div>
-      <div class="stat"><div class="label">Netzwerkadapter</div><div class="value">$($netAdapters.Count)</div></div>
+      <div class="stat"><div class="label">Network Adapters</div><div class="value">$($netAdapters.Count)</div></div>
     </div>
   </header>
   <main>
-    <h2>Automatische Ersteinschaetzung</h2>
+    <h2>Local Assessment</h2>
     <div class="summary">
-      <p><strong>Gesamtstatus:</strong> $(Escape-Html $analysisStatus.Label)</p>
-      <p><strong>Kurzfazit:</strong> $(Escape-Html $analysisStatus.Text)</p>
+      <p><strong>Overall status:</strong> $(Escape-Html $analysisStatus.Label)</p>
+      <p><strong>Summary:</strong> $(Escape-Html $analysisStatus.Text)</p>
       <p><strong>Findings:</strong> $(Escape-Html (Get-FindingCountsText $findings))</p>
-      <p><strong>Hauptbereiche:</strong> $(Escape-Html (Get-PrimaryCategoriesText $findings))</p>
+      <p><strong>Primary areas:</strong> $(Escape-Html (Get-PrimaryCategoriesText $findings))</p>
     </div>
     $findingsHtml
     <h2>System</h2>
     <pre>$(Escape-Html $osText)</pre>
-    <h2>Datentraeger</h2>
+    <h2>Disks</h2>
     $diskHtml
     <h2>Volumes</h2>
     $volumeHtml
-    <h2>Netzwerkadapter</h2>
+    <h2>Network Adapters</h2>
     $netHtml
     <h2>Top System Events</h2>
     $topHtml
-    <h2>Gezielte Stabilitaets-/Storage-/Netzwerk-Events</h2>
+    <h2>Targeted Stability / Storage / Network Events</h2>
     $targetedHtml
     <h2>Dumps</h2>
     $dumpHtml
@@ -1022,26 +1118,26 @@ function Write-HtmlReport {
 
 function Write-ResultWindowReport {
     param(
-        [string]$OutputPath = (Join-Path $Dirs.Root "00_Ergebnis.html"),
+        [string]$OutputPath = (Join-Path $Dirs.Root "00_Result.html"),
         [string]$PackagePath = ""
     )
 
-    $findings = Read-CsvSafe (Join-Path $Dirs.Runtime "Befund_Findings.csv")
+    $findings = Read-CsvSafe (Join-Path $Dirs.Runtime "Findings.csv")
     $sortedFindings = @(Get-SortedFindings $findings)
     $analysisStatus = Get-AnalysisStatus $sortedFindings
     $statusClass = Get-StatusCssClass $analysisStatus.Label
     $findingCardsHtml = New-FindingCardsHtml -Findings $sortedFindings -MaxRows 6
-    $allFindingsHtml = New-HtmlTable $sortedFindings @("Severity","Category","Title","Evidence","Recommendation") 80
-    $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Wird nach Abschluss erstellt." } else { $PackagePath }
+    $allFindingsHtml = New-HtmlTable $sortedFindings @("Severity","Category","Title","TimeContext","Evidence","Recommendation") 80
+    $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Will be created after completion." } else { $PackagePath }
     $reportPath = "00_Report.html"
-    $textReportPath = "00_Befund_Ersteinschaetzung.txt"
+    $textReportPath = "00_Findings_Summary.txt"
 
 @"
 <!doctype html>
 <html lang="de">
 <head>
   <meta charset="utf-8">
-  <title>ServerDiagLite Ergebnis</title>
+  <title>ServerDiagLite Result</title>
   <style>
     :root { color-scheme: light; --ink:#17202a; --muted:#607083; --line:#d7dee8; --soft:#f5f7fa; --ok:#0f766e; --warn:#a16207; --high:#b45309; --bad:#b42318; --info:#475569; }
     * { box-sizing:border-box; }
@@ -1083,31 +1179,31 @@ function Write-ResultWindowReport {
 </head>
 <body>
   <header>
-    <h1>ServerDiagLite Ergebnis</h1>
-    <div class="meta">$ToolVersion | Erstellt: $(Escape-Html (Get-Date)) | Computer: $(Escape-Html $env:COMPUTERNAME) | Zeitraum: letzte $DaysBack Tage</div>
+    <h1>ServerDiagLite Result</h1>
+    <div class="meta">$ToolVersion | Created: $(Escape-Html (Format-FindingDate (Get-Date))) | Computer: $(Escape-Html $env:COMPUTERNAME) | Event range: last $DaysBack days</div>
     <section class="status $statusClass">
-      <div class="status-label">Gesamtstatus</div>
+      <div class="status-label">Overall status</div>
       <div class="status-value">$(Escape-Html $analysisStatus.Label)</div>
       <p>$(Escape-Html $analysisStatus.Text)</p>
     </section>
     <div class="summary-grid">
       <div class="summary-item"><div class="label">Findings</div><div class="value">$(Escape-Html (Get-FindingCountsText $sortedFindings))</div></div>
-      <div class="summary-item"><div class="label">Hauptbereiche</div><div class="value">$(Escape-Html (Get-PrimaryCategoriesText $sortedFindings))</div></div>
-      <div class="summary-item"><div class="label">Privacy-Modus</div><div class="value">$([bool]$PrivacyMode)</div></div>
+      <div class="summary-item"><div class="label">Primary areas</div><div class="value">$(Escape-Html (Get-PrimaryCategoriesText $sortedFindings))</div></div>
+      <div class="summary-item"><div class="label">Privacy mode</div><div class="value">$([bool]$PrivacyMode)</div></div>
     </div>
   </header>
   <main>
-    <h2>Wichtigste Treffer und nächste Schritte</h2>
+    <h2>Most Important Findings and Next Steps</h2>
     $findingCardsHtml
 
-    <h2>Alle Findings</h2>
+    <h2>All Findings</h2>
     $allFindingsHtml
 
-    <h2>Dateien</h2>
+    <h2>Files</h2>
     <div class="paths">
-      <p><strong>ZIP-Paket:</strong> $(Escape-Html $packageDisplay)</p>
-      <p><strong>Detailreport im Paket:</strong> $(Escape-Html $reportPath)</p>
-      <p><strong>Textbefund im Paket:</strong> $(Escape-Html $textReportPath)</p>
+      <p><strong>ZIP package:</strong> $(Escape-Html $packageDisplay)</p>
+      <p><strong>Detailed report inside the package:</strong> $(Escape-Html $reportPath)</p>
+      <p><strong>Text findings summary inside the package:</strong> $(Escape-Html $textReportPath)</p>
     </div>
   </main>
 </body>
@@ -1212,7 +1308,7 @@ function Protect-TextValue {
 function Invoke-PrivacyScrub {
     if (-not $PrivacyMode) { return }
 
-    Write-ProgressLine "Privacy-Modus aktiv: maskiere typische sensible Werte vor dem ZIP..." "Cyan"
+    Write-ProgressLine "Privacy mode active: masking typical sensitive values before ZIP creation..." "Cyan"
 
     $tokens = @(Get-RedactionTokens)
     $sensitiveColumns = 'Serial|DeviceID|PNP|PhysicalAddress|MacAddress|UniqueId|ObjectId|Guid|Path|User|ComputerName|CsName|IPAddress|IP|Dns'
@@ -1252,17 +1348,17 @@ function Invoke-PrivacyScrub {
     }
 
 @"
-PrivacyMode war aktiv.
-Typische IP-Adressen, MAC-Adressen, Computernamen, Benutzernamen, Pfade, Seriennummern und Geräte-IDs wurden maskiert.
-Bitte vor öffentlicher Weitergabe trotzdem manuell prüfen.
+PrivacyMode was active.
+Typical IP addresses, MAC addresses, computer names, user names, paths, serial numbers, and device IDs were masked.
+Please still review manually before public sharing.
 "@ | Out-File (Join-Path $Dirs.Runtime "privacy_mode.txt") -Encoding UTF8
 }
 
 # ==================================================================================================
-# Abschnitt 3: Betriebssystem, Uptime und Hardware-Grunddaten
+# Section 3: Operating system, uptime, and basic hardware data
 # ==================================================================================================
-# Warum:
-# Für Freezes/Abstürze sind Windows-Build, letzter Boot, BIOS-Version, Board, CPU und RAM wichtig.
+# Why:
+# For freezes and crashes, Windows build, last boot, BIOS version, board, CPU, and RAM are important.
 
 $SystemInventoryScript = New-ChildScript @'
 $os = Get-CimInstance Win32_OperatingSystem
@@ -1303,14 +1399,14 @@ Get-ComputerInfo |
     Out-File (Join-Path $Dirs.System "ComputerInfo_Short.txt") -Encoding UTF8
 '@
 
-Invoke-ChildPowerShellWithTimeout -Name "OS, Uptime und Hardware-Grunddaten" -ScriptContent $SystemInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
+Invoke-ChildPowerShellWithTimeout -Name "OS, uptime, and basic hardware inventory" -ScriptContent $SystemInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
 
 # ==================================================================================================
-# Abschnitt 4: Storage / Datenträger
+# Section 4: Storage / disks
 # ==================================================================================================
-# Warum:
-# Bei Headless-Hängern sind Datenträgerfehler eine häufige Ursache.
-# Wichtig ist vor allem: Welche Disk-Nummer gehört zu welchem echten Laufwerk und Laufwerksbuchstaben?
+# Why:
+# Storage errors are a common cause of headless-server hangs.
+# The key question is which disk number belongs to which physical drive and drive letter.
 
 $StorageInventoryScript = New-ChildScript @'
 Get-Disk |
@@ -1364,9 +1460,9 @@ Get-CimInstance Win32_DiskDrive | ForEach-Object {
 } | Export-Csv (Join-Path $Dirs.Storage "Disk_To_DriveLetter_Mapping.csv") -NoTypeInformation -Encoding UTF8
 '@
 
-Invoke-ChildPowerShellWithTimeout -Name "Storage- und Laufwerkszuordnung" -ScriptContent $StorageInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
+Invoke-ChildPowerShellWithTimeout -Name "Storage and drive mapping" -ScriptContent $StorageInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
 
-# StorageReliabilityCounter läuft in einem Kindprozess mit Timeout, weil Storage-Provider manchmal hängen.
+# StorageReliabilityCounter runs in a child process with a timeout because storage providers can hang.
 $StorageReliabilityScript = @"
 `$ErrorActionPreference = 'Continue'
 `$outFile = '$($Dirs.Storage.Replace("'","''"))\StorageReliabilityCounter.csv'
@@ -1390,11 +1486,11 @@ $StorageReliabilityScript = @"
 Invoke-ChildPowerShellWithTimeout -Name "Storage Reliability Counter" -ScriptContent $StorageReliabilityScript -TimeoutSeconds 45 | Out-Null
 
 # ==================================================================================================
-# Abschnitt 5: Netzwerk
+# Section 5: Network
 # ==================================================================================================
-# Warum:
-# Wenn ein Headless-Server nicht erreichbar ist, kann Windows laufen, aber die NIC hängen.
-# Deshalb sammeln wir Treiberstand, Link-Speed, IPs, Offload-/Energiesparoptionen.
+# Why:
+# If a headless server is unreachable, Windows may still be running while the NIC is stuck.
+# Therefore we collect driver version, link speed, IPs, offload settings, and power saving options.
 
 $NetworkInventoryScript = New-ChildScript @'
 Get-NetAdapter |
@@ -1420,16 +1516,16 @@ Get-DnsClientServerAddress |
     Export-Csv (Join-Path $Dirs.Network "DnsClientServerAddress.csv") -NoTypeInformation -Encoding UTF8
 '@
 
-Invoke-ChildPowerShellWithTimeout -Name "Netzwerkadapter, IPs und NIC-Einstellungen" -ScriptContent $NetworkInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
+Invoke-ChildPowerShellWithTimeout -Name "Network adapters, IPs, and NIC settings" -ScriptContent $NetworkInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
 
 Invoke-ExternalWithTimeout -Name "ipconfig /all" -Command "ipconfig /all" -OutputFile (Join-Path $Dirs.Network "ipconfig_all.txt") -TimeoutSeconds 20
 
 # ==================================================================================================
-# Abschnitt 6: Energie, Sleep, Wake
+# Section 6: Power, sleep, wake
 # ==================================================================================================
-# Warum:
-# Für einen Headless-Server sind Standby, Hibernate, Wake-Timer und Geräte-Wake-Status relevant.
-# Jeder powercfg-Befehl bekommt einzeln einen Timeout, damit nichts hängen bleibt.
+# Why:
+# For a headless server, standby, hibernate, wake timers, and device wake state are relevant.
+# Each powercfg command gets its own timeout so nothing can block the full run.
 
 Invoke-ExternalWithTimeout -Name "powercfg available sleepstates" -Command "powercfg /a" -OutputFile (Join-Path $Dirs.Power "powercfg_available_sleepstates.txt") -TimeoutSeconds 20
 Invoke-ExternalWithTimeout -Name "powercfg active scheme" -Command "powercfg /getactivescheme" -OutputFile (Join-Path $Dirs.Power "powercfg_active_scheme.txt") -TimeoutSeconds 20
@@ -1439,11 +1535,11 @@ Invoke-ExternalWithTimeout -Name "powercfg waketimers" -Command "powercfg /waket
 Invoke-ExternalWithTimeout -Name "powercfg wake armed devices" -Command "powercfg /devicequery wake_armed" -OutputFile (Join-Path $Dirs.Power "powercfg_wake_armed_devices.txt") -TimeoutSeconds 20
 
 # ==================================================================================================
-# Abschnitt 7: Relevante Treiber statt komplette Treiberliste
+# Section 7: Relevant drivers instead of a full driver list
 # ==================================================================================================
-# Warum:
-# Für diesen Fehlerfall sind vor allem Netzwerk-, Storage-, Disk- und Systemtreiber interessant.
-# Eine komplette Treiberliste macht das Paket größer und unübersichtlicher.
+# Why:
+# For this failure pattern, network, storage, disk, and system drivers are most relevant.
+# A full driver list would make the package larger and harder to read.
 
 $DriverInventoryScript = New-ChildScript @'
 $wantedClasses = @("Net", "SCSIAdapter", "HDC", "DiskDrive", "Storage", "System")
@@ -1459,21 +1555,21 @@ Get-HotFix |
     Export-Csv (Join-Path $Dirs.System "Recent_Hotfixes_Last40.csv") -NoTypeInformation -Encoding UTF8
 '@
 
-Invoke-ChildPowerShellWithTimeout -Name "Relevante Treiberklassen und Updates" -ScriptContent $DriverInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
+Invoke-ChildPowerShellWithTimeout -Name "Relevant driver classes and updates" -ScriptContent $DriverInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
 
 # ==================================================================================================
-# Abschnitt 8: Eventlogs mit Timeout und Begrenzung
+# Section 8: Event logs with timeout and limits
 # ==================================================================================================
-# Warum:
-# Eventlogs sind der Teil, der auf manchen Systemen lange dauern oder hängen kann.
-# Deshalb läuft dieser Teil separat mit Timeout.
+# Why:
+# Event logs are the part that can take a long time or hang on some systems.
+# Therefore this part runs separately with a timeout.
 #
-# Diese Version exportiert KEINE vollständigen EVTX-Dateien.
-# Stattdessen gibt es CSV/TXT:
-# - System/Application Kritisch/Fehler/Warnung
+# This version does NOT export full EVTX files.
+# Instead it creates CSV/TXT files:
+# - System/Application critical/error/warning events
 # - Top-Events
-# - gezielte Stabilitäts-/Storage-/Netzwerkevents
-# Das ist für die erste ChatGPT-Analyse meistens besser und deutlich kleiner.
+# - targeted stability/storage/network events
+# This is usually better and much smaller for an initial analysis.
 
 $EventScript = @"
 `$ErrorActionPreference = 'Continue'
@@ -1559,16 +1655,16 @@ foreach (`$log in @('System','Application')) {
     Out-File (Join-Path `$EventsDir "System_Targeted_Last200.txt") -Encoding UTF8
 "@
 
-Invoke-ChildPowerShellWithTimeout -Name "Eventlog-Auswertung System Application Targeted" -ScriptContent $EventScript -TimeoutSeconds $EventTimeoutSeconds | Out-Null
+Invoke-ChildPowerShellWithTimeout -Name "Event log analysis System Application Targeted" -ScriptContent $EventScript -TimeoutSeconds $EventTimeoutSeconds | Out-Null
 
 # ==================================================================================================
-# Abschnitt 9: Minidumps, aber keine riesige MEMORY.DMP
+# Section 9: Minidumps, but no huge MEMORY.DMP
 # ==================================================================================================
-# Warum:
-# Kleine Minidumps sind bei Bluescreens sehr hilfreich.
-# MEMORY.DMP kann mehrere GB groß sein und wird nur aufgelistet, nicht kopiert.
+# Why:
+# Small minidumps are very useful for blue screens.
+# MEMORY.DMP can be several GB in size and is listed only, not copied.
 
-Invoke-Step "Minidumps sammeln und große Dumps nur auflisten" {
+Invoke-Step "Collect minidumps and list large dumps only" {
     $dumpList = @()
 
     if (Test-Path "C:\Windows\Minidump") {
@@ -1606,13 +1702,13 @@ Invoke-Step "Minidumps sammeln und große Dumps nur auflisten" {
 }
 
 # ==================================================================================================
-# Abschnitt 10: Kurzüberblick
+# Section 10: Quick summary
 # ==================================================================================================
-# Warum:
-# Diese Datei zeigt direkt die wichtigsten Eckdaten und Top-Events, ohne erst CSVs zu öffnen.
+# Why:
+# This file shows the most important facts and top events without opening CSV files first.
 
 $SummaryScript = New-ChildScript @'
-$summaryPath = Join-Path $Dirs.Root "00_Kurzuebersicht.txt"
+$summaryPath = Join-Path $Dirs.Root "00_Quick_Summary.txt"
 
 $os = Get-CimInstance Win32_OperatingSystem
 $cs = Get-CimInstance Win32_ComputerSystem
@@ -1622,35 +1718,35 @@ $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 $uptime = (Get-Date) - $os.LastBootUpTime
 
 @"
-Kurzuebersicht
-==============
+Quick Summary
+=============
 
 Computer:       $env:COMPUTERNAME
 Windows:        $($os.Caption) $($os.Version) Build $($os.BuildNumber)
-Letzter Boot:   $($os.LastBootUpTime)
-Uptime:         $([math]::Round($uptime.TotalDays,2)) Tage
-Hersteller:     $($cs.Manufacturer)
-Modell:         $($cs.Model)
+Last boot:      $($os.LastBootUpTime)
+Uptime:         $([math]::Round($uptime.TotalDays,2)) days
+Manufacturer:   $($cs.Manufacturer)
+Model:          $($cs.Model)
 Mainboard:      $($bb.Manufacturer) $($bb.Product)
-BIOS:           $($bios.SMBIOSBIOSVersion) vom $($bios.ReleaseDate)
+BIOS:           $($bios.SMBIOSBIOSVersion) from $($bios.ReleaseDate)
 CPU:            $($cpu.Name)
-RAM gesamt:     $([math]::Round($cs.TotalPhysicalMemory / 1GB,2)) GB
+Total RAM:      $([math]::Round($cs.TotalPhysicalMemory / 1GB,2)) GB
 
-Pakettyp:       $ToolVersion
-Zeitraum:       letzte $DaysBack Tage
+Package type:   $ToolVersion
+Event range:    last $DaysBack days
 MaxEvents:      $MaxEvents
 
-Dieses Paket enthält nur die wichtigsten Daten:
-- automatische Ersteinschaetzung
-- HTML-Report und Manifest
-- System/Application Fehler/Warnungen als CSV
-- gezielte Stabilitäts-/Storage-/Netzwerkevents
-- Hardware, Storage, Netzwerk, Power
-- Minidumps, falls vorhanden
+This package contains only the most important data:
+- local findings summary
+- result window, HTML report, and manifest
+- System/Application errors and warnings as CSV
+- targeted stability, storage, and network events
+- hardware, storage, network, and power information
+- minidumps, if present
 
 "@ | Out-File $summaryPath -Encoding UTF8
 
-"`r`nDatentraeger:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
+"`r`nDisks:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
 Get-Disk |
     Select-Object Number, FriendlyName, SerialNumber, HealthStatus, OperationalStatus, BusType,
                   @{Name="SizeGB";Expression={[math]::Round($_.Size / 1GB, 2)}} |
@@ -1667,7 +1763,7 @@ Get-Volume |
     Out-String -Width 240 |
     Out-File $summaryPath -Encoding UTF8 -Append
 
-"`r`nNetzwerkadapter:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
+"`r`nNetwork adapters:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
 Get-NetAdapter |
     Select-Object Name, InterfaceDescription, Status, LinkSpeed, DriverVersion, DriverDate |
     Format-Table -AutoSize |
@@ -1676,7 +1772,7 @@ Get-NetAdapter |
 
 $topSystem = Join-Path $Dirs.Events "System_TopEvents_${DaysBack}d.csv"
 if (Test-Path $topSystem) {
-    "`r`nTop System Events Kritisch/Fehler/Warnung:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
+    "`r`nTop System events, critical/error/warning:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
     Import-Csv $topSystem |
         Select-Object -First 25 |
         Format-Table -AutoSize |
@@ -1686,66 +1782,66 @@ if (Test-Path $topSystem) {
 
 $targetedTxt = Join-Path $Dirs.Events "System_Targeted_Last200.txt"
 if (Test-Path $targetedTxt) {
-    "`r`nLetzte gezielte Stabilitaetsereignisse:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
+    "`r`nLatest targeted stability events:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
     Get-Content $targetedTxt -ErrorAction SilentlyContinue |
         Select-Object -First 80 |
         Out-File $summaryPath -Encoding UTF8 -Append
 }
 '@
 
-Invoke-ChildPowerShellWithTimeout -Name "Kurzüberblick erstellen" -ScriptContent $SummaryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
+Invoke-ChildPowerShellWithTimeout -Name "Create quick summary" -ScriptContent $SummaryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
 
 # ==================================================================================================
-# Abschnitt 11: Befund, HTML-Report, Manifest und optionaler Privacy-Modus
+# Section 11: Findings, HTML report, manifest, and optional privacy mode
 # ==================================================================================================
-# Warum:
-# Ab hier werden die gesammelten Rohdaten in eine erste Priorisierung und menschenlesbare Übersicht
-# überführt. Der Privacy-Modus läuft ganz am Ende vor dem ZIP, damit auch Report und Manifest maskiert werden.
+# Why:
+# From here, the collected raw data is converted into an initial prioritization and readable overview.
+# Privacy mode runs at the end before ZIP creation so reports and manifest are masked too.
 
 $script:LatestFindings = @()
-Invoke-Step "Automatische Ersteinschaetzung erstellen" {
+Invoke-Step "Create local findings summary" {
     $script:LatestFindings = @(Write-InitialFindingsReport)
 }
 
-Invoke-Step "HTML-Report erstellen" {
+Invoke-Step "Create HTML report" {
     Write-HtmlReport
 }
 
-Invoke-Step "Ergebnisfenster vorbereiten" {
+Invoke-Step "Prepare result window" {
     Write-ResultWindowReport | Out-Null
 }
 
-Invoke-Step "Lokales Analyse-Ergebnis anzeigen" {
+Invoke-Step "Show local analysis result" {
     Show-LocalAnalysisResult -Findings $script:LatestFindings
 }
 
-Write-ProgressLine "Finalisiere Transcript vor Manifest/ZIP..." "Gray"
+Write-ProgressLine "Finalizing transcript before manifest/ZIP..." "Gray"
 try {
     Stop-Transcript | Out-Null
 } catch {}
 
-Invoke-Step "Manifest erstellen" {
+Invoke-Step "Create manifest" {
     Write-Manifest -RunEnded (Get-Date)
 }
 
 if ($PrivacyMode) {
-    Invoke-Step "Privacy-Modus anwenden" {
+    Invoke-Step "Apply privacy mode" {
         Invoke-PrivacyScrub
     }
 }
 
 # ==================================================================================================
-# Abschnitt 12: ZIP erstellen
+# Section 12: Create ZIP
 # ==================================================================================================
-# Warum:
-# Am Ende soll nur eine Datei weitergegeben werden.
+# Why:
+# At the end, only one package file should need to be shared.
 
 Write-Host ""
-Write-ProgressLine "Erstelle ZIP-Datei..." "Cyan"
+Write-ProgressLine "Creating ZIP file..." "Cyan"
 
 $Zip = "$Out.zip"
-$ResultWindowSource = Join-Path $Out "00_Ergebnis.html"
-$ResultWindow = "${Out}_Ergebnis.html"
+$ResultWindowSource = Join-Path $Out "00_Result.html"
+$ResultWindow = "${Out}_Result.html"
 
 try {
     if (Test-Path $Zip) {
@@ -1765,46 +1861,45 @@ try {
             }
         }
     } catch {
-        Write-Warning "Ergebnisfenster-Datei konnte nicht erstellt werden: $($_.Exception.Message)"
+        Write-Warning "Result window file could not be created: $($_.Exception.Message)"
     }
 
-    # Nach erfolgreichem ZIP wird der Arbeitsordner gelöscht.
-    # Dadurch bleiben keine alten Rohdatenordner liegen und spätere Läufe starten sauberer.
+    # Delete the working folder after successful ZIP creation.
     try {
         Remove-Item -Path $Out -Recurse -Force -ErrorAction Stop
-        Write-Host "Arbeitsordner wurde nach erfolgreichem ZIP gelöscht." -ForegroundColor DarkGray
+        Write-Host "Working folder was deleted after successful ZIP creation." -ForegroundColor DarkGray
     } catch {
-        Write-Warning "ZIP wurde erstellt, aber der Arbeitsordner konnte nicht gelöscht werden: $($_.Exception.Message)"
+        Write-Warning "ZIP was created, but the working folder could not be deleted: $($_.Exception.Message)"
     }
 
     Write-Host ""
-    Write-Host "Fertig." -ForegroundColor Green
-    Write-Host "Schlankes Diagnosepaket:"
+    Write-Host "Done." -ForegroundColor Green
+    Write-Host "Lightweight diagnostics package:"
     Write-Host $Zip -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "Diese ZIP-Datei reicht für die erste Analyse meistens aus." -ForegroundColor Cyan
+    Write-Host "This ZIP file is usually enough for the first analysis." -ForegroundColor Cyan
     if (Test-Path -LiteralPath $ResultWindow) {
         Write-Host ""
-        Write-Host "Ergebnisfenster:"
+        Write-Host "Result window:"
         Write-Host $ResultWindow -ForegroundColor Yellow
         try {
             Start-Process -FilePath $ResultWindow
         } catch {
-            Write-Warning "Ergebnisfenster konnte nicht automatisch geöffnet werden: $($_.Exception.Message)"
+            Write-Warning "Result window could not be opened automatically: $($_.Exception.Message)"
         }
     }
 } catch {
-    Write-Warning "ZIP konnte nicht erstellt werden: $($_.Exception.Message)"
-    Write-Host "Der unkomprimierte Ordner liegt hier:"
+    Write-Warning "ZIP could not be created: $($_.Exception.Message)"
+    Write-Host "The uncompressed folder is here:"
     Write-Host $Out -ForegroundColor Yellow
-    $fallbackResultWindow = Join-Path $Out "00_Ergebnis.html"
+    $fallbackResultWindow = Join-Path $Out "00_Result.html"
     if (Test-Path -LiteralPath $fallbackResultWindow) {
-        Write-Host "Ergebnisfenster:"
+        Write-Host "Result window:"
         Write-Host $fallbackResultWindow -ForegroundColor Yellow
         try {
             Start-Process -FilePath $fallbackResultWindow
         } catch {
-            Write-Warning "Ergebnisfenster konnte nicht automatisch geöffnet werden: $($_.Exception.Message)"
+            Write-Warning "Result window could not be opened automatically: $($_.Exception.Message)"
         }
     }
 }

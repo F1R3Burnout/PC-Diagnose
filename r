@@ -103,16 +103,16 @@ function Select-ToolFromMenu {
     param([Parameter(Mandatory=$true)]$Manifest)
 
     Show-ToolList -Manifest $Manifest
-    $selection = Read-Host "Nummer oder Tool-ID eingeben"
+    $selection = Read-Host "Enter number or tool ID"
 
     if ([string]::IsNullOrWhiteSpace($selection)) {
-        throw "Keine Auswahl getroffen."
+        throw "No selection entered."
     }
 
     $number = 0
     if ([int]::TryParse($selection, [ref]$number)) {
         if ($number -lt 1 -or $number -gt $Manifest.tools.Count) {
-            throw "Ungueltige Auswahl: $selection"
+            throw "Invalid selection: $selection"
         }
 
         return [string]$Manifest.tools[$number - 1].id
@@ -129,16 +129,16 @@ function Invoke-RemoteTool {
 
     $toolInfo = @($Manifest.tools | Where-Object { $_.id -eq $SelectedTool -or $_.name -eq $SelectedTool }) | Select-Object -First 1
     if (-not $toolInfo) {
-        throw "Tool nicht gefunden: $SelectedTool"
+        throw "Tool not found: $SelectedTool"
     }
 
     if ($toolInfo.requiresAdmin -and -not (Test-IsAdmin)) {
         if ($NoElevate) {
-            throw "Dieses Tool benoetigt Administratorrechte: $($toolInfo.name)"
+            throw "This tool requires Administrator rights: $($toolInfo.name)"
         }
 
         Write-Host ""
-        Write-Host "$($toolInfo.name) benoetigt Administratorrechte. UAC wird geoeffnet..." -ForegroundColor Yellow
+        Write-Host "$($toolInfo.name) requires Administrator rights. Opening UAC..." -ForegroundColor Yellow
         Start-ElevatedBootstrap -SelectedTool ([string]$toolInfo.id)
         return
     }
@@ -153,8 +153,8 @@ function Invoke-RemoteTool {
     [IO.File]::WriteAllText($scriptPath, [string]$scriptText, [Text.UTF8Encoding]::new($true))
 
     Write-Host ""
-    Write-Host ("Starte {0}..." -f $toolInfo.name) -ForegroundColor Cyan
-    Write-Host ("Quelle: {0}" -f $toolUri) -ForegroundColor DarkGray
+    Write-Host ("Starting {0}..." -f $toolInfo.name) -ForegroundColor Cyan
+    Write-Host ("Source: {0}" -f $toolUri) -ForegroundColor DarkGray
     Write-Host ""
 
     $toolArgs = @{}

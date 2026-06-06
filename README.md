@@ -1,50 +1,49 @@
 # PC-Diagnose
 
-PowerShell-basierte Diagnose- und Wartungstools fuer Windows-PCs und kleine Server.
+PowerShell-based diagnostics and maintenance tools for Windows PCs and small servers.
 
-## Schnellstart
+## Quick Start
 
-Menue starten:
+Start the menu:
 
 ```powershell
 irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/r|iex
 ```
 
-Das Menue liest `manifest.json` und zeigt alle eingetragenen Tools zur Auswahl an.
+The menu reads `manifest.json` and shows all registered tools.
 
-## Aktuelle Tools
+## Current Tools
 
-| Tool-ID | Name | Zweck | Admin |
+| Tool ID | Name | Purpose | Admin |
 | --- | --- | --- | --- |
-| `serverdiag` | ServerDiagLite | Diagnosepaket sammeln und lokale Ergebnisansicht öffnen | Ja |
+| `serverdiag` | ServerDiagLite | Collect a diagnostics package and open a local result view | Yes |
 
 ## ServerDiagLite
 
-ServerDiagLite sammelt ein ZIP unter `C:\Temp` mit:
+ServerDiagLite creates a ZIP package under `C:\Temp` with:
 
-- automatischer Ersteinschaetzung
-- lokaler Ergebnisanzeige nach der Datensammlung
-- automatisch geoeffnetem Ergebnisfenster mit Status und naechsten Schritten
-- HTML-Report
-- Manifest
-- System- und Hardwaredaten
-- Storage- und Volume-Status
-- Netzwerkadapter, IP-Konfiguration und DNS
-- Power/Wake-Informationen
-- begrenzte System/Application-Eventauswertung
-- Minidumps, falls vorhanden
+- local findings summary with timestamps
+- automatically opened result window with status and next steps
+- HTML report
+- manifest
+- system and hardware data
+- storage and volume status
+- network adapters, IP configuration, and DNS
+- power and wake information
+- limited System/Application event analysis
+- minidumps, if present
 
-Das Tool ist in der aktuellen Version bewusst `collect-only`: Es sammelt Diagnoseinformationen, bewertet typische Muster lokal, oeffnet danach eine Ergebnisansicht und nimmt keine Reparaturen am System vor.
+The current version is intentionally `collect-only`: it collects diagnostics data, evaluates typical patterns locally, opens a result view, and does not repair or modify the system.
 
-## Datenschutz
+## Privacy
 
-Diagnosepakete koennen IP-Adressen, Benutzernamen, Computernamen, Seriennummern, MAC-Adressen, Pfade und Geraete-IDs enthalten.
+Diagnostics packages can contain IP addresses, user names, computer names, serial numbers, MAC addresses, paths, and device IDs.
 
-Der Privacy-Modus ist ein Hilfsfilter. Pruefe Pakete vor oeffentlicher Weitergabe trotzdem manuell.
+Privacy mode is a helper filter. Still review packages manually before public sharing.
 
-## Entwicklung
+## Development
 
-Struktur:
+Structure:
 
 ```text
 bootstrap.ps1
@@ -57,8 +56,8 @@ scripts/
     test-powershell.yml
 ```
 
-Neue Tools werden als PowerShell-Script unter `scripts/` abgelegt und in `manifest.json` eingetragen.
+New tools are added as PowerShell scripts under `scripts/` and registered in `manifest.json`.
 
-## Hinweise
+## Notes
 
-Das Ausfuehren von Remote-Code per `irm ... | iex` ist bequem, setzt aber Vertrauen in dieses Repository voraus. Fuer produktive Nutzung sind getaggte Releases oder signierte Scripte empfehlenswert.
+Running remote code through `irm ... | iex` is convenient, but it requires trust in this repository. For production use, tagged releases or signed scripts are recommended.

@@ -3,13 +3,13 @@
   "name": "PC-Diagnose",
   "repository": "F1R3Burnout/PC-Diagnose",
   "defaultBranch": "main",
-  "description": "PowerShell-basierte Diagnose- und Wartungstools fuer Windows-PCs und kleine Server.",
+  "description": "PowerShell-based diagnostics and maintenance tools for Windows PCs and small servers.",
   "tools": [
     {
       "id": "serverdiag",
       "name": "ServerDiagLite",
       "category": "diagnostics",
-      "description": "Sammelt ein schlankes Diagnosepaket und öffnet danach eine lokale Ergebnisansicht.",
+      "description": "Collects a lightweight diagnostics package and opens a local result view.",
       "path": "scripts/diagnostics/ServerDiagLite.ps1",
       "kind": "powershell",
       "requiresAdmin": true,
@@ -19,19 +19,19 @@
           "name": "DaysBack",
           "type": "int",
           "default": 30,
-          "description": "Zeitraum fuer Event-Auswertungen."
+          "description": "Event analysis range in days."
         },
         {
           "name": "OutputRoot",
           "type": "string",
           "default": "C:\\Temp",
-          "description": "Zielordner fuer Diagnosepakete."
+          "description": "Output folder for diagnostics packages."
         },
         {
           "name": "PrivacyMode",
           "type": "switch",
           "default": false,
-          "description": "Maskiert typische sensible Werte vor dem ZIP."
+          "description": "Masks typical sensitive values before ZIP creation."
         }
       ]
     }
