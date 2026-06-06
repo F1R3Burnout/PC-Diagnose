@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v12 Desktop Network and Remote Checks"
+$ToolVersion = "Lite v13 Result Timeline"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -190,8 +190,8 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-PCDiagLite v12 Desktop Network and Remote Checks
-================================================
+PCDiagLite v13 Result Timeline
+==============================
 
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
@@ -457,6 +457,27 @@ function Add-Finding {
         Evidence       = $Evidence
         Recommendation = $Recommendation
         Details        = $DetailText
+    }
+
+    if ($EventRows.Count -gt 0 -and $null -ne $script:TimelineRows) {
+        foreach ($eventRow in @($EventRows | Sort-Object { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } | Select-Object -First 40)) {
+            $message = [string]$eventRow.Message
+            if ($message.Length -gt 220) {
+                $message = $message.Substring(0, 220) + "..."
+            }
+
+            $eventDate = ConvertTo-DateTimeSafe ([string]$eventRow.TimeCreated)
+            $script:TimelineRows += [PSCustomObject]@{
+                TimeCreated      = Format-FindingDate $eventDate
+                Severity         = $Severity
+                Category         = $Category
+                FindingTitle     = $Title
+                ProviderName     = [string]$eventRow.ProviderName
+                EventId          = [string]$eventRow.Id
+                LevelDisplayName = [string]$eventRow.LevelDisplayName
+                Message          = $message
+            }
+        }
     }
 }
 
@@ -977,8 +998,59 @@ function New-AreaGroupedFindingCardsHtml {
     return $sb.ToString()
 }
 
+function New-TimelineHtml {
+    param(
+        [object[]]$Rows,
+        [int]$MaxRows = 90
+    )
+
+    $items = @($Rows |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.TimeCreated) } |
+        Sort-Object @{ Expression = { ConvertTo-DateTimeSafe $_.TimeCreated }; Descending = $false } |
+        Select-Object -First $MaxRows)
+
+    if ($items.Count -eq 0) {
+        return '<div class="timeline-empty">No timestamped Event Viewer records were captured for the current findings.</div>'
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('<div class="timeline-list">')
+
+    $lastDate = ""
+    foreach ($item in $items) {
+        $dt = ConvertTo-DateTimeSafe $item.TimeCreated
+        $dateLabel = if ($dt) { $dt.ToString("yyyy-MM-dd") } else { "Unknown date" }
+        $timeLabel = if ($dt) { $dt.ToString("HH:mm:ss") } else { [string]$item.TimeCreated }
+        if ($dateLabel -ne $lastDate) {
+            [void]$sb.AppendLine("<div class=""timeline-date"">$(Escape-Html $dateLabel)</div>")
+            $lastDate = $dateLabel
+        }
+
+        $class = Get-SeverityCssClass $item.Severity
+        $source = [string]$item.ProviderName
+        $eventId = [string]$item.EventId
+        $sourceText = if ([string]::IsNullOrWhiteSpace($eventId)) { $source } else { "$source $eventId" }
+
+        [void]$sb.AppendLine("<article class=""timeline-item $class"">")
+        [void]$sb.AppendLine('  <div class="timeline-marker"></div>')
+        [void]$sb.AppendLine('  <div class="timeline-card">')
+        [void]$sb.AppendLine("    <div class=""timeline-time"">$(Escape-Html $timeLabel)</div>")
+        [void]$sb.AppendLine("    <div class=""timeline-title"">$(Escape-Html $item.FindingTitle)</div>")
+        [void]$sb.AppendLine("    <div class=""timeline-source"">$(Escape-Html $sourceText) | $(Escape-Html $item.Category) | $(Escape-Html $item.Severity)</div>")
+        if (-not [string]::IsNullOrWhiteSpace([string]$item.Message)) {
+            [void]$sb.AppendLine("    <p>$(Escape-Html $item.Message)</p>")
+        }
+        [void]$sb.AppendLine('  </div>')
+        [void]$sb.AppendLine('</article>')
+    }
+
+    [void]$sb.AppendLine('</div>')
+    return $sb.ToString()
+}
+
 function Write-InitialFindingsReport {
     $findings = @()
+    $script:TimelineRows = @()
     $currentObservation = "Current state at collection time: $(Format-FindingDate (Get-Date))"
 
     $targetedPath = Join-Path $Dirs.Events "System_Targeted_Stability_Storage_Network_${DaysBack}d.csv"
@@ -1321,6 +1393,13 @@ function Write-InitialFindingsReport {
     $findingsPath = Join-Path $Dirs.Runtime "Findings.csv"
     $findings | Export-Csv $findingsPath -NoTypeInformation -Encoding UTF8
 
+    $timelinePath = Join-Path $Dirs.Runtime "TimelineEvents.csv"
+    $timelineRows = @($script:TimelineRows |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.TimeCreated) } |
+        Sort-Object @{ Expression = { ConvertTo-DateTimeSafe $_.TimeCreated }; Descending = $true }, Severity, Category, FindingTitle |
+        Select-Object -First 140)
+    $timelineRows | Export-Csv $timelinePath -NoTypeInformation -Encoding UTF8
+
     $analysisStatus = Get-AnalysisStatus $findings
     $sortedFindings = @(Get-SortedFindings $findings)
     $topFindings = @($sortedFindings | Select-Object -First 5)
@@ -1502,6 +1581,8 @@ function Write-ResultWindowReport {
     $statusClass = Get-StatusCssClass $analysisStatus.Label
     $areaGroupedFindingsHtml = New-AreaGroupedFindingCardsHtml -Findings $sortedFindings -MaxRowsPerArea 80
     $allFindingsHtml = New-HtmlTable $sortedFindings @("Severity","Category","Title","TimeContext","Evidence","Recommendation") 80
+    $timelineRows = Read-CsvSafe (Join-Path $Dirs.Runtime "TimelineEvents.csv")
+    $timelineHtml = New-TimelineHtml -Rows $timelineRows -MaxRows 90
     $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Will be created after completion." } else { $PackagePath }
     $reportPath = "00_Report.html"
     $textReportPath = "00_Findings_Summary.txt"
@@ -1517,7 +1598,7 @@ function Write-ResultWindowReport {
     * { box-sizing:border-box; }
     body { margin:0; font-family: Segoe UI, Arial, sans-serif; color:var(--ink); background:#ffffff; }
     header { padding:30px 34px 22px; border-bottom:1px solid var(--line); background:#f8fafc; }
-    main { padding:24px 34px 42px; max-width:1180px; }
+    main { padding:24px 34px 42px; max-width:1760px; margin:0 auto; }
     h1 { margin:0 0 8px; font-size:28px; font-weight:700; letter-spacing:0; }
     h2 { margin:30px 0 12px; font-size:19px; }
     h3 { margin:8px 0 9px; font-size:16px; }
@@ -1538,6 +1619,8 @@ function Write-ResultWindowReport {
     .summary-item { border:1px solid var(--line); border-radius:8px; padding:12px 13px; background:#fff; }
     .summary-item .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
     .summary-item .value { margin-top:5px; font-size:16px; font-weight:650; }
+    .result-layout { display:grid; grid-template-columns:minmax(0, 1fr) minmax(340px, 410px); gap:24px; align-items:start; }
+    .findings-panel { min-width:0; }
     .area-list { display:grid; gap:14px; }
     .area-group { border:1px solid var(--line); border-radius:8px; background:#fff; border-left-width:6px; overflow:hidden; }
     .area-summary { list-style:none; cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 16px; background:#fff; }
@@ -1568,7 +1651,30 @@ function Write-ResultWindowReport {
     .finding-details h4 { margin:0 0 9px; font-size:14px; }
     .event-details { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; background:#101827; color:#e5e7eb; padding:13px; border-radius:8px; font-size:12px; line-height:1.45; max-height:620px; overflow:auto; }
     .paths { border:1px solid var(--line); border-radius:8px; padding:12px 13px; background:#f8fafc; overflow-wrap:anywhere; }
+    .timeline-panel { position:sticky; top:18px; max-height:calc(100vh - 36px); overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fff; padding:16px 16px 18px; }
+    .timeline-panel h2 { margin:0 0 4px; }
+    .timeline-subtitle { color:var(--muted); font-size:12px; margin:0 0 16px; }
+    .timeline-list { position:relative; padding-left:18px; }
+    .timeline-list::before { content:""; position:absolute; left:6px; top:4px; bottom:4px; width:2px; background:#cbd5e1; }
+    .timeline-date { position:relative; z-index:1; display:inline-block; margin:10px 0 8px -18px; padding:4px 9px; border-radius:999px; background:#eef2f7; color:#334155; font-size:12px; font-weight:700; }
+    .timeline-item { position:relative; display:grid; grid-template-columns:16px minmax(0,1fr); gap:10px; margin:0 0 12px; }
+    .timeline-marker { position:relative; z-index:2; width:12px; height:12px; margin-top:8px; border:3px solid #fff; border-radius:50%; background:var(--info); box-shadow:0 0 0 2px var(--info); }
+    .timeline-card { border:1px solid var(--line); border-radius:8px; padding:10px 11px; background:#fbfcfe; }
+    .timeline-time { color:#0f766e; font-size:12px; font-weight:750; }
+    .timeline-title { margin-top:3px; font-weight:750; font-size:13px; line-height:1.25; }
+    .timeline-source { margin-top:4px; color:var(--muted); font-size:11px; line-height:1.25; overflow-wrap:anywhere; }
+    .timeline-card p { margin:7px 0 0; color:#334155; font-size:12px; line-height:1.35; }
+    .timeline-empty { color:var(--muted); border:1px dashed var(--line); border-radius:8px; padding:12px; background:#f8fafc; font-size:13px; }
+    .timeline-item.sev-critical .timeline-marker { background:var(--bad); box-shadow:0 0 0 2px var(--bad); }
+    .timeline-item.sev-high .timeline-marker { background:var(--high); box-shadow:0 0 0 2px var(--high); }
+    .timeline-item.sev-medium .timeline-marker { background:var(--warn); box-shadow:0 0 0 2px var(--warn); }
+    .timeline-item.sev-info .timeline-marker { background:var(--info); box-shadow:0 0 0 2px var(--info); }
     .muted { color:var(--muted); }
+    @media (max-width:1100px) {
+      main { padding:18px 18px 34px; }
+      .result-layout { grid-template-columns:1fr; }
+      .timeline-panel { position:static; max-height:none; }
+    }
   </style>
 </head>
 <body>
@@ -1587,17 +1693,26 @@ function Write-ResultWindowReport {
     </div>
   </header>
   <main>
-    <h2>Findings by Primary Area</h2>
-    $areaGroupedFindingsHtml
+    <div class="result-layout">
+      <section class="findings-panel">
+        <h2>Findings by Primary Area</h2>
+        $areaGroupedFindingsHtml
 
-    <h2>All Findings</h2>
-    $allFindingsHtml
+        <h2>All Findings</h2>
+        $allFindingsHtml
 
-    <h2>Files</h2>
-    <div class="paths">
-      <p><strong>ZIP package:</strong> $(Escape-Html $packageDisplay)</p>
-      <p><strong>Detailed report inside the package:</strong> $(Escape-Html $reportPath)</p>
-      <p><strong>Text findings summary inside the package:</strong> $(Escape-Html $textReportPath)</p>
+        <h2>Files</h2>
+        <div class="paths">
+          <p><strong>ZIP package:</strong> $(Escape-Html $packageDisplay)</p>
+          <p><strong>Detailed report inside the package:</strong> $(Escape-Html $reportPath)</p>
+          <p><strong>Text findings summary inside the package:</strong> $(Escape-Html $textReportPath)</p>
+        </div>
+      </section>
+      <aside class="timeline-panel">
+        <h2>Timeline</h2>
+        <p class="timeline-subtitle">Oldest to newest captured Event Viewer records connected to findings.</p>
+        $timelineHtml
+      </aside>
     </div>
   </main>
 </body>
