@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v14 Clickable Result Timeline"
+$ToolVersion = "Lite v15 Category Colors"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -190,8 +190,8 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-PCDiagLite v14 Clickable Result Timeline
-========================================
+PCDiagLite v15 Category Colors
+==============================
 
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
@@ -892,6 +892,24 @@ function Get-SeverityCssClass {
     }
 }
 
+function Get-CategoryCssClass {
+    param([AllowNull()][string]$Category)
+
+    switch ([string]$Category) {
+        "Network"       { return "cat-network" }
+        "Storage"       { return "cat-storage" }
+        "Hardware"      { return "cat-hardware" }
+        "Crash"         { return "cat-crash" }
+        "Stability"     { return "cat-stability" }
+        "Services"      { return "cat-services" }
+        "Drivers"       { return "cat-drivers" }
+        "Windows Stack" { return "cat-windows" }
+        "Remote Access" { return "cat-remote" }
+        "Collection"    { return "cat-collection" }
+        default         { return "cat-general" }
+    }
+}
+
 function New-FindingCardsHtml {
     param(
         [object[]]$Findings,
@@ -908,16 +926,17 @@ function New-FindingCardsHtml {
 
     foreach ($finding in $items) {
         $class = Get-SeverityCssClass $finding.Severity
+        $categoryClass = Get-CategoryCssClass $finding.Category
         $detailsText = [string]$finding.Details
         if ([string]::IsNullOrWhiteSpace($detailsText)) {
             $detailsText = "No further details were captured for this finding."
         }
 
-        [void]$sb.AppendLine("<details class=""finding $class"">")
+        [void]$sb.AppendLine("<details class=""finding $class $categoryClass"">")
         [void]$sb.AppendLine('  <summary>')
         [void]$sb.AppendLine('    <div class="finding-head">')
         [void]$sb.AppendLine("      <span class=""badge"">$(Escape-Html $finding.Severity)</span>")
-        [void]$sb.AppendLine("      <span class=""category"">$(Escape-Html $finding.Category)</span>")
+        [void]$sb.AppendLine("      <span class=""category $categoryClass"">$(Escape-Html $finding.Category)</span>")
         [void]$sb.AppendLine('    </div>')
         [void]$sb.AppendLine("    <h3>$(Escape-Html $finding.Title)</h3>")
         [void]$sb.AppendLine("    <p><strong>Time:</strong> $(Escape-Html $finding.TimeContext)</p>")
@@ -971,6 +990,7 @@ function New-AreaGroupedFindingCardsHtml {
         $areaFindings = @(Get-SortedFindings $group.Findings | Select-Object -First $MaxRowsPerArea)
         $topSeverity = @($areaFindings | Sort-Object @{ Expression = { Get-FindingSeverityRank $_.Severity }; Descending = $true } | Select-Object -First 1)[0].Severity
         $class = Get-SeverityCssClass $topSeverity
+        $categoryClass = Get-CategoryCssClass $group.Area
         $severitySb = New-Object System.Text.StringBuilder
         foreach ($severity in @("Critical", "High", "Medium", "Info")) {
             $severityFindings = @($areaFindings | Where-Object { $_.Severity -eq $severity })
@@ -982,7 +1002,7 @@ function New-AreaGroupedFindingCardsHtml {
             [void]$severitySb.AppendLine('</section>')
         }
 
-        [void]$sb.AppendLine("<details class=""area-group $class"" open>")
+        [void]$sb.AppendLine("<details class=""area-group $class $categoryClass"" open>")
         [void]$sb.AppendLine('  <summary class="area-summary">')
         [void]$sb.AppendLine('    <div>')
         [void]$sb.AppendLine("      <h3>$(Escape-Html $group.Area)</h3>")
@@ -1029,6 +1049,7 @@ function New-TimelineHtml {
         }
 
         $class = Get-SeverityCssClass $item.Severity
+        $categoryClass = Get-CategoryCssClass $item.Category
         $source = [string]$item.ProviderName
         $eventId = [string]$item.EventId
         $sourceText = if ([string]::IsNullOrWhiteSpace($eventId)) { $source } else { "$source $eventId" }
@@ -1037,7 +1058,7 @@ function New-TimelineHtml {
             $eventDetails = "No Event Viewer event details are available for this timeline entry."
         }
 
-        [void]$sb.AppendLine("<details class=""timeline-item $class"">")
+        [void]$sb.AppendLine("<details class=""timeline-item $class $categoryClass"">")
         [void]$sb.AppendLine('  <summary class="timeline-summary">')
         [void]$sb.AppendLine('    <div class="timeline-marker"></div>')
         [void]$sb.AppendLine('    <div class="timeline-card">')
@@ -1606,7 +1627,21 @@ function Write-ResultWindowReport {
   <meta charset="utf-8">
   <title>PCDiagLite Result</title>
   <style>
-    :root { color-scheme: light; --ink:#17202a; --muted:#607083; --line:#d7dee8; --soft:#f5f7fa; --ok:#0f766e; --warn:#a16207; --high:#b45309; --bad:#b42318; --info:#475569; }
+    :root {
+      color-scheme: light;
+      --ink:#17202a; --muted:#607083; --line:#d7dee8; --soft:#f5f7fa;
+      --ok:#0f766e; --warn:#a16207; --high:#b45309; --bad:#b42318; --info:#475569;
+      --network:#dbeafe; --network-line:#93c5fd; --network-ink:#1e3a8a;
+      --storage:#dcfce7; --storage-line:#86efac; --storage-ink:#166534;
+      --hardware:#f3e8ff; --hardware-line:#c4b5fd; --hardware-ink:#5b21b6;
+      --stability:#ffedd5; --stability-line:#fdba74; --stability-ink:#9a3412;
+      --services:#e0f2fe; --services-line:#7dd3fc; --services-ink:#075985;
+      --drivers:#ede9fe; --drivers-line:#a5b4fc; --drivers-ink:#3730a3;
+      --windows:#fef9c3; --windows-line:#fde68a; --windows-ink:#854d0e;
+      --remote:#ccfbf1; --remote-line:#5eead4; --remote-ink:#115e59;
+      --collection:#f1f5f9; --collection-line:#cbd5e1; --collection-ink:#334155;
+      --general:#f8fafc; --general-line:#cbd5e1; --general-ink:#334155;
+    }
     * { box-sizing:border-box; }
     body { margin:0; font-family: Segoe UI, Arial, sans-serif; color:var(--ink); background:#ffffff; }
     header { padding:30px 34px 22px; border-bottom:1px solid var(--line); background:#f8fafc; }
@@ -1631,7 +1666,7 @@ function Write-ResultWindowReport {
     .summary-item { border:1px solid var(--line); border-radius:8px; padding:12px 13px; background:#fff; }
     .summary-item .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
     .summary-item .value { margin-top:5px; font-size:16px; font-weight:650; }
-    .result-layout { display:grid; grid-template-columns:minmax(0, 1fr) minmax(340px, 410px); gap:24px; align-items:start; }
+    .result-layout { display:grid; grid-template-columns:minmax(0, 1fr) minmax(440px, 540px); gap:24px; align-items:start; }
     .findings-panel { min-width:0; }
     .area-list { display:grid; gap:14px; }
     .area-group { border:1px solid var(--line); border-radius:8px; background:#fff; border-left-width:6px; overflow:hidden; }
@@ -1649,15 +1684,15 @@ function Write-ResultWindowReport {
     .finding { border:1px solid var(--line); border-radius:8px; padding:0; background:#fff; border-left-width:5px; overflow:hidden; }
     .finding > summary { list-style:none; cursor:pointer; padding:14px 15px; }
     .finding > summary::-webkit-details-marker { display:none; }
-    .finding > summary:hover { background:#f8fafc; }
-    .finding[open] > summary { border-bottom:1px solid var(--line); background:#f8fafc; }
+    .finding > summary:hover { background:rgba(248,250,252,.78); }
+    .finding[open] > summary { border-bottom:1px solid var(--line); background:rgba(248,250,252,.9); }
     .sev-critical { border-left-color:var(--bad); }
     .sev-high { border-left-color:var(--high); }
     .sev-medium { border-left-color:var(--warn); }
     .sev-info { border-left-color:var(--info); }
     .finding-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     .badge { display:inline-block; min-width:72px; text-align:center; border-radius:999px; padding:3px 9px; background:#eef2f7; font-size:12px; font-weight:650; }
-    .category { color:var(--muted); font-size:13px; }
+    .category { display:inline-block; border-radius:999px; padding:3px 9px; font-size:12px; font-weight:650; color:var(--muted); background:#f1f5f9; }
     .open-hint { margin-top:9px; color:var(--muted); font-size:12px; }
     .finding-details { padding:14px 15px 16px; background:#fbfcfe; }
     .finding-details h4 { margin:0 0 9px; font-size:14px; }
@@ -1674,8 +1709,8 @@ function Write-ResultWindowReport {
     .timeline-summary::-webkit-details-marker { display:none; }
     .timeline-marker { position:relative; z-index:2; width:12px; height:12px; margin-top:8px; border:3px solid #fff; border-radius:50%; background:var(--info); box-shadow:0 0 0 2px var(--info); }
     .timeline-card { border:1px solid var(--line); border-radius:8px; padding:10px 11px; background:#fbfcfe; }
-    .timeline-summary:hover .timeline-card { background:#f8fafc; }
-    .timeline-item[open] .timeline-card { background:#f8fafc; border-bottom-left-radius:0; border-bottom-right-radius:0; }
+    .timeline-summary:hover .timeline-card { filter:saturate(1.04); }
+    .timeline-item[open] .timeline-card { border-bottom-left-radius:0; border-bottom-right-radius:0; }
     .timeline-time { color:#0f766e; font-size:12px; font-weight:750; }
     .timeline-title { margin-top:3px; font-weight:750; font-size:13px; line-height:1.25; }
     .timeline-source { margin-top:4px; color:var(--muted); font-size:11px; line-height:1.25; overflow-wrap:anywhere; }
@@ -1688,6 +1723,25 @@ function Write-ResultWindowReport {
     .timeline-item.sev-high .timeline-marker { background:var(--high); box-shadow:0 0 0 2px var(--high); }
     .timeline-item.sev-medium .timeline-marker { background:var(--warn); box-shadow:0 0 0 2px var(--warn); }
     .timeline-item.sev-info .timeline-marker { background:var(--info); box-shadow:0 0 0 2px var(--info); }
+    .cat-network { --cat-bg:var(--network); --cat-line:var(--network-line); --cat-ink:var(--network-ink); }
+    .cat-storage { --cat-bg:var(--storage); --cat-line:var(--storage-line); --cat-ink:var(--storage-ink); }
+    .cat-hardware { --cat-bg:var(--hardware); --cat-line:var(--hardware-line); --cat-ink:var(--hardware-ink); }
+    .cat-crash, .cat-stability { --cat-bg:var(--stability); --cat-line:var(--stability-line); --cat-ink:var(--stability-ink); }
+    .cat-services { --cat-bg:var(--services); --cat-line:var(--services-line); --cat-ink:var(--services-ink); }
+    .cat-drivers { --cat-bg:var(--drivers); --cat-line:var(--drivers-line); --cat-ink:var(--drivers-ink); }
+    .cat-windows { --cat-bg:var(--windows); --cat-line:var(--windows-line); --cat-ink:var(--windows-ink); }
+    .cat-remote { --cat-bg:var(--remote); --cat-line:var(--remote-line); --cat-ink:var(--remote-ink); }
+    .cat-collection, .cat-general { --cat-bg:var(--general); --cat-line:var(--general-line); --cat-ink:var(--general-ink); }
+    .area-group[class*="cat-"], .finding[class*="cat-"] { border-color:var(--cat-line); border-left-color:var(--cat-ink); }
+    .area-group[class*="cat-"] > .area-summary { background:linear-gradient(90deg, var(--cat-bg), #fff 72%); }
+    .area-group[class*="cat-"][open] > .area-summary { background:linear-gradient(90deg, var(--cat-bg), #f8fafc 72%); }
+    .finding[class*="cat-"] > summary { background:linear-gradient(90deg, color-mix(in srgb, var(--cat-bg) 46%, #fff), #fff 76%); }
+    .finding[class*="cat-"] .category,
+    .timeline-item[class*="cat-"] .timeline-source { color:var(--cat-ink); }
+    .category[class*="cat-"] { background:var(--cat-bg); color:var(--cat-ink); }
+    .timeline-item[class*="cat-"] .timeline-card { background:linear-gradient(90deg, color-mix(in srgb, var(--cat-bg) 58%, #fff), #fff 86%); border-color:var(--cat-line); }
+    .timeline-item[class*="cat-"] .timeline-detail { border-color:var(--cat-line); background:color-mix(in srgb, var(--cat-bg) 24%, #fff); }
+    .timeline-item[class*="cat-"] .timeline-time { color:var(--cat-ink); }
     .muted { color:var(--muted); }
     @media (max-width:1100px) {
       main { padding:18px 18px 34px; }
