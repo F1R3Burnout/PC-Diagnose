@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v18 Latest Timeline Events"
+$ToolVersion = "Lite v19 Newest Timeline First"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1041,7 +1041,8 @@ function New-TimelineHtml {
     )
 
     $timestampedCount = @($Rows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.TimeCreated) }).Count
-    $items = @(Select-LatestTimestampedRows -Rows $Rows -MaxRows $MaxRows)
+    $items = @(Select-LatestTimestampedRows -Rows $Rows -MaxRows $MaxRows |
+        Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) }; Descending = $true })
 
     if ($items.Count -eq 0) {
         return '<div class="timeline-empty">No timestamped Event Viewer records were captured for the current findings.</div>'
@@ -1817,7 +1818,7 @@ function Write-ResultWindowReport {
       </section>
       <aside class="timeline-panel">
         <h2>Timeline</h2>
-        <p class="timeline-subtitle">Newest captured Event Viewer records connected to findings, shown oldest to newest.</p>
+        <p class="timeline-subtitle">Newest captured Event Viewer records connected to findings, shown newest first.</p>
         $timelineHtml
       </aside>
     </div>
