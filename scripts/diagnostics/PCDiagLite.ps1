@@ -190,7 +190,7 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-PCDiagLite v15 Category Colors
+$ToolName $ToolVersion
 ==============================
 
 Computer:      $env:COMPUTERNAME
