@@ -4,10 +4,7 @@
 
 .DESCRIPTION
     Intended entry point:
-        irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/bootstrap.ps1 | iex
-
-    Direct tool call:
-        & ([scriptblock]::Create((irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/bootstrap.ps1))) -Tool serverdiag
+        irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/r | iex
 #>
 
 [CmdletBinding()]
@@ -29,7 +26,7 @@ $ProgressPreference = "SilentlyContinue"
 $RepoOwner = "F1R3Burnout"
 $RepoName = "PC-Diagnose"
 $RawBase = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$Branch"
-$BootstrapUrl = "$RawBase/b"
+$BootstrapUrl = "$RawBase/r"
 $ManifestUrl = "$RawBase/manifest.json"
 
 try {
@@ -66,7 +63,7 @@ function Start-ElevatedBootstrap {
 
     $command = @(
         "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
-        "& ([scriptblock]::Create((Invoke-RestMethod -UseBasicParsing -Uri $(Quote-ForSingleQuotedPowerShell $BootstrapUrl)))) " +
+        "& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -Uri $(Quote-ForSingleQuotedPowerShell $BootstrapUrl)).Content.TrimStart([char]0xFEFF))) " +
             "-Tool $(Quote-ForSingleQuotedPowerShell $SelectedTool) " +
             "-Branch $(Quote-ForSingleQuotedPowerShell $Branch) " +
             "-OutputRoot $(Quote-ForSingleQuotedPowerShell $OutputRoot) " +

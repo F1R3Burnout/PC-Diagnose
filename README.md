@@ -4,35 +4,13 @@ PowerShell-basierte Diagnose- und Wartungstools fuer Windows-PCs und kleine Serv
 
 ## Schnellstart
 
-Kurzbefehl fuer ServerDiagLite:
-
-```powershell
-irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/i|iex
-```
-
 Menue starten:
 
 ```powershell
 irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/r|iex
 ```
 
-ServerDiagLite direkt starten:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/bootstrap.ps1))) -Tool serverdiag
-```
-
-Mit Privacy-Modus:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/bootstrap.ps1))) -Tool serverdiag -PrivacyMode
-```
-
-Mit kurzem Event-Zeitraum:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/bootstrap.ps1))) -Tool serverdiag -DaysBack 7
-```
+Das Menue liest `manifest.json` und zeigt alle eingetragenen Tools zur Auswahl an.
 
 ## Aktuelle Tools
 
@@ -59,12 +37,6 @@ Das Tool ist in der aktuellen Version bewusst `collect-only`: Es sammelt Diagnos
 ## Datenschutz
 
 Diagnosepakete koennen IP-Adressen, Benutzernamen, Computernamen, Seriennummern, MAC-Adressen, Pfade und Geraete-IDs enthalten.
-
-Nutze fuer Weitergabe an Dritte nach Moeglichkeit:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/main/bootstrap.ps1))) -Tool serverdiag -PrivacyMode
-```
 
 Der Privacy-Modus ist ein Hilfsfilter. Pruefe Pakete vor oeffentlicher Weitergabe trotzdem manuell.
 
