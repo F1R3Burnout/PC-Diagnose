@@ -11,7 +11,7 @@
     - begrenzte Event-Anzahl
     - Timeout für potenziell hängende Teilschritte
     - deutlich mehr Fortschrittsanzeige mit Laufzeit
-    - erster automatischer Befundbericht
+    - erster automatischer Befundbericht mit lokaler Ergebnisanzeige
     - optionaler Privacy-Modus zum Maskieren typischer personenbezogener/gerätebezogener Werte
     - HTML-Report und Manifest für Support-Übergaben
 
@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "ServerDiagLite"
-$ToolVersion = "Lite v5 Befund/Privacy/HTML"
+$ToolVersion = "Lite v6 Lokale Analyse"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -195,7 +195,7 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-ServerDiagLite v5 Befund/Privacy/HTML
+ServerDiagLite v6 Lokale Analyse
 =========================
 
 Computer:      $env:COMPUTERNAME
@@ -461,6 +461,155 @@ function Test-EventLevelAtMost {
     }
 }
 
+function Get-FindingSeverityRank {
+    param([AllowNull()][string]$Severity)
+
+    switch ([string]$Severity) {
+        "Kritisch" { return 4 }
+        "Hoch"     { return 3 }
+        "Mittel"   { return 2 }
+        "Info"     { return 1 }
+        default    { return 0 }
+    }
+}
+
+function Get-FindingSeverityColor {
+    param([AllowNull()][string]$Severity)
+
+    switch ([string]$Severity) {
+        "Kritisch" { return "Red" }
+        "Hoch"     { return "Yellow" }
+        "Mittel"   { return "DarkYellow" }
+        "Info"     { return "Gray" }
+        default    { return "Gray" }
+    }
+}
+
+function Get-SortedFindings {
+    param([object[]]$Findings)
+
+    $sortProperties = @(
+        @{ Expression = { Get-FindingSeverityRank $_.Severity }; Descending = $true }
+        "Category"
+        "Title"
+    )
+
+    return @($Findings | Sort-Object -Property $sortProperties)
+}
+
+function Get-FindingCountsText {
+    param([object[]]$Findings)
+
+    $parts = @()
+    foreach ($severity in @("Kritisch", "Hoch", "Mittel", "Info")) {
+        $count = @($Findings | Where-Object { $_.Severity -eq $severity }).Count
+        if ($count -gt 0) {
+            $parts += ("{0}: {1}" -f $severity, $count)
+        }
+    }
+
+    if ($parts.Count -eq 0) { return "keine" }
+    return ($parts -join ", ")
+}
+
+function Get-PrimaryCategoriesText {
+    param([object[]]$Findings)
+
+    $important = @($Findings | Where-Object { (Get-FindingSeverityRank $_.Severity) -ge 2 })
+    if ($important.Count -eq 0) {
+        return "Keine stark auffälligen Kategorien."
+    }
+
+    $groups = @($important | Group-Object Category)
+    $groups = @($groups | Sort-Object -Property @{ Expression = "Count"; Descending = $true } | Select-Object -First 3)
+    return (($groups | ForEach-Object { "{0} ({1})" -f $_.Name, $_.Count }) -join ", ")
+}
+
+function Get-AnalysisStatus {
+    param([object[]]$Findings)
+
+    $maxRank = 0
+    foreach ($finding in @($Findings)) {
+        $rank = Get-FindingSeverityRank $finding.Severity
+        if ($rank -gt $maxRank) {
+            $maxRank = $rank
+        }
+    }
+
+    if ($maxRank -ge 4) {
+        return [PSCustomObject]@{
+            Label = "Kritisch"
+            Color = "Red"
+            Text  = "Es gibt mindestens einen kritischen Hinweis. Absturz-/Hardware-/Storage-Spuren zuerst prüfen."
+        }
+    }
+
+    if ($maxRank -eq 3) {
+        return [PSCustomObject]@{
+            Label = "Auffällig"
+            Color = "Yellow"
+            Text  = "Es gibt deutliche Auffälligkeiten. Die wichtigsten Treffer sollten zeitnah eingeordnet werden."
+        }
+    }
+
+    if ($maxRank -eq 2) {
+        return [PSCustomObject]@{
+            Label = "Warnung"
+            Color = "DarkYellow"
+            Text  = "Es gibt mittlere Auffälligkeiten, aber keine klare Hochrisiko-Signatur in der Heuristik."
+        }
+    }
+
+    return [PSCustomObject]@{
+        Label = "Unauffällig"
+        Color = "Green"
+        Text  = "Die lokale Heuristik hat keine klaren kritischen Muster in den Kerndaten gefunden."
+    }
+}
+
+function Write-AnalysisResultLine {
+    param(
+        [AllowNull()][string]$Text,
+        [string]$Color = "Gray"
+    )
+
+    $line = if ($null -eq $Text) { "" } else { [string]$Text }
+    Write-Host $line -ForegroundColor $Color
+    try {
+        $line | Out-File $RuntimeLog -Encoding UTF8 -Append
+    } catch {}
+}
+
+function Show-LocalAnalysisResult {
+    param([object[]]$Findings)
+
+    $items = @(Get-SortedFindings @($Findings))
+    $status = Get-AnalysisStatus $items
+    $topFindings = @($items | Select-Object -First 5)
+
+    Write-AnalysisResultLine "" "Gray"
+    Write-AnalysisResultLine "Lokales Analyse-Ergebnis" "Cyan"
+    Write-AnalysisResultLine "========================" "Cyan"
+    Write-AnalysisResultLine ("Gesamtstatus: {0}" -f $status.Label) $status.Color
+    Write-AnalysisResultLine ("Kurzfazit: {0}" -f $status.Text) "Gray"
+    Write-AnalysisResultLine ("Findings: {0}" -f (Get-FindingCountsText $items)) "Gray"
+    Write-AnalysisResultLine ("Hauptbereiche: {0}" -f (Get-PrimaryCategoriesText $items)) "Gray"
+
+    if ($topFindings.Count -gt 0) {
+        Write-AnalysisResultLine "" "Gray"
+        Write-AnalysisResultLine "Wichtigste Treffer:" "Cyan"
+        foreach ($finding in $topFindings) {
+            $color = Get-FindingSeverityColor $finding.Severity
+            Write-AnalysisResultLine ("- [{0}] {1}: {2}" -f $finding.Severity, $finding.Category, $finding.Title) $color
+            Write-AnalysisResultLine ("  Hinweis: {0}" -f $finding.Evidence) "Gray"
+            Write-AnalysisResultLine ("  Naechster Schritt: {0}" -f $finding.Recommendation) "Gray"
+        }
+    }
+
+    Write-AnalysisResultLine "" "Gray"
+    Write-AnalysisResultLine "Details im ZIP: 00_Befund_Ersteinschaetzung.txt und 00_Report.html" "Cyan"
+}
+
 function ConvertTo-NumberSafe {
     param([AllowNull()][string]$Value)
 
@@ -661,6 +810,10 @@ function Write-InitialFindingsReport {
     $findingsPath = Join-Path $Dirs.Runtime "Befund_Findings.csv"
     $findings | Export-Csv $findingsPath -NoTypeInformation -Encoding UTF8
 
+    $analysisStatus = Get-AnalysisStatus $findings
+    $sortedFindings = @(Get-SortedFindings $findings)
+    $topFindings = @($sortedFindings | Select-Object -First 5)
+
     $reportPath = Join-Path $Dirs.Root "00_Befund_Ersteinschaetzung.txt"
 @"
 Automatische Ersteinschaetzung
@@ -676,9 +829,28 @@ Wichtig:
 Diese Datei ist eine heuristische Ersteinschaetzung auf Basis der gesammelten Daten.
 Sie ersetzt keine manuelle Analyse, priorisiert aber die wahrscheinlich relevanten Spuren.
 
+Gesamtstatus:  $($analysisStatus.Label)
+Kurzfazit:     $($analysisStatus.Text)
+Findings:      $(Get-FindingCountsText $findings)
+Hauptbereiche: $(Get-PrimaryCategoriesText $findings)
+
 "@ | Out-File $reportPath -Encoding UTF8
 
-    foreach ($finding in $findings) {
+    if ($topFindings.Count -gt 0) {
+        "Wichtigste Treffer:`r`n" | Out-File $reportPath -Encoding UTF8 -Append
+        foreach ($finding in $topFindings) {
+@"
+[$($finding.Severity)] $($finding.Category): $($finding.Title)
+Hinweis:        $($finding.Evidence)
+Naechster Schritt: $($finding.Recommendation)
+
+"@ | Out-File $reportPath -Encoding UTF8 -Append
+        }
+    }
+
+    "Alle Treffer:`r`n" | Out-File $reportPath -Encoding UTF8 -Append
+
+    foreach ($finding in $sortedFindings) {
 @"
 [$($finding.Severity)] $($finding.Category): $($finding.Title)
 Hinweis:        $($finding.Evidence)
@@ -703,6 +875,7 @@ Dateien fuer die manuelle Pruefung:
 function Write-HtmlReport {
     $htmlPath = Join-Path $Dirs.Root "00_Report.html"
     $findings = Read-CsvSafe (Join-Path $Dirs.Runtime "Befund_Findings.csv")
+    $analysisStatus = Get-AnalysisStatus $findings
     $disks = Read-CsvSafe (Join-Path $Dirs.Storage "Disks.csv")
     $volumes = Read-CsvSafe (Join-Path $Dirs.Storage "Volumes.csv")
     $netAdapters = Read-CsvSafe (Join-Path $Dirs.Network "NetAdapters.csv")
@@ -743,6 +916,7 @@ function Write-HtmlReport {
     .stat { border:1px solid var(--line); border-radius:8px; padding:14px; background:#fff; }
     .label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
     .value { margin-top:6px; font-size:18px; font-weight:650; }
+    .summary { margin:18px 0 6px; padding:12px 14px; border-left:4px solid var(--accent); background:#f8fafc; }
     table { border-collapse:collapse; width:100%; font-size:12px; table-layout:auto; }
     th, td { border:1px solid var(--line); padding:7px 8px; vertical-align:top; text-align:left; overflow-wrap:anywhere; }
     th { background:var(--soft); font-weight:650; }
@@ -756,6 +930,7 @@ function Write-HtmlReport {
     <div class="meta">$ToolVersion | Erstellt: $(Escape-Html (Get-Date)) | Zeitraum: letzte $DaysBack Tage | PrivacyMode: $([bool]$PrivacyMode)</div>
     <div class="grid">
       <div class="stat"><div class="label">Computer</div><div class="value">$(Escape-Html $env:COMPUTERNAME)</div></div>
+      <div class="stat"><div class="label">Gesamtstatus</div><div class="value">$(Escape-Html $analysisStatus.Label)</div></div>
       <div class="stat"><div class="label">Findings</div><div class="value">$($findings.Count)</div></div>
       <div class="stat"><div class="label">Disks</div><div class="value">$($disks.Count)</div></div>
       <div class="stat"><div class="label">Netzwerkadapter</div><div class="value">$($netAdapters.Count)</div></div>
@@ -763,6 +938,12 @@ function Write-HtmlReport {
   </header>
   <main>
     <h2>Automatische Ersteinschaetzung</h2>
+    <div class="summary">
+      <p><strong>Gesamtstatus:</strong> $(Escape-Html $analysisStatus.Label)</p>
+      <p><strong>Kurzfazit:</strong> $(Escape-Html $analysisStatus.Text)</p>
+      <p><strong>Findings:</strong> $(Escape-Html (Get-FindingCountsText $findings))</p>
+      <p><strong>Hauptbereiche:</strong> $(Escape-Html (Get-PrimaryCategoriesText $findings))</p>
+    </div>
     $findingsHtml
     <h2>System</h2>
     <pre>$(Escape-Html $osText)</pre>
@@ -1369,12 +1550,17 @@ Invoke-ChildPowerShellWithTimeout -Name "Kurzüberblick erstellen" -ScriptConten
 # Ab hier werden die gesammelten Rohdaten in eine erste Priorisierung und menschenlesbare Übersicht
 # überführt. Der Privacy-Modus läuft ganz am Ende vor dem ZIP, damit auch Report und Manifest maskiert werden.
 
+$script:LatestFindings = @()
 Invoke-Step "Automatische Ersteinschaetzung erstellen" {
-    Write-InitialFindingsReport | Out-Null
+    $script:LatestFindings = @(Write-InitialFindingsReport)
 }
 
 Invoke-Step "HTML-Report erstellen" {
     Write-HtmlReport
+}
+
+Invoke-Step "Lokales Analyse-Ergebnis anzeigen" {
+    Show-LocalAnalysisResult -Findings $script:LatestFindings
 }
 
 Write-ProgressLine "Finalisiere Transcript vor Manifest/ZIP..." "Gray"
