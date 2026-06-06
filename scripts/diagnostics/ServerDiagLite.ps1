@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "ServerDiagLite"
-$ToolVersion = "Lite v9 Network Exhaustion Analysis"
+$ToolVersion = "Lite v10 Grouped Result View"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -190,8 +190,8 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-ServerDiagLite v9 Network Exhaustion Analysis
-=============================================
+ServerDiagLite v10 Grouped Result View
+======================================
 
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
@@ -911,6 +911,70 @@ function New-FindingCardsHtml {
     return $sb.ToString()
 }
 
+function New-AreaGroupedFindingCardsHtml {
+    param(
+        [object[]]$Findings,
+        [int]$MaxRowsPerArea = 80
+    )
+
+    $items = @(Get-SortedFindings $Findings)
+    if ($items.Count -eq 0) {
+        return '<p class="muted">No findings available.</p>'
+    }
+
+    $groups = @($items | Group-Object Category | ForEach-Object {
+        $areaFindings = @($_.Group)
+        [PSCustomObject]@{
+            Area = $_.Name
+            Count = $areaFindings.Count
+            MaxSeverityRank = (@($areaFindings | ForEach-Object { Get-FindingSeverityRank $_.Severity } | Measure-Object -Maximum).Maximum)
+            SeverityText = Get-FindingCountsText $areaFindings
+            Findings = $areaFindings
+        }
+    })
+    $areaSortProperties = @(
+        @{ Expression = { $_.MaxSeverityRank }; Descending = $true }
+        @{ Expression = { $_.Count }; Descending = $true }
+        "Area"
+    )
+    $groups = @($groups | Sort-Object -Property $areaSortProperties)
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('<div class="area-list">')
+
+    foreach ($group in $groups) {
+        $areaFindings = @(Get-SortedFindings $group.Findings | Select-Object -First $MaxRowsPerArea)
+        $topSeverity = @($areaFindings | Sort-Object @{ Expression = { Get-FindingSeverityRank $_.Severity }; Descending = $true } | Select-Object -First 1)[0].Severity
+        $class = Get-SeverityCssClass $topSeverity
+        $severitySb = New-Object System.Text.StringBuilder
+        foreach ($severity in @("Critical", "High", "Medium", "Info")) {
+            $severityFindings = @($areaFindings | Where-Object { $_.Severity -eq $severity })
+            if ($severityFindings.Count -eq 0) { continue }
+
+            [void]$severitySb.AppendLine('<section class="severity-section">')
+            [void]$severitySb.AppendLine("  <h4>$(Escape-Html $severity) Findings</h4>")
+            [void]$severitySb.AppendLine((New-FindingCardsHtml -Findings $severityFindings -MaxRows $MaxRowsPerArea))
+            [void]$severitySb.AppendLine('</section>')
+        }
+
+        [void]$sb.AppendLine("<details class=""area-group $class"" open>")
+        [void]$sb.AppendLine('  <summary class="area-summary">')
+        [void]$sb.AppendLine('    <div>')
+        [void]$sb.AppendLine("      <h3>$(Escape-Html $group.Area)</h3>")
+        [void]$sb.AppendLine("      <p>$(Escape-Html $group.SeverityText)</p>")
+        [void]$sb.AppendLine('    </div>')
+        [void]$sb.AppendLine("    <span class=""area-count"">$($group.Count)</span>")
+        [void]$sb.AppendLine('  </summary>')
+        [void]$sb.AppendLine('  <div class="area-content">')
+        [void]$sb.AppendLine($severitySb.ToString())
+        [void]$sb.AppendLine('  </div>')
+        [void]$sb.AppendLine('</details>')
+    }
+
+    [void]$sb.AppendLine('</div>')
+    return $sb.ToString()
+}
+
 function Write-InitialFindingsReport {
     $findings = @()
     $currentObservation = "Observed during this run: $(Format-FindingDate (Get-Date))"
@@ -1307,7 +1371,7 @@ function Write-ResultWindowReport {
     $sortedFindings = @(Get-SortedFindings $findings)
     $analysisStatus = Get-AnalysisStatus $sortedFindings
     $statusClass = Get-StatusCssClass $analysisStatus.Label
-    $findingCardsHtml = New-FindingCardsHtml -Findings $sortedFindings -MaxRows 80
+    $areaGroupedFindingsHtml = New-AreaGroupedFindingCardsHtml -Findings $sortedFindings -MaxRowsPerArea 80
     $allFindingsHtml = New-HtmlTable $sortedFindings @("Severity","Category","Title","TimeContext","Evidence","Recommendation") 80
     $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Will be created after completion." } else { $PackagePath }
     $reportPath = "00_Report.html"
@@ -1345,6 +1409,18 @@ function Write-ResultWindowReport {
     .summary-item { border:1px solid var(--line); border-radius:8px; padding:12px 13px; background:#fff; }
     .summary-item .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
     .summary-item .value { margin-top:5px; font-size:16px; font-weight:650; }
+    .area-list { display:grid; gap:14px; }
+    .area-group { border:1px solid var(--line); border-radius:8px; background:#fff; border-left-width:6px; overflow:hidden; }
+    .area-summary { list-style:none; cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 16px; background:#fff; }
+    .area-summary::-webkit-details-marker { display:none; }
+    .area-summary:hover { background:#f8fafc; }
+    .area-group[open] > .area-summary { border-bottom:1px solid var(--line); background:#f8fafc; }
+    .area-summary h3 { margin:0 0 5px; font-size:18px; }
+    .area-summary p { margin:0; color:var(--muted); font-size:13px; }
+    .area-count { min-width:34px; height:34px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; background:#eef2f7; font-weight:700; }
+    .area-content { padding:14px; }
+    .severity-section + .severity-section { margin-top:16px; }
+    .severity-section > h4 { margin:0 0 9px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
     .finding-list { display:grid; gap:12px; }
     .finding { border:1px solid var(--line); border-radius:8px; padding:0; background:#fff; border-left-width:5px; overflow:hidden; }
     .finding > summary { list-style:none; cursor:pointer; padding:14px 15px; }
@@ -1382,8 +1458,8 @@ function Write-ResultWindowReport {
     </div>
   </header>
   <main>
-    <h2>Findings and Next Steps</h2>
-    $findingCardsHtml
+    <h2>Findings by Primary Area</h2>
+    $areaGroupedFindingsHtml
 
     <h2>All Findings</h2>
     $allFindingsHtml

@@ -23,7 +23,7 @@ The menu reads `manifest.json` and shows all registered tools.
 ServerDiagLite creates a ZIP package under `C:\Temp` with:
 
 - local findings summary with timestamps
-- automatically opened result window with status, next steps, and clickable Event Viewer details
+- automatically opened result window grouped by primary area, with status, next steps, and clickable Event Viewer details
 - HTML report
 - manifest
 - system and hardware data
