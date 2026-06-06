@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Creates a small, robust diagnostics package for an unstable Windows PC or headless server.
+    Creates a small, robust diagnostics package for an unstable Windows desktop PC.
 
 .DESCRIPTION
     This version is intentionally analysis-friendly:
@@ -53,8 +53,8 @@ param(
 # Admin rights are helpful or required for event logs, driver information, powercfg, and minidumps.
 
 $ErrorActionPreference = "Continue"
-$ToolName = "ServerDiagLite"
-$ToolVersion = "Lite v10 Grouped Result View"
+$ToolName = "PCDiagLite"
+$ToolVersion = "Lite v11 Desktop PC Analysis"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -70,7 +70,7 @@ if (-not (Test-IsAdmin)) {
 
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $ComputerSafe = ($env:COMPUTERNAME -replace '[\\/:*?"<>| ]', '_')
-$Out = Join-Path $OutputRoot "ServerDiagLite_${ComputerSafe}_${Timestamp}"
+$Out = Join-Path $OutputRoot "PCDiagLite_${ComputerSafe}_${Timestamp}"
 
 $Dirs = @{
     Root      = $Out
@@ -134,12 +134,12 @@ function Stop-OldDiagnosticProcesses {
     try { $currentScript = [string]$PSCommandPath } catch {}
 
     $patterns = @(
-        "Collect-ServerDiagnostics_OneClick",
-        "Collect-ServerDiagnostics_Lite",
-        "Collect-ServerDiagnostics-Lite",
-        "Collect-ServerDiagnostics-OneClick",
-        "ServerDiagLite_",
-        "ServerDiag_"
+        "Collect-PCDiagnostics_OneClick",
+        "Collect-PCDiagnostics_Lite",
+        "Collect-PCDiagnostics-Lite",
+        "Collect-PCDiagnostics-OneClick",
+        "PCDiagLite_",
+        "PCDiag_"
     )
 
     $processNames = @("powershell.exe", "pwsh.exe", "wevtutil.exe")
@@ -190,8 +190,8 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-ServerDiagLite v10 Grouped Result View
-======================================
+PCDiagLite v11 Desktop PC Analysis
+==================================
 
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
@@ -438,7 +438,7 @@ function Add-Finding {
     }
 
     if ([string]::IsNullOrWhiteSpace($TimeContext)) {
-        $TimeContext = "Observed during this run: $(Format-FindingDate (Get-Date))"
+        $TimeContext = "Current state at collection time: $(Format-FindingDate (Get-Date))"
     }
 
     if ([string]::IsNullOrWhiteSpace($DetailText)) {
@@ -977,7 +977,7 @@ function New-AreaGroupedFindingCardsHtml {
 
 function Write-InitialFindingsReport {
     $findings = @()
-    $currentObservation = "Observed during this run: $(Format-FindingDate (Get-Date))"
+    $currentObservation = "Current state at collection time: $(Format-FindingDate (Get-Date))"
 
     $targetedPath = Join-Path $Dirs.Events "System_Targeted_Stability_Storage_Network_${DaysBack}d.csv"
     $systemPath = Join-Path $Dirs.Events "System_WARN_ERR_CRIT_${DaysBack}d.csv"
@@ -997,7 +997,7 @@ function Write-InitialFindingsReport {
 
     $kernelPowerEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Kernel-Power' -and $_.Id -eq '41' })
     if ($kernelPowerEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Stability" "Unexpected restart or power loss" "$($kernelPowerEvents.Count) Kernel-Power 41 event(s)." "Check PSU/UPS, thermals, BIOS/UEFI, RAM/CPU, and the events immediately before the restart." -EventRows $kernelPowerEvents
+        Add-Finding ([ref]$findings) "High" "Stability" "Unexpected restart or power loss" "$($kernelPowerEvents.Count) Kernel-Power 41 event(s)." "Check power delivery, thermals, BIOS/UEFI, RAM/CPU stability, and the events immediately before the restart." -EventRows $kernelPowerEvents
     }
 
     $unexpectedShutdownEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and ($_.Id -eq '6008' -or ($_.ProviderName -match 'EventLog' -and $_.Id -eq '6008')) })
@@ -1007,7 +1007,9 @@ function Write-InitialFindingsReport {
 
     $wheaEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'WHEA-Logger' })
     if ($wheaEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Hardware" "WHEA hardware error events found" "$($wheaEvents.Count) WHEA-Logger event(s)." "Check CPU/RAM/PCIe/NVMe/GPU and BIOS/UEFI. Repeated WHEA events often point to hardware, firmware, or overclocking/XMP instability." -EventRows $wheaEvents
+        $wheaSeverity = if ($wheaEvents.Count -eq 1 -and [string]$wheaEvents[0].Id -eq '17') { "Medium" } else { "High" }
+        $wheaTitle = if ($wheaSeverity -eq "Medium") { "Single corrected WHEA / PCIe hardware error" } else { "WHEA hardware error events found" }
+        Add-Finding ([ref]$findings) $wheaSeverity "Hardware" $wheaTitle "$($wheaEvents.Count) WHEA-Logger event(s)." "Identify the affected device from the Event Viewer details. Update BIOS/UEFI, chipset, storage, GPU, and device drivers; reduce unstable overclocking or XMP/EXPO if the events repeat." -EventRows $wheaEvents
     }
 
     $storageEvents = @($allEvents | Where-Object {
@@ -1021,12 +1023,39 @@ function Write-InitialFindingsReport {
         Add-Finding ([ref]$findings) "High" "Storage" "Storage or file system events found" "$($storageEvents.Count) matching Disk/Ntfs/Storage/volmgr event(s) or typical storage event ID(s)." "Check SMART/vendor diagnostics, cables/backplane, controller/NVMe/SATA drivers, and file system health. For NTFS 55/98 or Disk 51/153, verify backups soon." -EventRows $storageEvents
     }
 
-    $networkEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Tcpip|Dhcp|DNS Client Events|NDIS|Netwtw|e1|e2f|e2fnexpress' })
+    $usbStorageEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        (
+            ($_.ProviderName -match 'UASPStor|USBSTOR|disk|storahci|stornvme') -and
+            ($_.Id -in @('51','129','153','154','157'))
+        )
+    })
+    if ($usbStorageEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Storage" "USB/UASP or disk I/O resets detected" "$($usbStorageEvents.Count) storage reset or retried-I/O event(s)." "If Windows, games, apps, or active data are on USB-attached storage, check the enclosure, cable, port, and power. Prefer an internal NVMe/SATA SSD for the Windows system drive on a desktop PC." -EventRows $usbStorageEvents
+    }
+
+    $networkEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Tcpip|Dhcp|DNS Client Events|NDIS|NetBT|Netwtw|e1|e2f|e2fnexpress' })
     $tcpPortExhaustionEvents = @($allEvents | Where-Object { $_.ProviderName -match 'Tcpip' -and $_.Id -eq '4231' })
     $udpPortExhaustionEvents = @($allEvents | Where-Object { $_.ProviderName -match 'Tcpip' -and $_.Id -eq '4266' })
     $portExhaustionEvents = @($tcpPortExhaustionEvents + $udpPortExhaustionEvents)
     if ($portExhaustionEvents.Count -gt 0) {
         Add-Finding ([ref]$findings) "High" "Network" "TCP/UDP dynamic port exhaustion detected" "$($tcpPortExhaustionEvents.Count) TCP exhaustion event(s) with ID 4231 and $($udpPortExhaustionEvents.Count) UDP exhaustion event(s) with ID 4266." "Review 04_Network\\TCP_Endpoints_By_Process_Top30.csv and 04_Network\\UDP_Endpoints_By_Process_Top30.csv. Identify the process holding many endpoints and check for connection leaks, stuck updates, sync tools, containers, browsers, or remote-access software." -EventRows $portExhaustionEvents
+    }
+
+    $nameConflictEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'NetBT' -and $_.Id -eq '4321' })
+    if ($nameConflictEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Network" "Network computer name conflict detected" "$($nameConflictEvents.Count) NetBT 4321 event(s)." "Make sure this PC has a unique computer name on the network. Check cloned Windows installations, stale DHCP/DNS records, and other PCs using the same NetBIOS name." -EventRows $nameConflictEvents
+    }
+
+    $dnsTimeEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        (
+            ($_.ProviderName -match 'DNS Client Events|Time-Service|Microsoft-Windows-Time-Service|NtpClient') -or
+            ($_.Message -match 'NtpClient|time provider|time service|DNS|name resolution|could not resolve|No such host')
+        )
+    })
+    if ($dnsTimeEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Medium" "Network" "DNS or time synchronization failures found" "$($dnsTimeEvents.Count) matching DNS/time event(s)." "Review DNS servers, DHCP options, local firewall/VPN behavior, and Windows time settings. Time and DNS problems can break updates, logons, certificates, and remote tools." -EventRows $dnsTimeEvents
     }
 
     if ($networkEvents.Count -gt 0) {
@@ -1047,7 +1076,7 @@ function Write-InitialFindingsReport {
     }
     if ($endpointTriggers.Count -gt 0) {
         $summaryText = (($endpointSummary | ForEach-Object { "$($_.Protocol): total=$($_.TotalEndpoints), topPID=$($_.TopProcessPID), topCount=$($_.TopProcessCount)" }) -join "; ")
-        Add-Finding ([ref]$findings) "Medium" "Network" "High current TCP/UDP endpoint usage" $summaryText "Open the endpoint top lists and inspect the top process names. A high endpoint count can explain intermittent DNS, update, remote access, or Tailscale connectivity issues even when Windows is still running." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $endpointRows -Title "Current TCP/UDP endpoint counts by process")
+        Add-Finding ([ref]$findings) "Medium" "Network" "High current TCP/UDP endpoint usage" $summaryText "Open the endpoint top lists and inspect the top process names. A high endpoint count can explain intermittent DNS, update, browser, sync, VPN, launcher, or remote-access problems even when Windows is still running." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $endpointRows -Title "Current TCP/UDP endpoint counts by process")
     }
 
     $powerRows = Read-CsvSafe (Join-Path $Dirs.Network "NetAdapterPowerManagement.csv")
@@ -1066,7 +1095,7 @@ function Write-InitialFindingsReport {
         $nicDetails = @()
         if ($riskyPowerRows.Count -gt 0) { $nicDetails += (New-ObjectDetailsText -Rows $riskyPowerRows -Title "Power management rows to review") }
         if ($riskyAdvancedRows.Count -gt 0) { $nicDetails += (New-ObjectDetailsText -Rows $riskyAdvancedRows -Title "Advanced NIC properties to review") }
-        Add-Finding ([ref]$findings) "Medium" "Network" "Server-unfriendly NIC power or offload settings detected" "$($riskyPowerRows.Count) power management row(s) and $($riskyAdvancedRows.Count) advanced NIC setting row(s) should be reviewed." "For a headless server, consider disabling Energy Efficient Ethernet, reduce-speed-on-power-down, ARP/NS offload, and Wake on Pattern while keeping Wake on Magic Packet if needed." -TimeContext $currentObservation -DetailText ($nicDetails -join "`r`n`r`n")
+        Add-Finding ([ref]$findings) "Info" "Network" "NIC power or offload settings are enabled" "$($riskyPowerRows.Count) power management row(s) and $($riskyAdvancedRows.Count) advanced NIC setting row(s) should be reviewed only if network dropouts or wake issues are part of the complaint." "For normal desktop PCs these settings can be acceptable. Only change them if dropouts, wake-from-sleep problems, or remote-access issues correlate with the timestamps." -TimeContext $currentObservation -DetailText ($nicDetails -join "`r`n`r`n")
     }
 
     $serviceEvents = @($allEvents | Where-Object {
@@ -1076,6 +1105,17 @@ function Write-InitialFindingsReport {
     })
     if ($serviceEvents.Count -gt 0) {
         Add-Finding ([ref]$findings) "Medium" "Services" "Service errors or crashes found" "$($serviceEvents.Count) Service Control Manager event(s)." "Open the top events and check whether a specific service repeatedly hangs, crashes, or blocks startup." -EventRows $serviceEvents
+    }
+
+    $lowLevelDriverEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        (
+            ($_.ProviderName -match 'Service Control Manager' -and $_.Message -match 'inpout|WinRing|WinRing0|IOMap|OpenLibSys') -or
+            ($_.Message -match 'inpoutx64|WinRing0')
+        )
+    })
+    if ($lowLevelDriverEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Medium" "Drivers" "Low-level hardware access driver issue detected" "$($lowLevelDriverEvents.Count) event(s) mention inpout, WinRing0, or similar low-level drivers." "Identify the related monitoring, RGB, fan-control, benchmark, or overclocking tool. Update or remove it if the service repeatedly fails or if instability correlates with these timestamps." -EventRows $lowLevelDriverEvents
     }
 
     $windowsStackEvents = @($allEvents | Where-Object {
@@ -1090,6 +1130,17 @@ function Write-InitialFindingsReport {
     }
 
     $disks = Read-CsvSafe (Join-Path $Dirs.Storage "Disks.csv")
+    $driveMappings = Read-CsvSafe (Join-Path $Dirs.Storage "Disk_To_DriveLetter_Mapping.csv")
+    $systemDriveRows = @($driveMappings | Where-Object {
+        ([string]$_.DriveLetter).TrimEnd(':') -ieq 'C'
+    })
+    $usbSystemDriveRows = @($systemDriveRows | Where-Object {
+        "$($_.InterfaceType) $($_.DiskModel) $($_.Partition)" -match 'USB|UASP|Oracle|External|Portable|Enclosure'
+    })
+    if ($usbSystemDriveRows.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Storage" "Windows appears to run from USB or enclosure-style storage" "$($usbSystemDriveRows.Count) C: drive mapping row(s) look USB, UASP, portable, external, or enclosure-attached." "For a normal desktop PC, prefer an internal NVMe/SATA SSD for the Windows system drive. If this setup is intentional, check enclosure firmware, cable, USB port, and power stability before chasing Windows symptoms." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $usbSystemDriveRows -Title "System drive mapping rows")
+    }
+
     $badDisks = @($disks | Where-Object {
         (($_.HealthStatus) -and ($_.HealthStatus -notmatch 'Healthy|Unknown')) -or
         (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'Online|OK|No Media'))
@@ -1105,6 +1156,13 @@ function Write-InitialFindingsReport {
     })
     if ($badPhysical.Count -gt 0) {
         Add-Finding ([ref]$findings) "High" "Storage" "PhysicalDisk status is suspicious" "$($badPhysical.Count) PhysicalDisk row(s) look suspicious." "Review Storage Reliability Counter output and run the vendor diagnostic tool." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $badPhysical -Title "Affected PhysicalDisk rows")
+    }
+
+    $lowLevelDrivers = Read-CsvSafe (Join-Path $Dirs.System "LowLevel_Hardware_Access_Drivers.csv")
+    $lowLevelServices = Read-CsvSafe (Join-Path $Dirs.System "LowLevel_Hardware_Access_Services.csv")
+    $lowLevelRows = @(@($lowLevelDrivers) + @($lowLevelServices))
+    if ($lowLevelRows.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Info" "Drivers" "Low-level hardware access drivers are installed" "$($lowLevelRows.Count) driver/service row(s) mention inpout, WinRing0, IOMap, OpenLibSys, or similar components." "These components are often installed by monitoring, RGB, fan-control, benchmark, or overclocking tools. They are not automatically bad, but review them if crashes, hangs, or driver service events occur around the same timestamps." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $lowLevelRows -Title "Low-level driver and service rows")
     }
 
     $reliabilityRows = Read-CsvSafe (Join-Path $Dirs.Storage "StorageReliabilityCounter.csv")
@@ -1292,7 +1350,7 @@ function Write-HtmlReport {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>ServerDiagLite Report</title>
+  <title>PCDiagLite Report</title>
   <style>
     :root { color-scheme: light; --ink:#17202a; --muted:#5d6978; --line:#d8dde6; --soft:#f3f6fa; --accent:#0f766e; --warn:#a16207; --bad:#b42318; }
     body { margin:0; font-family: Segoe UI, Arial, sans-serif; color:var(--ink); background:#ffffff; }
@@ -1316,7 +1374,7 @@ function Write-HtmlReport {
 </head>
 <body>
   <header>
-    <h1>ServerDiagLite Report</h1>
+    <h1>PCDiagLite Report</h1>
     <div class="meta">$ToolVersion | Created: $(Escape-Html (Format-FindingDate (Get-Date))) | Event range: last $DaysBack days | PrivacyMode: $([bool]$PrivacyMode)</div>
     <div class="grid">
       <div class="stat"><div class="label">Computer</div><div class="value">$(Escape-Html $env:COMPUTERNAME)</div></div>
@@ -1382,7 +1440,7 @@ function Write-ResultWindowReport {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>ServerDiagLite Result</title>
+  <title>PCDiagLite Result</title>
   <style>
     :root { color-scheme: light; --ink:#17202a; --muted:#607083; --line:#d7dee8; --soft:#f5f7fa; --ok:#0f766e; --warn:#a16207; --high:#b45309; --bad:#b42318; --info:#475569; }
     * { box-sizing:border-box; }
@@ -1444,7 +1502,7 @@ function Write-ResultWindowReport {
 </head>
 <body>
   <header>
-    <h1>ServerDiagLite Result</h1>
+    <h1>PCDiagLite Result</h1>
     <div class="meta">$ToolVersion | Created: $(Escape-Html (Format-FindingDate (Get-Date))) | Computer: $(Escape-Html $env:COMPUTERNAME) | Event range: last $DaysBack days</div>
     <section class="status $statusClass">
       <div class="status-label">Overall status</div>
@@ -1670,7 +1728,7 @@ Invoke-ChildPowerShellWithTimeout -Name "OS, uptime, and basic hardware inventor
 # Section 4: Storage / disks
 # ==================================================================================================
 # Why:
-# Storage errors are a common cause of headless-server hangs.
+# Storage errors are a common cause of freezes, slowdowns, failed updates, and application hangs.
 # The key question is which disk number belongs to which physical drive and drive letter.
 
 $StorageInventoryScript = New-ChildScript @'
@@ -1754,8 +1812,8 @@ Invoke-ChildPowerShellWithTimeout -Name "Storage Reliability Counter" -ScriptCon
 # Section 5: Network
 # ==================================================================================================
 # Why:
-# If a headless server is unreachable, Windows may still be running while the NIC is stuck.
-# Therefore we collect driver version, link speed, IPs, offload settings, and power saving options.
+# Network issues on desktop PCs can look like broken updates, browser failures, VPN issues, or remote-tool drops.
+# Therefore we collect driver version, link speed, IPs, offload settings, endpoint counts, and power saving options.
 
 $NetworkInventoryScript = New-ChildScript @'
 Get-NetAdapter |
@@ -1781,14 +1839,14 @@ Get-DnsClientServerAddress |
     Export-Csv (Join-Path $Dirs.Network "DnsClientServerAddress.csv") -NoTypeInformation -Encoding UTF8
 
 function Resolve-EndpointProcess {
-    param([AllowNull()][int]$Pid)
+    param([AllowNull()][int]$ProcessIdValue)
 
-    if ($null -eq $Pid -or $Pid -le 0) {
+    if ($null -eq $ProcessIdValue -or $ProcessIdValue -le 0) {
         return [PSCustomObject]@{ ProcessName = ""; Path = "" }
     }
 
     try {
-        $process = Get-Process -Id $Pid -ErrorAction Stop
+        $process = Get-Process -Id $ProcessIdValue -ErrorAction Stop
         return [PSCustomObject]@{
             ProcessName = $process.ProcessName
             Path = try { $process.Path } catch { "" }
@@ -1804,11 +1862,11 @@ $tcpConnections |
     Sort-Object Count -Descending |
     Select-Object -First 30 |
     ForEach-Object {
-        $pid = [int]$_.Name
-        $processInfo = Resolve-EndpointProcess -Pid $pid
+        $owningProcessId = [int]$_.Name
+        $processInfo = Resolve-EndpointProcess -ProcessIdValue $owningProcessId
         $states = ($_.Group | Group-Object State | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; "
         [PSCustomObject]@{
-            PID = $pid
+            PID = $owningProcessId
             Count = $_.Count
             Process = $processInfo.ProcessName
             Path = $processInfo.Path
@@ -1823,10 +1881,10 @@ $udpEndpoints |
     Sort-Object Count -Descending |
     Select-Object -First 30 |
     ForEach-Object {
-        $pid = [int]$_.Name
-        $processInfo = Resolve-EndpointProcess -Pid $pid
+        $owningProcessId = [int]$_.Name
+        $processInfo = Resolve-EndpointProcess -ProcessIdValue $owningProcessId
         [PSCustomObject]@{
-            PID = $pid
+            PID = $owningProcessId
             Count = $_.Count
             Process = $processInfo.ProcessName
             Path = $processInfo.Path
@@ -1880,7 +1938,7 @@ Invoke-ExternalWithTimeout -Name "ipconfig /all" -Command "ipconfig /all" -Outpu
 # Section 6: Power, sleep, wake
 # ==================================================================================================
 # Why:
-# For a headless server, standby, hibernate, wake timers, and device wake state are relevant.
+# For desktop PCs, standby, hibernate, wake timers, and device wake state are relevant for sleep/resume issues.
 # Each powercfg command gets its own timeout so nothing can block the full run.
 
 Invoke-ExternalWithTimeout -Name "powercfg available sleepstates" -Command "powercfg /a" -OutputFile (Join-Path $Dirs.Power "powercfg_available_sleepstates.txt") -TimeoutSeconds 20
@@ -1894,7 +1952,7 @@ Invoke-ExternalWithTimeout -Name "powercfg wake armed devices" -Command "powercf
 # Section 7: Relevant drivers instead of a full driver list
 # ==================================================================================================
 # Why:
-# For this failure pattern, network, storage, disk, and system drivers are most relevant.
+# For desktop instability, network, storage, disk, system, and low-level utility drivers are most relevant.
 # A full driver list would make the package larger and harder to read.
 
 $DriverInventoryScript = New-ChildScript @'
@@ -1904,6 +1962,16 @@ Get-CimInstance Win32_PnPSignedDriver |
     Where-Object { $wantedClasses -contains $_.DeviceClass } |
     Select-Object DeviceName, DeviceClass, Manufacturer, DriverVersion, DriverDate, InfName, DeviceID |
     Export-Csv (Join-Path $Dirs.System "Relevant_Drivers_Network_Storage_System.csv") -NoTypeInformation -Encoding UTF8
+
+Get-CimInstance Win32_SystemDriver |
+    Where-Object { "$($_.Name) $($_.DisplayName) $($_.PathName)" -match 'inpout|WinRing|WinRing0|IOMap|OpenLibSys' } |
+    Select-Object Name, DisplayName, State, Status, StartMode, PathName |
+    Export-Csv (Join-Path $Dirs.System "LowLevel_Hardware_Access_Drivers.csv") -NoTypeInformation -Encoding UTF8
+
+Get-Service |
+    Where-Object { "$($_.Name) $($_.DisplayName)" -match 'inpout|WinRing|WinRing0|IOMap|OpenLibSys' } |
+    Select-Object Name, DisplayName, Status, StartType, ServiceType |
+    Export-Csv (Join-Path $Dirs.System "LowLevel_Hardware_Access_Services.csv") -NoTypeInformation -Encoding UTF8
 
 Get-HotFix |
     Sort-Object InstalledOn -Descending |
@@ -1987,10 +2055,10 @@ foreach (`$log in @('System','Application')) {
 
 `$targeted = `$rawSystem | Where-Object {
     (
-        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Netwtw|Service Control Manager|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment'
+        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|UASPStor|USBSTOR|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|NetBT|Netwtw|Time-Service|NtpClient|Service Control Manager|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment'
     ) -or
     (
-        `$_.Id -in 1,12,13,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,4231,4266,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034
+        `$_.Id -in 1,12,13,17,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,4231,4266,4321,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034
     )
 } | Select-Object -First `$MaxEvents
 

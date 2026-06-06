@@ -158,7 +158,7 @@ function Invoke-RemoteTool {
     Write-Host ""
 
     $toolArgs = @{}
-    if ($toolInfo.id -eq "serverdiag") {
+    if ($toolInfo.id -eq "pcdiag") {
         $toolArgs.OutputRoot = $OutputRoot
         $toolArgs.DaysBack = $DaysBack
         $toolArgs.MaxEvents = $MaxEvents

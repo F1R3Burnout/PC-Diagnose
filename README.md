@@ -1,6 +1,6 @@
 # PC-Diagnose
 
-PowerShell-based diagnostics and maintenance tools for Windows PCs and small servers.
+PowerShell-based diagnostics and maintenance tools for normal Windows desktop PCs.
 
 ## Quick Start
 
@@ -16,11 +16,11 @@ The menu reads `manifest.json` and shows all registered tools.
 
 | Tool ID | Name | Purpose | Admin |
 | --- | --- | --- | --- |
-| `serverdiag` | ServerDiagLite | Collect a diagnostics package and open a local result view | Yes |
+| `pcdiag` | PCDiagLite | Collect a diagnostics package and open a local result view | Yes |
 
-## ServerDiagLite
+## PCDiagLite
 
-ServerDiagLite creates a ZIP package under `C:\Temp` with:
+PCDiagLite creates a ZIP package under `C:\Temp` with:
 
 - local findings summary with timestamps
 - automatically opened result window grouped by primary area, with status, next steps, and clickable Event Viewer details
@@ -52,7 +52,7 @@ bootstrap.ps1
 manifest.json
 scripts/
   diagnostics/
-    ServerDiagLite.ps1
+    PCDiagLite.ps1
 .github/
   workflows/
     test-powershell.yml
