@@ -29,6 +29,8 @@ ServerDiagLite creates a ZIP package under `C:\Temp` with:
 - system and hardware data
 - storage and volume status
 - network adapters, IP configuration, and DNS
+- current TCP/UDP endpoint usage by process
+- dynamic port exhaustion detection
 - power and wake information
 - limited System/Application event analysis
 - minidumps, if present

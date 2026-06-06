@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "ServerDiagLite"
-$ToolVersion = "Lite v8 Clickable Event Details"
+$ToolVersion = "Lite v9 Network Exhaustion Analysis"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -190,8 +190,8 @@ Stop-OldDiagnosticProcesses
 
 
 @"
-ServerDiagLite v8 Clickable Event Details
-=========================================
+ServerDiagLite v9 Network Exhaustion Analysis
+=============================================
 
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
@@ -958,8 +958,51 @@ function Write-InitialFindingsReport {
     }
 
     $networkEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Tcpip|Dhcp|DNS Client Events|NDIS|Netwtw|e1|e2f|e2fnexpress' })
+    $tcpPortExhaustionEvents = @($allEvents | Where-Object { $_.ProviderName -match 'Tcpip' -and $_.Id -eq '4231' })
+    $udpPortExhaustionEvents = @($allEvents | Where-Object { $_.ProviderName -match 'Tcpip' -and $_.Id -eq '4266' })
+    $portExhaustionEvents = @($tcpPortExhaustionEvents + $udpPortExhaustionEvents)
+    if ($portExhaustionEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Network" "TCP/UDP dynamic port exhaustion detected" "$($tcpPortExhaustionEvents.Count) TCP exhaustion event(s) with ID 4231 and $($udpPortExhaustionEvents.Count) UDP exhaustion event(s) with ID 4266." "Review 04_Network\\TCP_Endpoints_By_Process_Top30.csv and 04_Network\\UDP_Endpoints_By_Process_Top30.csv. Identify the process holding many endpoints and check for connection leaks, stuck updates, sync tools, containers, browsers, or remote-access software." -EventRows $portExhaustionEvents
+    }
+
     if ($networkEvents.Count -gt 0) {
         Add-Finding ([ref]$findings) "Medium" "Network" "Network or NIC driver events found" "$($networkEvents.Count) matching network event(s)." "Check NIC driver/firmware, power saving settings, link speed, switch port, DHCP, and DNS." -EventRows $networkEvents
+    }
+
+    $endpointSummary = Read-CsvSafe (Join-Path $Dirs.Network "Endpoint_Summary.csv")
+    $tcpTop = Read-CsvSafe (Join-Path $Dirs.Network "TCP_Endpoints_By_Process_Top30.csv")
+    $udpTop = Read-CsvSafe (Join-Path $Dirs.Network "UDP_Endpoints_By_Process_Top30.csv")
+    $endpointRows = @($tcpTop + $udpTop)
+    $endpointTriggers = @()
+    foreach ($row in @($endpointSummary)) {
+        $total = ConvertTo-NumberSafe ([string]$row.TotalEndpoints)
+        $topCount = ConvertTo-NumberSafe ([string]$row.TopProcessCount)
+        if (($null -ne $total -and $total -ge 1000) -or ($null -ne $topCount -and $topCount -ge 300)) {
+            $endpointTriggers += $row
+        }
+    }
+    if ($endpointTriggers.Count -gt 0) {
+        $summaryText = (($endpointSummary | ForEach-Object { "$($_.Protocol): total=$($_.TotalEndpoints), topPID=$($_.TopProcessPID), topCount=$($_.TopProcessCount)" }) -join "; ")
+        Add-Finding ([ref]$findings) "Medium" "Network" "High current TCP/UDP endpoint usage" $summaryText "Open the endpoint top lists and inspect the top process names. A high endpoint count can explain intermittent DNS, update, remote access, or Tailscale connectivity issues even when Windows is still running." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $endpointRows -Title "Current TCP/UDP endpoint counts by process")
+    }
+
+    $powerRows = Read-CsvSafe (Join-Path $Dirs.Network "NetAdapterPowerManagement.csv")
+    $advancedRows = Read-CsvSafe (Join-Path $Dirs.Network "NetAdapterAdvancedProperties.csv")
+    $riskyPowerRows = @($powerRows | Where-Object {
+        $text = ($_.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join "; "
+        $text -match '(AllowComputerToTurnOffDevice|ArpOffload|NSOffload|WakeOnPattern).*(Enabled|True|Aktiviert|Ein)'
+    })
+    $riskyAdvancedRows = @($advancedRows | Where-Object {
+        $name = "$($_.DisplayName) $($_.RegistryKeyword)"
+        $value = [string]$_.DisplayValue
+        ($name -match 'Energy.?Efficient|Energieeffizient|Reduce.*Speed|Geschw.*Abschalten|Wake.*Pattern|Pattern.*Match|ARP.*Offload|NS.*Offload|Abladung') -and
+        ($value -match 'Enabled|Aktiviert|On|Ein|active|aktiv')
+    })
+    if (($riskyPowerRows.Count + $riskyAdvancedRows.Count) -gt 0) {
+        $nicDetails = @()
+        if ($riskyPowerRows.Count -gt 0) { $nicDetails += (New-ObjectDetailsText -Rows $riskyPowerRows -Title "Power management rows to review") }
+        if ($riskyAdvancedRows.Count -gt 0) { $nicDetails += (New-ObjectDetailsText -Rows $riskyAdvancedRows -Title "Advanced NIC properties to review") }
+        Add-Finding ([ref]$findings) "Medium" "Network" "Server-unfriendly NIC power or offload settings detected" "$($riskyPowerRows.Count) power management row(s) and $($riskyAdvancedRows.Count) advanced NIC setting row(s) should be reviewed." "For a headless server, consider disabling Energy Efficient Ethernet, reduce-speed-on-power-down, ARP/NS offload, and Wake on Pattern while keeping Wake on Magic Packet if needed." -TimeContext $currentObservation -DetailText ($nicDetails -join "`r`n`r`n")
     }
 
     $serviceEvents = @($allEvents | Where-Object {
@@ -969,6 +1012,17 @@ function Write-InitialFindingsReport {
     })
     if ($serviceEvents.Count -gt 0) {
         Add-Finding ([ref]$findings) "Medium" "Services" "Service errors or crashes found" "$($serviceEvents.Count) Service Control Manager event(s)." "Open the top events and check whether a specific service repeatedly hangs, crashes, or blocks startup." -EventRows $serviceEvents
+    }
+
+    $windowsStackEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        (
+            ($_.ProviderName -match 'WindowsUpdateClient|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment|Store|Bits-Client') -or
+            ($_.Id -in @('20','1002','1008','1023','5973','1000'))
+        )
+    })
+    if ($windowsStackEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Medium" "Windows Stack" "Windows update, app, or performance counter issues found" "$($windowsStackEvents.Count) matching WindowsUpdateClient, Perflib, Application Hang/Error, Store/AppX, or BITS event(s)." "After freeing disk space, run DISM /Online /Cleanup-Image /RestoreHealth and sfc /scannow, then review update and Store health again." -EventRows $windowsStackEvents
     }
 
     $disks = Read-CsvSafe (Join-Path $Dirs.Storage "Disks.csv")
@@ -989,13 +1043,38 @@ function Write-InitialFindingsReport {
         Add-Finding ([ref]$findings) "High" "Storage" "PhysicalDisk status is suspicious" "$($badPhysical.Count) PhysicalDisk row(s) look suspicious." "Review Storage Reliability Counter output and run the vendor diagnostic tool." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $badPhysical -Title "Affected PhysicalDisk rows")
     }
 
+    $reliabilityRows = Read-CsvSafe (Join-Path $Dirs.Storage "StorageReliabilityCounter.csv")
+    $hotStorageRows = @($reliabilityRows | Where-Object {
+        $currentTemp = ConvertTo-NumberSafe ([string]$_.Temperature)
+        $maxTemp = ConvertTo-NumberSafe ([string]$_.TemperatureMax)
+        ($null -ne $currentTemp -and $currentTemp -ge 70) -or
+        ($null -ne $maxTemp -and $maxTemp -ge 80)
+    })
+    if ($hotStorageRows.Count -gt 0) {
+        $tempSummary = (($hotStorageRows | Select-Object -First 5 | ForEach-Object {
+            "$($_.FriendlyName): current=$($_.Temperature) C, max=$($_.TemperatureMax) C"
+        }) -join "; ")
+        Add-Finding ([ref]$findings) "Medium" "Storage" "High current or historical storage temperature" $tempSummary "Improve airflow or add NVMe cooling if the maximum temperature is repeatedly high. Review StorageReliabilityCounter.csv after a few days of normal operation." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $hotStorageRows -Title "Storage reliability temperature rows")
+    }
+
     $volumes = Read-CsvSafe (Join-Path $Dirs.Storage "Volumes.csv")
     $badVolumes = @($volumes | Where-Object {
         (($_.HealthStatus) -and ($_.HealthStatus -notmatch 'Healthy|Unknown')) -or
         (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'OK|Online|No Media'))
     })
-    if ($badVolumes.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Medium" "Storage" "Volume status is not healthy" "$($badVolumes.Count) volume row(s) have HealthStatus or OperationalStatus other than Healthy/OK." "Review Volumes.csv. For Full Repair Needed, verify file system health and identify the affected partition." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $badVolumes -Title "Affected volume rows")
+    $efiLikeVolumes = @($badVolumes | Where-Object {
+        $sizeGb = ConvertTo-NumberSafe ([string]$_.SizeGB)
+        $_.FileSystem -match 'FAT32' -and $null -ne $sizeGb -and $sizeGb -lt 1
+    })
+    if ($efiLikeVolumes.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Medium" "Storage" "Small FAT32 system/EFI-like volume needs repair" "$($efiLikeVolumes.Count) small FAT32 volume row(s) report Warning or Full Repair Needed." "This is often the EFI system partition. Review Volumes.csv and Partitions.csv. If appropriate, mount the EFI partition deliberately and run a careful file-system check; avoid manual file changes on EFI." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $efiLikeVolumes -Title "EFI-like volume rows")
+    }
+    $badNonEfiVolumes = @($badVolumes | Where-Object {
+        $sizeGb = ConvertTo-NumberSafe ([string]$_.SizeGB)
+        -not ($_.FileSystem -match 'FAT32' -and $null -ne $sizeGb -and $sizeGb -lt 1)
+    })
+    if ($badNonEfiVolumes.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Medium" "Storage" "Volume status is not healthy" "$($badNonEfiVolumes.Count) volume row(s) have HealthStatus or OperationalStatus other than Healthy/OK." "Review Volumes.csv. For Full Repair Needed, verify file system health and identify the affected partition." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $badNonEfiVolumes -Title "Affected volume rows")
     }
 
     $lowVolumes = @($volumes | Where-Object {
@@ -1120,6 +1199,9 @@ function Write-HtmlReport {
     $disks = Read-CsvSafe (Join-Path $Dirs.Storage "Disks.csv")
     $volumes = Read-CsvSafe (Join-Path $Dirs.Storage "Volumes.csv")
     $netAdapters = Read-CsvSafe (Join-Path $Dirs.Network "NetAdapters.csv")
+    $endpointSummary = Read-CsvSafe (Join-Path $Dirs.Network "Endpoint_Summary.csv")
+    $tcpTop = Read-CsvSafe (Join-Path $Dirs.Network "TCP_Endpoints_By_Process_Top30.csv")
+    $udpTop = Read-CsvSafe (Join-Path $Dirs.Network "UDP_Endpoints_By_Process_Top30.csv")
     $topSystem = Read-CsvSafe (Join-Path $Dirs.Events "System_TopEvents_${DaysBack}d.csv")
     $targetedTop = Read-CsvSafe (Join-Path $Dirs.Events "System_Targeted_TopEvents_${DaysBack}d.csv")
     $dumps = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpFiles.csv")
@@ -1134,6 +1216,9 @@ function Write-HtmlReport {
     $diskHtml = New-HtmlTable $disks @("Number","FriendlyName","HealthStatus","OperationalStatus","BusType","SizeGB") 20
     $volumeHtml = New-HtmlTable $volumes @("DriveLetter","FileSystemLabel","FileSystem","HealthStatus","OperationalStatus","SizeGB","FreeGB","FreePercent") 30
     $netHtml = New-HtmlTable $netAdapters @("Name","InterfaceDescription","Status","LinkSpeed","DriverVersion","DriverDate") 30
+    $endpointSummaryHtml = New-HtmlTable $endpointSummary @("Protocol","TotalEndpoints","UniqueProcesses","TopProcessPID","TopProcessCount") 10
+    $tcpTopHtml = New-HtmlTable $tcpTop @("PID","Count","Process","Path","States") 30
+    $udpTopHtml = New-HtmlTable $udpTop @("PID","Count","Process","Path") 30
     $topHtml = New-HtmlTable $topSystem @("Count","Name") 25
     $targetedHtml = New-HtmlTable $targetedTop @("Count","Name") 25
     $dumpHtml = New-HtmlTable $dumps @("Type","Path","SizeMB","LastWriteTime") 10
@@ -1194,6 +1279,12 @@ function Write-HtmlReport {
     $volumeHtml
     <h2>Network Adapters</h2>
     $netHtml
+    <h2>Current TCP/UDP Endpoint Usage</h2>
+    $endpointSummaryHtml
+    <h2>Top TCP Endpoint Processes</h2>
+    $tcpTopHtml
+    <h2>Top UDP Endpoint Processes</h2>
+    $udpTopHtml
     <h2>Top System Events</h2>
     $topHtml
     <h2>Targeted Stability / Storage / Network Events</h2>
@@ -1612,6 +1703,97 @@ Get-NetIPAddress |
 
 Get-DnsClientServerAddress |
     Export-Csv (Join-Path $Dirs.Network "DnsClientServerAddress.csv") -NoTypeInformation -Encoding UTF8
+
+function Resolve-EndpointProcess {
+    param([AllowNull()][int]$Pid)
+
+    if ($null -eq $Pid -or $Pid -le 0) {
+        return [PSCustomObject]@{ ProcessName = ""; Path = "" }
+    }
+
+    try {
+        $process = Get-Process -Id $Pid -ErrorAction Stop
+        return [PSCustomObject]@{
+            ProcessName = $process.ProcessName
+            Path = try { $process.Path } catch { "" }
+        }
+    } catch {
+        return [PSCustomObject]@{ ProcessName = ""; Path = "" }
+    }
+}
+
+$tcpConnections = @(Get-NetTCPConnection -ErrorAction SilentlyContinue)
+$tcpConnections |
+    Group-Object OwningProcess |
+    Sort-Object Count -Descending |
+    Select-Object -First 30 |
+    ForEach-Object {
+        $pid = [int]$_.Name
+        $processInfo = Resolve-EndpointProcess -Pid $pid
+        $states = ($_.Group | Group-Object State | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; "
+        [PSCustomObject]@{
+            PID = $pid
+            Count = $_.Count
+            Process = $processInfo.ProcessName
+            Path = $processInfo.Path
+            States = $states
+        }
+    } |
+    Export-Csv (Join-Path $Dirs.Network "TCP_Endpoints_By_Process_Top30.csv") -NoTypeInformation -Encoding UTF8
+
+$udpEndpoints = @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue)
+$udpEndpoints |
+    Group-Object OwningProcess |
+    Sort-Object Count -Descending |
+    Select-Object -First 30 |
+    ForEach-Object {
+        $pid = [int]$_.Name
+        $processInfo = Resolve-EndpointProcess -Pid $pid
+        [PSCustomObject]@{
+            PID = $pid
+            Count = $_.Count
+            Process = $processInfo.ProcessName
+            Path = $processInfo.Path
+        }
+    } |
+    Export-Csv (Join-Path $Dirs.Network "UDP_Endpoints_By_Process_Top30.csv") -NoTypeInformation -Encoding UTF8
+
+$tcpTop = @($tcpConnections | Group-Object OwningProcess | Sort-Object Count -Descending | Select-Object -First 1)
+$udpTop = @($udpEndpoints | Group-Object OwningProcess | Sort-Object Count -Descending | Select-Object -First 1)
+@(
+    [PSCustomObject]@{
+        Protocol = "TCP"
+        TotalEndpoints = $tcpConnections.Count
+        UniqueProcesses = @($tcpConnections | Group-Object OwningProcess).Count
+        TopProcessPID = if ($tcpTop.Count -gt 0) { $tcpTop[0].Name } else { "" }
+        TopProcessCount = if ($tcpTop.Count -gt 0) { $tcpTop[0].Count } else { 0 }
+    }
+    [PSCustomObject]@{
+        Protocol = "UDP"
+        TotalEndpoints = $udpEndpoints.Count
+        UniqueProcesses = @($udpEndpoints | Group-Object OwningProcess).Count
+        TopProcessPID = if ($udpTop.Count -gt 0) { $udpTop[0].Name } else { "" }
+        TopProcessCount = if ($udpTop.Count -gt 0) { $udpTop[0].Count } else { 0 }
+    }
+) | Export-Csv (Join-Path $Dirs.Network "Endpoint_Summary.csv") -NoTypeInformation -Encoding UTF8
+
+@"
+IPv4 TCP dynamic port range
+===========================
+$(netsh int ipv4 show dynamicport tcp 2>&1)
+
+IPv4 UDP dynamic port range
+===========================
+$(netsh int ipv4 show dynamicport udp 2>&1)
+
+IPv6 TCP dynamic port range
+===========================
+$(netsh int ipv6 show dynamicport tcp 2>&1)
+
+IPv6 UDP dynamic port range
+===========================
+$(netsh int ipv6 show dynamicport udp 2>&1)
+"@ | Out-File (Join-Path $Dirs.Network "Dynamic_Port_Ranges.txt") -Encoding UTF8
 '@
 
 Invoke-ChildPowerShellWithTimeout -Name "Network adapters, IPs, and NIC settings" -ScriptContent $NetworkInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
@@ -1729,10 +1911,10 @@ foreach (`$log in @('System','Application')) {
 
 `$targeted = `$rawSystem | Where-Object {
     (
-        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Netwtw|Service Control Manager|Power-Troubleshooter|Kernel-General|Kernel-Boot'
+        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Netwtw|Service Control Manager|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment'
     ) -or
     (
-        `$_.Id -in 1,12,13,27,41,42,51,55,98,129,153,154,157,161,162,5007,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034,1001
+        `$_.Id -in 1,12,13,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,4231,4266,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034
     )
 } | Select-Object -First `$MaxEvents
 
@@ -1867,6 +2049,35 @@ Get-NetAdapter |
     Format-Table -AutoSize |
     Out-String -Width 240 |
     Out-File $summaryPath -Encoding UTF8 -Append
+
+$endpointSummary = Join-Path $Dirs.Network "Endpoint_Summary.csv"
+if (Test-Path $endpointSummary) {
+    "`r`nCurrent TCP/UDP endpoint summary:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
+    Import-Csv $endpointSummary |
+        Format-Table -AutoSize |
+        Out-String -Width 240 |
+        Out-File $summaryPath -Encoding UTF8 -Append
+}
+
+$tcpTop = Join-Path $Dirs.Network "TCP_Endpoints_By_Process_Top30.csv"
+if (Test-Path $tcpTop) {
+    "`r`nTop TCP endpoint processes:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
+    Import-Csv $tcpTop |
+        Select-Object -First 10 |
+        Format-Table -AutoSize |
+        Out-String -Width 300 |
+        Out-File $summaryPath -Encoding UTF8 -Append
+}
+
+$udpTop = Join-Path $Dirs.Network "UDP_Endpoints_By_Process_Top30.csv"
+if (Test-Path $udpTop) {
+    "`r`nTop UDP endpoint processes:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
+    Import-Csv $udpTop |
+        Select-Object -First 10 |
+        Format-Table -AutoSize |
+        Out-String -Width 300 |
+        Out-File $summaryPath -Encoding UTF8 -Append
+}
 
 $topSystem = Join-Path $Dirs.Events "System_TopEvents_${DaysBack}d.csv"
 if (Test-Path $topSystem) {
