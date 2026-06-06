@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v19 Newest Timeline First"
+$ToolVersion = "Lite v20 Minidump Analysis"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -412,6 +412,30 @@ function Read-CsvSafe {
     } catch {
         return @()
     }
+}
+
+function Get-DumpDebuggerPath {
+    $command = Get-Command "cdb.exe" -ErrorAction SilentlyContinue
+    if ($command) { return [string]$command.Source }
+
+    $candidateRoots = @(
+        "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64",
+        "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\arm64",
+        "${env:ProgramFiles}\Windows Kits\10\Debuggers\x64",
+        "${env:ProgramFiles}\Windows Kits\10\Debuggers\arm64"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+    foreach ($root in $candidateRoots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        try {
+            $match = Get-ChildItem -LiteralPath $root -Filter "cdb.exe" -Recurse -ErrorAction SilentlyContinue |
+                Sort-Object FullName |
+                Select-Object -First 1
+            if ($match) { return [string]$match.FullName }
+        } catch {}
+    }
+
+    return ""
 }
 
 function Add-Finding {
@@ -1415,7 +1439,33 @@ function Write-InitialFindingsReport {
     if ($copiedDumps.Count -gt 0) {
         $dumpEvents = @($copiedDumps | ForEach-Object { [PSCustomObject]@{ TimeCreated = $_.LastWriteTime } })
         $dumpTimeInfo = Get-EventTimeInfo -Rows $dumpEvents
-        Add-Finding ([ref]$findings) "High" "Crash" "Minidumps are included in the package" "$($copiedDumps.Count) minidump(s) copied." "Analyze minidumps with WinDbg/DebugDiag. The driver name and BugCheck code are often the fastest next clue." -TimeContext $dumpTimeInfo.TimeContext -FirstSeen $dumpTimeInfo.FirstSeen -LastSeen $dumpTimeInfo.LastSeen -DetailText (New-ObjectDetailsText -Rows $copiedDumps -Title "Captured dump files")
+        $dumpAnalysisRows = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpAnalysis.csv")
+        $completedAnalysisRows = @($dumpAnalysisRows | Where-Object { $_.Status -match 'Success|Warning|Timeout' -and -not [string]::IsNullOrWhiteSpace([string]$_.AnalysisFile) })
+        $suspectRows = @($dumpAnalysisRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.ProbablyCausedBy) -or -not [string]::IsNullOrWhiteSpace([string]$_.BugCheck) })
+
+        $evidence = "$($copiedDumps.Count) minidump(s) copied."
+        $recommendation = "Analyze minidumps with WinDbg/DebugDiag. The driver name and BugCheck code are often the fastest next clue."
+        $detailParts = @((New-ObjectDetailsText -Rows $copiedDumps -Title "Captured dump files"))
+
+        if ($dumpAnalysisRows.Count -gt 0) {
+            $evidence += " $($completedAnalysisRows.Count) dump analysis file(s) created."
+            $detailParts += (New-ObjectDetailsText -Rows $dumpAnalysisRows -Title "Local dump analysis summary")
+            if ($suspectRows.Count -gt 0) {
+                $topSuspect = $suspectRows[0]
+                $suspectText = @($topSuspect.ProbablyCausedBy, $topSuspect.ImageName, $topSuspect.ModuleName) |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                    Select-Object -First 1
+                if (-not [string]::IsNullOrWhiteSpace([string]$suspectText)) {
+                    $recommendation = "Review suspected dump module '$suspectText' together with BugCheck $($topSuspect.BugCheck), related drivers, firmware, and recent software changes. Open the listed DumpAnalysis_*.txt file for the full !analyze -v output."
+                } else {
+                    $recommendation = "Open the listed DumpAnalysis_*.txt file for the full !analyze -v output and correlate the BugCheck with drivers, firmware, and recent software changes."
+                }
+            } else {
+                $recommendation = "Open 06_Minidumps\\DumpAnalysis.csv and any DumpAnalysis_*.txt files. If analysis was skipped, install Windows Debugging Tools with cdb.exe and rerun the tool."
+            }
+        }
+
+        Add-Finding ([ref]$findings) "High" "Crash" "Minidumps are included in the package" $evidence $recommendation -TimeContext $dumpTimeInfo.TimeContext -FirstSeen $dumpTimeInfo.FirstSeen -LastSeen $dumpTimeInfo.LastSeen -DetailText ($detailParts -join "`r`n`r`n")
     }
 
     $memoryDump = @($dumpRows | Where-Object { $_.Type -match 'MEMORY\.DMP' })
@@ -1529,6 +1579,7 @@ function Write-HtmlReport {
     $topSystem = Read-CsvSafe (Join-Path $Dirs.Events "System_TopEvents_${DaysBack}d.csv")
     $targetedTop = Read-CsvSafe (Join-Path $Dirs.Events "System_Targeted_TopEvents_${DaysBack}d.csv")
     $dumps = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpFiles.csv")
+    $dumpAnalysis = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpAnalysis.csv")
 
     $osText = ""
     $overviewPath = Join-Path $Dirs.System "System_Overview.txt"
@@ -1546,6 +1597,7 @@ function Write-HtmlReport {
     $topHtml = New-HtmlTable $topSystem @("Count","Name") 25
     $targetedHtml = New-HtmlTable $targetedTop @("Count","Name") 25
     $dumpHtml = New-HtmlTable $dumps @("Type","Path","SizeMB","LastWriteTime") 10
+    $dumpAnalysisHtml = New-HtmlTable $dumpAnalysis @("DumpFile","Status","BugCheck","ProbablyCausedBy","ProcessName","ModuleName","ImageName","FailureBucket","AnalysisFile","Note") 10
 
 @"
 <!doctype html>
@@ -1615,6 +1667,8 @@ function Write-HtmlReport {
     $targetedHtml
     <h2>Dumps</h2>
     $dumpHtml
+    <h2>Minidump Analysis</h2>
+    $dumpAnalysisHtml
   </main>
 </body>
 </html>
@@ -2473,6 +2527,114 @@ Invoke-Step "Collect minidumps and list large dumps only" {
         Select-Object CrashDumpEnabled, AlwaysKeepMemoryDump, AutoReboot, DumpFile, MinidumpDir, LogEvent |
         Format-List |
         Out-File (Join-Path $Dirs.Dumps "CrashControl_Settings.txt") -Encoding UTF8
+}
+
+Invoke-Step "Analyze minidumps when debugger is available" {
+    $analysisRows = @()
+    $statusPath = Join-Path $Dirs.Dumps "DumpAnalysis_Status.txt"
+    $debugger = Get-DumpDebuggerPath
+    $copiedDumps = @(Get-ChildItem -LiteralPath $Dirs.Dumps -Filter "*.dmp" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 5)
+
+    if ($copiedDumps.Count -eq 0) {
+        "No copied minidumps were available for local analysis." | Out-File $statusPath -Encoding UTF8
+        $analysisRows | Export-Csv (Join-Path $Dirs.Dumps "DumpAnalysis.csv") -NoTypeInformation -Encoding UTF8
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($debugger) -or -not (Test-Path -LiteralPath $debugger)) {
+        @"
+No local dump debugger was found, so minidump analysis was skipped.
+
+Install Windows Debugging Tools to enable automatic minidump analysis.
+Expected debugger: cdb.exe
+"@ | Out-File $statusPath -Encoding UTF8
+
+        foreach ($dump in $copiedDumps) {
+            $analysisRows += [PSCustomObject]@{
+                DumpFile         = $dump.Name
+                Status           = "Skipped"
+                BugCheck         = ""
+                ProbablyCausedBy = ""
+                ProcessName      = ""
+                ModuleName       = ""
+                ImageName        = ""
+                FailureBucket    = ""
+                AnalysisFile     = ""
+                Note             = "cdb.exe was not found"
+            }
+        }
+
+        $analysisRows | Export-Csv (Join-Path $Dirs.Dumps "DumpAnalysis.csv") -NoTypeInformation -Encoding UTF8
+        return
+    }
+
+    "Debugger: $debugger" | Out-File $statusPath -Encoding UTF8
+
+    foreach ($dump in $copiedDumps) {
+        $analysisFile = Join-Path $Dirs.Dumps ("DumpAnalysis_{0}.txt" -f [IO.Path]::GetFileNameWithoutExtension($dump.Name))
+        $stderrFile = Join-Path $Dirs.Dumps ("DumpAnalysis_{0}_stderr.txt" -f [IO.Path]::GetFileNameWithoutExtension($dump.Name))
+        $command = ".symfix; .reload; !analyze -v; q"
+        $args = "-y `"srv*C:\Symbols*https://msdl.microsoft.com/download/symbols`" -z `"$($dump.FullName)`" -c `"$command`""
+        $status = "Success"
+        $note = ""
+
+        try {
+            $proc = Start-Process -FilePath $debugger -ArgumentList $args -RedirectStandardOutput $analysisFile -RedirectStandardError $stderrFile -PassThru -WindowStyle Hidden
+            $timeoutSeconds = 120
+            if (-not $proc.WaitForExit($timeoutSeconds * 1000)) {
+                Stop-ProcessTreeSafe -ProcessId ([int]$proc.Id) -Reason "Minidump analysis timeout"
+                $status = "Timeout"
+                $note = "Timed out after $timeoutSeconds seconds"
+            } elseif ($proc.ExitCode -ne 0) {
+                $status = "Warning"
+                $note = "Debugger exit code $($proc.ExitCode)"
+            }
+        } catch {
+            $status = "Error"
+            $note = $_.Exception.Message
+        }
+
+        $text = ""
+        if (Test-Path -LiteralPath $analysisFile) {
+            $text = Get-Content -LiteralPath $analysisFile -Raw -ErrorAction SilentlyContinue
+        }
+
+        $bugCheck = ""
+        if ($text -match '(?im)^\s*BUGCHECK_CODE:\s+(.+?)\s*$') { $bugCheck = $matches[1].Trim() }
+        elseif ($text -match '(?im)^\s*BugCheck\s+([0-9a-fA-F]+)') { $bugCheck = $matches[1].Trim() }
+
+        $probably = ""
+        if ($text -match '(?im)^\s*Probably caused by\s*:\s*(.+?)\s*$') { $probably = $matches[1].Trim() }
+
+        $processName = ""
+        if ($text -match '(?im)^\s*PROCESS_NAME:\s+(.+?)\s*$') { $processName = $matches[1].Trim() }
+
+        $moduleName = ""
+        if ($text -match '(?im)^\s*MODULE_NAME:\s+(.+?)\s*$') { $moduleName = $matches[1].Trim() }
+
+        $imageName = ""
+        if ($text -match '(?im)^\s*IMAGE_NAME:\s+(.+?)\s*$') { $imageName = $matches[1].Trim() }
+
+        $failureBucket = ""
+        if ($text -match '(?im)^\s*FAILURE_BUCKET_ID:\s+(.+?)\s*$') { $failureBucket = $matches[1].Trim() }
+
+        $analysisRows += [PSCustomObject]@{
+            DumpFile         = $dump.Name
+            Status           = $status
+            BugCheck         = $bugCheck
+            ProbablyCausedBy = $probably
+            ProcessName      = $processName
+            ModuleName       = $moduleName
+            ImageName        = $imageName
+            FailureBucket    = $failureBucket
+            AnalysisFile     = if (Test-Path -LiteralPath $analysisFile) { Split-Path -Leaf $analysisFile } else { "" }
+            Note             = $note
+        }
+    }
+
+    $analysisRows | Export-Csv (Join-Path $Dirs.Dumps "DumpAnalysis.csv") -NoTypeInformation -Encoding UTF8
 }
 
 # ==================================================================================================

@@ -34,8 +34,15 @@ PCDiagLite creates a ZIP package under `C:\Temp` with:
 - power and wake information
 - limited System/Application event analysis
 - minidumps, if present
+- optional minidump analysis when Windows Debugging Tools (`cdb.exe`) are installed
 
-The current version is intentionally `collect-only`: it collects diagnostics data, evaluates typical patterns locally, opens a result view, and does not repair or modify the system.
+The current version collects diagnostics data, evaluates typical patterns locally, opens a result view, and does not repair or modify the system.
+
+### Optional Minidump Analysis
+
+PCDiagLite can run a local `!analyze -v` pass for copied minidumps when `cdb.exe` from Windows Debugging Tools is available.
+
+If `cdb.exe` is not installed, the tool still copies/list dumps and records that analysis was skipped. Install Windows Debugging Tools, then rerun PCDiagLite to populate `06_Minidumps\DumpAnalysis.csv` and `DumpAnalysis_*.txt`.
 
 ## Privacy
 
