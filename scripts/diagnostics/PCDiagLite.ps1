@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v17 Collapsed Findings"
+$ToolVersion = "Lite v18 Latest Timeline Events"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -460,7 +460,7 @@ function Add-Finding {
     }
 
     if ($EventRows.Count -gt 0 -and $null -ne $script:TimelineRows) {
-        foreach ($eventRow in @($EventRows | Sort-Object { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } | Select-Object -First 40)) {
+        foreach ($eventRow in @(Select-LatestTimestampedRows -Rows $EventRows -MaxRows 40)) {
             $message = [string]$eventRow.Message
             if ($message.Length -gt 220) {
                 $message = $message.Substring(0, 220) + "..."
@@ -510,6 +510,20 @@ function Format-FindingDate {
 
     if ($null -eq $Date -or $Date -eq [datetime]::MinValue) { return "" }
     return $Date.ToString("yyyy-MM-dd HH:mm:ss")
+}
+
+function Select-LatestTimestampedRows {
+    param(
+        [object[]]$Rows,
+        [int]$MaxRows = 100
+    )
+
+    $latest = @($Rows |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.TimeCreated) } |
+        Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) }; Descending = $true } |
+        Select-Object -First $MaxRows)
+
+    return @($latest | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) }; Descending = $false })
 }
 
 function Get-EventTimeInfo {
@@ -1026,10 +1040,8 @@ function New-TimelineHtml {
         [int]$MaxRows = 90
     )
 
-    $items = @($Rows |
-        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.TimeCreated) } |
-        Sort-Object @{ Expression = { ConvertTo-DateTimeSafe $_.TimeCreated }; Descending = $false } |
-        Select-Object -First $MaxRows)
+    $timestampedCount = @($Rows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.TimeCreated) }).Count
+    $items = @(Select-LatestTimestampedRows -Rows $Rows -MaxRows $MaxRows)
 
     if ($items.Count -eq 0) {
         return '<div class="timeline-empty">No timestamped Event Viewer records were captured for the current findings.</div>'
@@ -1037,6 +1049,9 @@ function New-TimelineHtml {
 
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine('<div class="timeline-list">')
+    if ($timestampedCount -gt $items.Count) {
+        [void]$sb.AppendLine("<div class=""timeline-limit-note"">Showing newest $($items.Count) of $timestampedCount finding-linked Event Viewer records.</div>")
+    }
 
     $lastDate = ""
     foreach ($item in $items) {
@@ -1433,10 +1448,7 @@ function Write-InitialFindingsReport {
     $findings | Export-Csv $findingsPath -NoTypeInformation -Encoding UTF8
 
     $timelinePath = Join-Path $Dirs.Runtime "TimelineEvents.csv"
-    $timelineRows = @($script:TimelineRows |
-        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.TimeCreated) } |
-        Sort-Object @{ Expression = { ConvertTo-DateTimeSafe $_.TimeCreated }; Descending = $true }, Severity, Category, FindingTitle |
-        Select-Object -First 140)
+    $timelineRows = @(Select-LatestTimestampedRows -Rows $script:TimelineRows -MaxRows 240)
     $timelineRows | Export-Csv $timelinePath -NoTypeInformation -Encoding UTF8
 
     $analysisStatus = Get-AnalysisStatus $findings
@@ -1621,7 +1633,7 @@ function Write-ResultWindowReport {
     $areaGroupedFindingsHtml = New-AreaGroupedFindingCardsHtml -Findings $sortedFindings -MaxRowsPerArea 80
     $allFindingsHtml = New-HtmlTable $sortedFindings @("Severity","Category","Title","TimeContext","Evidence","Recommendation") 80
     $timelineRows = Read-CsvSafe (Join-Path $Dirs.Runtime "TimelineEvents.csv")
-    $timelineHtml = New-TimelineHtml -Rows $timelineRows -MaxRows 90
+    $timelineHtml = New-TimelineHtml -Rows $timelineRows -MaxRows 140
     $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Will be created after completion." } else { $PackagePath }
     $reportPath = "00_Report.html"
     $textReportPath = "00_Findings_Summary.txt"
@@ -1707,6 +1719,7 @@ function Write-ResultWindowReport {
     .timeline-panel { position:sticky; top:18px; max-height:calc(100vh - 36px); overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fff; padding:16px 16px 18px; }
     .timeline-panel h2 { margin:0 0 4px; }
     .timeline-subtitle { color:var(--muted); font-size:12px; margin:0 0 16px; }
+    .timeline-limit-note { margin:0 0 10px -18px; color:var(--muted); font-size:12px; }
     .timeline-list { position:relative; padding-left:18px; }
     .timeline-list::before { content:""; position:absolute; left:6px; top:4px; bottom:4px; width:2px; background:#cbd5e1; }
     .timeline-date { position:relative; z-index:1; display:inline-block; margin:10px 0 8px -18px; padding:4px 9px; border-radius:999px; background:#eef2f7; color:#334155; font-size:12px; font-weight:700; }
@@ -1804,7 +1817,7 @@ function Write-ResultWindowReport {
       </section>
       <aside class="timeline-panel">
         <h2>Timeline</h2>
-        <p class="timeline-subtitle">Oldest to newest captured Event Viewer records connected to findings.</p>
+        <p class="timeline-subtitle">Newest captured Event Viewer records connected to findings, shown oldest to newest.</p>
         $timelineHtml
       </aside>
     </div>
