@@ -54,7 +54,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v16 Solid Category Cards"
+$ToolVersion = "Lite v17 Collapsed Findings"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1002,7 +1002,7 @@ function New-AreaGroupedFindingCardsHtml {
             [void]$severitySb.AppendLine('</section>')
         }
 
-        [void]$sb.AppendLine("<details class=""area-group $class $categoryClass"" open>")
+        [void]$sb.AppendLine("<details class=""area-group $class $categoryClass"">")
         [void]$sb.AppendLine('  <summary class="area-summary">')
         [void]$sb.AppendLine('    <div>')
         [void]$sb.AppendLine("      <h3>$(Escape-Html $group.Area)</h3>")
