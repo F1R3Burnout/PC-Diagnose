@@ -1034,7 +1034,7 @@ function Write-InitialFindingsReport {
         Add-Finding ([ref]$findings) "High" "Storage" "USB/UASP or disk I/O resets detected" "$($usbStorageEvents.Count) storage reset or retried-I/O event(s)." "If Windows, games, apps, or active data are on USB-attached storage, check the enclosure, cable, port, and power. Prefer an internal NVMe/SATA SSD for the Windows system drive on a desktop PC." -EventRows $usbStorageEvents
     }
 
-    $networkEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Tcpip|Dhcp|DNS Client Events|NDIS|NetBT|Netwtw|e1|e2f|e2fnexpress' })
+    $networkEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NDIS|NetBT|Netwtw|e1|e2f|e2fnexpress' })
     $tcpPortExhaustionEvents = @($allEvents | Where-Object { $_.ProviderName -match 'Tcpip' -and $_.Id -eq '4231' })
     $udpPortExhaustionEvents = @($allEvents | Where-Object { $_.ProviderName -match 'Tcpip' -and $_.Id -eq '4266' })
     $portExhaustionEvents = @($tcpPortExhaustionEvents + $udpPortExhaustionEvents)
@@ -1050,7 +1050,7 @@ function Write-InitialFindingsReport {
     $dnsTimeEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         (
-            ($_.ProviderName -match 'DNS Client Events|Time-Service|Microsoft-Windows-Time-Service|NtpClient') -or
+            ($_.ProviderName -match 'DNS Client Events|Microsoft-Windows-DNS-Client|Time-Service|Microsoft-Windows-Time-Service|NtpClient') -or
             ($_.Message -match 'NtpClient|time provider|time service|DNS|name resolution|could not resolve|No such host')
         )
     })
@@ -1108,14 +1108,13 @@ function Write-InitialFindingsReport {
     }
 
     $lowLevelDriverEvents = @($allEvents | Where-Object {
-        (Test-EventLevelAtMost $_ 3) -and
-        (
-            ($_.ProviderName -match 'Service Control Manager' -and $_.Message -match 'inpout|WinRing|WinRing0|IOMap|OpenLibSys') -or
-            ($_.Message -match 'inpoutx64|WinRing0')
-        )
+        ($_.ProviderName -match 'Service Control Manager') -and
+        ($_.Message -match 'inpout|WinRing|WinRing0|IOMap|OpenLibSys|inpoutx64')
     })
     if ($lowLevelDriverEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Medium" "Drivers" "Low-level hardware access driver issue detected" "$($lowLevelDriverEvents.Count) event(s) mention inpout, WinRing0, or similar low-level drivers." "Identify the related monitoring, RGB, fan-control, benchmark, or overclocking tool. Update or remove it if the service repeatedly fails or if instability correlates with these timestamps." -EventRows $lowLevelDriverEvents
+        $lowLevelErrorEvents = @($lowLevelDriverEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -or $_.Id -in @('7000','7001','7009','7011','7022','7023','7024','7026','7031','7032','7034') })
+        $driverSeverity = if ($lowLevelErrorEvents.Count -gt 0) { "Medium" } else { "Info" }
+        Add-Finding ([ref]$findings) $driverSeverity "Drivers" "Low-level hardware access driver issue detected" "$($lowLevelDriverEvents.Count) event(s) mention inpout, WinRing0, or similar low-level drivers; $($lowLevelErrorEvents.Count) look like start/failure events." "Identify the related monitoring, RGB, fan-control, benchmark, or overclocking tool. Update or remove it if the service repeatedly fails or if instability correlates with these timestamps." -EventRows $lowLevelDriverEvents
     }
 
     $windowsStackEvents = @($allEvents | Where-Object {
@@ -1135,10 +1134,34 @@ function Write-InitialFindingsReport {
         ([string]$_.DriveLetter).TrimEnd(':') -ieq 'C'
     })
     $usbSystemDriveRows = @($systemDriveRows | Where-Object {
-        "$($_.InterfaceType) $($_.DiskModel) $($_.Partition)" -match 'USB|UASP|Oracle|External|Portable|Enclosure'
+        $diskNumber = ConvertTo-NumberSafe ([string]$_.DiskIndex)
+        $matchingDisk = @($disks | Where-Object {
+            $number = ConvertTo-NumberSafe ([string]$_.Number)
+            $null -ne $diskNumber -and $null -ne $number -and [int]$number -eq [int]$diskNumber
+        }) | Select-Object -First 1
+        $diskText = "$($_.InterfaceType) $($_.DiskModel) $($_.Partition) $($matchingDisk.BusType) $($matchingDisk.FriendlyName)"
+        $diskText -match 'USB|UASP|Oracle|External|Portable|Enclosure'
     })
     if ($usbSystemDriveRows.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Storage" "Windows appears to run from USB or enclosure-style storage" "$($usbSystemDriveRows.Count) C: drive mapping row(s) look USB, UASP, portable, external, or enclosure-attached." "For a normal desktop PC, prefer an internal NVMe/SATA SSD for the Windows system drive. If this setup is intentional, check enclosure firmware, cable, USB port, and power stability before chasing Windows symptoms." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $usbSystemDriveRows -Title "System drive mapping rows")
+        $usbDiskDetails = @()
+        $usbDiskDetails += (New-ObjectDetailsText -Rows $usbSystemDriveRows -Title "System drive mapping rows")
+        $usbDiskNumbers = @($usbSystemDriveRows | ForEach-Object { [string]$_.DiskIndex } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+        $matchingUsbDisks = @($disks | Where-Object { $usbDiskNumbers -contains [string]$_.Number })
+        if ($matchingUsbDisks.Count -gt 0) {
+            $usbDiskDetails += (New-ObjectDetailsText -Rows $matchingUsbDisks -Title "Matching disk rows")
+        }
+        Add-Finding ([ref]$findings) "High" "Storage" "Windows appears to run from USB or enclosure-style storage" "$($usbSystemDriveRows.Count) C: drive mapping row(s) match USB, UASP, portable, external, or enclosure-attached storage." "For a normal desktop PC, prefer an internal NVMe/SATA SSD for the Windows system drive. If this setup is intentional, check enclosure firmware, cable, USB port, and power stability before chasing Windows symptoms." -TimeContext $currentObservation -DetailText ($usbDiskDetails -join "`r`n`r`n")
+    }
+
+    $ipconfigPath = Join-Path $Dirs.Network "ipconfig_all.txt"
+    if (Test-Path -LiteralPath $ipconfigPath) {
+        $ipconfigText = (Get-Content -LiteralPath $ipconfigPath -ErrorAction SilentlyContinue) -join "`r`n"
+        $hasInternalSuffix = $ipconfigText -match '(DNS Suffix|DNS Suffix Search List).*(\.local|\.lan|\.corp|\.internal|\.esl\.ooo|\.ooo|\.intra|\.domain|\.ad)\b'
+        $hasPublicDns = $ipconfigText -match 'DNS Servers[^\r\n]*:\s*(1\.1\.1\.1|1\.0\.0\.1|8\.8\.8\.8|8\.8\.4\.4|9\.9\.9\.9|208\.67\.222\.222|208\.67\.220\.220)' -or
+            $ipconfigText -match '^\s*(1\.1\.1\.1|1\.0\.0\.1|8\.8\.8\.8|8\.8\.4\.4|9\.9\.9\.9|208\.67\.222\.222|208\.67\.220\.220)\s*$'
+        if ($hasInternalSuffix -and $hasPublicDns) {
+            Add-Finding ([ref]$findings) "Medium" "Network" "Public DNS servers are used with an internal DNS suffix" "ipconfig shows an internal-looking DNS suffix together with public DNS resolvers." "If this PC belongs to a managed network or domain-like deployment, DHCP should usually provide the internal DNS server. Public DNS can break domain discovery, WPAD, time sync, certificates, and deployment services." -TimeContext $currentObservation -DetailText $ipconfigText
+        }
     }
 
     $badDisks = @($disks | Where-Object {
@@ -1836,6 +1859,9 @@ Get-NetIPAddress |
     Export-Csv (Join-Path $Dirs.Network "NetIPAddress.csv") -NoTypeInformation -Encoding UTF8
 
 Get-DnsClientServerAddress |
+    Select-Object InterfaceAlias, InterfaceIndex, AddressFamily,
+                  @{Name="ServerAddresses";Expression={($_.ServerAddresses -join "; ")}},
+                  @{Name="AddressCount";Expression={@($_.ServerAddresses).Count}} |
     Export-Csv (Join-Path $Dirs.Network "DnsClientServerAddress.csv") -NoTypeInformation -Encoding UTF8
 
 function Resolve-EndpointProcess {
@@ -2055,7 +2081,7 @@ foreach (`$log in @('System','Application')) {
 
 `$targeted = `$rawSystem | Where-Object {
     (
-        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|UASPStor|USBSTOR|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|NetBT|Netwtw|Time-Service|NtpClient|Service Control Manager|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment'
+        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|UASPStor|USBSTOR|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NetBT|Netwtw|Time-Service|NtpClient|Service Control Manager|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment'
     ) -or
     (
         `$_.Id -in 1,12,13,17,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,4231,4266,4321,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034
