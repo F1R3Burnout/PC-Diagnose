@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v22 Dump Analysis Status"
+$ToolVersion = "Lite v23 Robust Dump Analysis"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1670,7 +1670,7 @@ function Write-HtmlReport {
     $topHtml = New-HtmlTable $topSystem @("Count","Name") 25
     $targetedHtml = New-HtmlTable $targetedTop @("Count","Name") 25
     $dumpHtml = New-HtmlTable $dumps @("Type","Path","SizeMB","LastWriteTime") 10
-    $dumpAnalysisHtml = New-HtmlTable $dumpAnalysis @("DumpFile","Status","BugCheck","ProbablyCausedBy","ProcessName","ModuleName","ImageName","FailureBucket","AnalysisFile","Note") 10
+    $dumpAnalysisHtml = New-HtmlTable $dumpAnalysis @("DumpFile","Status","BugCheck","ProbablyCausedBy","ProcessName","ModuleName","ImageName","FailureBucket","ExitCode","AnalysisFile","Note") 10
 
 @"
 <!doctype html>
@@ -2655,6 +2655,7 @@ Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -
                 ModuleName       = ""
                 ImageName        = ""
                 FailureBucket    = ""
+                ExitCode         = ""
                 AnalysisFile     = ""
                 Note             = "cdb.exe was not found or installation was declined/failed"
             }
@@ -2664,30 +2665,55 @@ Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -
         return
     }
 
+    $analysisCsvPath = Join-Path $Dirs.Dumps "DumpAnalysis.csv"
     "Debugger: $debugger" | Out-File $statusPath -Encoding UTF8
 
     foreach ($dump in $copiedDumps) {
         $analysisFile = Join-Path $Dirs.Dumps ("DumpAnalysis_{0}.txt" -f [IO.Path]::GetFileNameWithoutExtension($dump.Name))
-        $stderrFile = Join-Path $Dirs.Dumps ("DumpAnalysis_{0}_stderr.txt" -f [IO.Path]::GetFileNameWithoutExtension($dump.Name))
         $command = ".symfix; .reload; !analyze -v; q"
-        $args = "-y `"srv*C:\Symbols*https://msdl.microsoft.com/download/symbols`" -z `"$($dump.FullName)`" -c `"$command`""
         $status = "Success"
         $note = ""
+        $exitCode = ""
 
         try {
-            $proc = Start-Process -FilePath $debugger -ArgumentList $args -RedirectStandardOutput $analysisFile -RedirectStandardError $stderrFile -PassThru -WindowStyle Hidden
+            "Analyzing dump: $($dump.Name)" | Out-File $statusPath -Encoding UTF8 -Append
+            Remove-Item -LiteralPath $analysisFile -Force -ErrorAction SilentlyContinue
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $debugger
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $escapedAnalysisFile = $analysisFile.Replace('"', '\"')
+            $escapedDumpFile = $dump.FullName.Replace('"', '\"')
+            $escapedCommand = $command.Replace('"', '\"')
+            $psi.Arguments = "-logo `"$escapedAnalysisFile`" -y `"srv*C:\Symbols*https://msdl.microsoft.com/download/symbols`" -z `"$escapedDumpFile`" -c `"$escapedCommand`""
+
+            $proc = New-Object System.Diagnostics.Process
+            $proc.StartInfo = $psi
+            [void]$proc.Start()
+
             $timeoutSeconds = 120
             if (-not $proc.WaitForExit($timeoutSeconds * 1000)) {
                 Stop-ProcessTreeSafe -ProcessId ([int]$proc.Id) -Reason "Minidump analysis timeout"
                 $status = "Timeout"
                 $note = "Timed out after $timeoutSeconds seconds"
-            } elseif ($proc.ExitCode -ne 0) {
-                $status = "Warning"
-                $note = "Debugger exit code $($proc.ExitCode)"
+            } else {
+                $exitCode = [string]$proc.ExitCode
+                if ($proc.ExitCode -ne 0) {
+                    $status = "Warning"
+                    $note = "Debugger exit code $($proc.ExitCode)"
+                }
             }
         } catch {
             $status = "Error"
             $note = $_.Exception.Message
+        }
+
+        if (-not (Test-Path -LiteralPath $analysisFile)) {
+            [System.IO.File]::WriteAllText($analysisFile, "No cdb.exe analysis output file was created.`r`nStatus: $status`r`nNote: $note", [System.Text.UTF8Encoding]::new($true))
+            if ([string]::IsNullOrWhiteSpace($note)) {
+                $note = "No analysis output file was created"
+            }
         }
 
         $text = ""
@@ -2723,12 +2749,16 @@ Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -
             ModuleName       = $moduleName
             ImageName        = $imageName
             FailureBucket    = $failureBucket
+            ExitCode         = $exitCode
             AnalysisFile     = if (Test-Path -LiteralPath $analysisFile) { Split-Path -Leaf $analysisFile } else { "" }
             Note             = $note
         }
+
+        $analysisRows | Export-Csv $analysisCsvPath -NoTypeInformation -Encoding UTF8
+        "Analysis row written for $($dump.Name): $status $note" | Out-File $statusPath -Encoding UTF8 -Append
     }
 
-    $analysisRows | Export-Csv (Join-Path $Dirs.Dumps "DumpAnalysis.csv") -NoTypeInformation -Encoding UTF8
+    $analysisRows | Export-Csv $analysisCsvPath -NoTypeInformation -Encoding UTF8
 }
 
 # ==================================================================================================
