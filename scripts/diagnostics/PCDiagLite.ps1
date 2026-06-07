@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v26 SMART Result Tables"
+$ToolVersion = "Lite v27 Responsive SMART Tables"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -2052,11 +2052,13 @@ function Write-ResultWindowReport {
     .data-section > summary:hover { filter:saturate(1.05); }
     .data-section h3 { margin:0 0 5px; color:var(--storage-ink); }
     .data-section p { margin:0; color:var(--muted); font-size:13px; }
-    .data-content { border-top:1px solid var(--storage-line); padding:14px 16px 16px; background:var(--storage); }
-    .data-grid { display:grid; gap:16px; }
+    .data-content { border-top:1px solid var(--storage-line); padding:14px 16px 16px; background:var(--storage); min-width:0; }
+    .data-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; min-width:0; }
+    .data-block { min-width:0; max-width:100%; }
     .data-block h4 { margin:0 0 8px; font-size:13px; color:var(--storage-ink); text-transform:uppercase; letter-spacing:.04em; }
-    .table-scroll { overflow:auto; border-radius:8px; background:#fff; }
-    .table-scroll table { min-width:760px; }
+    .table-scroll { display:block; width:100%; max-width:100%; overflow-x:auto; overflow-y:hidden; border-radius:8px; background:#fff; -webkit-overflow-scrolling:touch; }
+    .table-scroll table { width:max-content; min-width:100%; max-width:none; }
+    .table-scroll th, .table-scroll td { white-space:nowrap; }
     .timeline-panel { position:sticky; top:18px; max-height:calc(100vh - 36px); overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fff; padding:16px 16px 18px; }
     .timeline-panel h2 { margin:0 0 4px; }
     .timeline-subtitle { color:var(--muted); font-size:12px; margin:0 0 16px; }
