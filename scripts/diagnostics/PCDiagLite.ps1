@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v23 Robust Dump Analysis"
+$ToolVersion = "Lite v24 Dump Text Fallback"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -437,6 +437,71 @@ function Get-DumpDebuggerPath {
     }
 
     return ""
+}
+
+function Convert-DumpAnalysisTextToRow {
+    param(
+        [Parameter(Mandatory=$true)][string]$DumpFile,
+        [Parameter(Mandatory=$true)][string]$AnalysisPath,
+        [string]$Status = "Success",
+        [string]$ExitCode = "",
+        [string]$Note = ""
+    )
+
+    $text = ""
+    if (Test-Path -LiteralPath $AnalysisPath) {
+        $text = Get-Content -LiteralPath $AnalysisPath -Raw -ErrorAction SilentlyContinue
+    }
+
+    $bugCheck = ""
+    if ($text -match '(?im)^\s*BUGCHECK_CODE:\s+(.+?)\s*$') { $bugCheck = $matches[1].Trim() }
+    elseif ($text -match '(?im)^\s*BugCheck\s+([0-9a-fA-F]+)') { $bugCheck = $matches[1].Trim() }
+
+    $probably = ""
+    if ($text -match '(?im)^\s*Probably caused by\s*:\s*(.+?)\s*$') { $probably = $matches[1].Trim() }
+
+    $processName = ""
+    if ($text -match '(?im)^\s*PROCESS_NAME:\s+(.+?)\s*$') { $processName = $matches[1].Trim() }
+
+    $moduleName = ""
+    if ($text -match '(?im)^\s*MODULE_NAME:\s+(.+?)\s*$') { $moduleName = $matches[1].Trim() }
+
+    $imageName = ""
+    if ($text -match '(?im)^\s*IMAGE_NAME:\s+(.+?)\s*$') { $imageName = $matches[1].Trim() }
+
+    $failureBucket = ""
+    if ($text -match '(?im)^\s*FAILURE_BUCKET_ID:\s+(.+?)\s*$') { $failureBucket = $matches[1].Trim() }
+
+    return [PSCustomObject]@{
+        DumpFile         = $DumpFile
+        Status           = $Status
+        BugCheck         = $bugCheck
+        ProbablyCausedBy = $probably
+        ProcessName      = $processName
+        ModuleName       = $moduleName
+        ImageName        = $imageName
+        FailureBucket    = $failureBucket
+        ExitCode         = $ExitCode
+        AnalysisFile     = if (Test-Path -LiteralPath $AnalysisPath) { Split-Path -Leaf $AnalysisPath } else { "" }
+        Note             = $Note
+    }
+}
+
+function Read-DumpAnalysisRows {
+    $rows = @(Read-CsvSafe (Join-Path $Dirs.Dumps "DumpAnalysis.csv"))
+    if ($rows.Count -gt 0) { return $rows }
+
+    $analysisFiles = @(Get-ChildItem -LiteralPath $Dirs.Dumps -Filter "DumpAnalysis_*.txt" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '_stderr\.txt$|_status\.txt$' } |
+        Sort-Object LastWriteTime -Descending)
+
+    $fallbackRows = @()
+    foreach ($file in $analysisFiles) {
+        $dumpFile = ($file.BaseName -replace '^DumpAnalysis_', '') + ".dmp"
+        $fallbackRows += Convert-DumpAnalysisTextToRow -DumpFile $dumpFile -AnalysisPath $file.FullName -Status "ParsedFromText" -Note "DumpAnalysis.csv was missing or unreadable; parsed from analysis text"
+    }
+
+    return $fallbackRows
 }
 
 function Test-InteractivePromptAvailable {
@@ -1496,9 +1561,8 @@ function Write-InitialFindingsReport {
     if ($copiedDumps.Count -gt 0) {
         $dumpEvents = @($copiedDumps | ForEach-Object { [PSCustomObject]@{ TimeCreated = $_.LastWriteTime } })
         $dumpTimeInfo = Get-EventTimeInfo -Rows $dumpEvents
-        $dumpAnalysisPath = Join-Path $Dirs.Dumps "DumpAnalysis.csv"
         $dumpAnalysisStatusPath = Join-Path $Dirs.Dumps "DumpAnalysis_Status.txt"
-        $dumpAnalysisRows = Read-CsvSafe $dumpAnalysisPath
+        $dumpAnalysisRows = @(Read-DumpAnalysisRows)
         $completedAnalysisRows = @($dumpAnalysisRows | Where-Object { $_.Status -match 'Success|Warning|Timeout' -and -not [string]::IsNullOrWhiteSpace([string]$_.AnalysisFile) })
         $suspectRows = @($dumpAnalysisRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.ProbablyCausedBy) -or -not [string]::IsNullOrWhiteSpace([string]$_.BugCheck) })
         $dumpAnalysisStatusText = ""
@@ -1652,7 +1716,7 @@ function Write-HtmlReport {
     $topSystem = Read-CsvSafe (Join-Path $Dirs.Events "System_TopEvents_${DaysBack}d.csv")
     $targetedTop = Read-CsvSafe (Join-Path $Dirs.Events "System_Targeted_TopEvents_${DaysBack}d.csv")
     $dumps = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpFiles.csv")
-    $dumpAnalysis = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpAnalysis.csv")
+    $dumpAnalysis = @(Read-DumpAnalysisRows)
 
     $osText = ""
     $overviewPath = Join-Path $Dirs.System "System_Overview.txt"
@@ -2716,43 +2780,7 @@ Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -
             }
         }
 
-        $text = ""
-        if (Test-Path -LiteralPath $analysisFile) {
-            $text = Get-Content -LiteralPath $analysisFile -Raw -ErrorAction SilentlyContinue
-        }
-
-        $bugCheck = ""
-        if ($text -match '(?im)^\s*BUGCHECK_CODE:\s+(.+?)\s*$') { $bugCheck = $matches[1].Trim() }
-        elseif ($text -match '(?im)^\s*BugCheck\s+([0-9a-fA-F]+)') { $bugCheck = $matches[1].Trim() }
-
-        $probably = ""
-        if ($text -match '(?im)^\s*Probably caused by\s*:\s*(.+?)\s*$') { $probably = $matches[1].Trim() }
-
-        $processName = ""
-        if ($text -match '(?im)^\s*PROCESS_NAME:\s+(.+?)\s*$') { $processName = $matches[1].Trim() }
-
-        $moduleName = ""
-        if ($text -match '(?im)^\s*MODULE_NAME:\s+(.+?)\s*$') { $moduleName = $matches[1].Trim() }
-
-        $imageName = ""
-        if ($text -match '(?im)^\s*IMAGE_NAME:\s+(.+?)\s*$') { $imageName = $matches[1].Trim() }
-
-        $failureBucket = ""
-        if ($text -match '(?im)^\s*FAILURE_BUCKET_ID:\s+(.+?)\s*$') { $failureBucket = $matches[1].Trim() }
-
-        $analysisRows += [PSCustomObject]@{
-            DumpFile         = $dump.Name
-            Status           = $status
-            BugCheck         = $bugCheck
-            ProbablyCausedBy = $probably
-            ProcessName      = $processName
-            ModuleName       = $moduleName
-            ImageName        = $imageName
-            FailureBucket    = $failureBucket
-            ExitCode         = $exitCode
-            AnalysisFile     = if (Test-Path -LiteralPath $analysisFile) { Split-Path -Leaf $analysisFile } else { "" }
-            Note             = $note
-        }
+        $analysisRows += Convert-DumpAnalysisTextToRow -DumpFile $dump.Name -AnalysisPath $analysisFile -Status $status -ExitCode $exitCode -Note $note
 
         $analysisRows | Export-Csv $analysisCsvPath -NoTypeInformation -Encoding UTF8
         "Analysis row written for $($dump.Name): $status $note" | Out-File $statusPath -Encoding UTF8 -Append
