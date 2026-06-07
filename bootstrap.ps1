@@ -29,6 +29,7 @@ $DaysBackWasProvided = $PSBoundParameters.ContainsKey("DaysBack") -or [bool]$Day
 $RepoOwner = "F1R3Burnout"
 $RepoName = "PC-Diagnose"
 $RawBase = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$Branch"
+$ApiBase = "https://api.github.com/repos/$RepoOwner/$RepoName/contents"
 $BootstrapUrl = "$RawBase/r"
 $ManifestUrl = "$RawBase/manifest.json"
 
@@ -49,8 +50,19 @@ function Get-RemoteText {
     return ([string]$text).TrimStart([char]0xFEFF)
 }
 
+function Get-RepositoryFileText {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    $escapedPath = ([string]$Path).TrimStart("/") -replace " ", "%20"
+    $escapedRef = [Uri]::EscapeDataString($Branch)
+    $response = Invoke-WebRequest -UseBasicParsing -Uri "$ApiBase/$escapedPath`?ref=$escapedRef"
+    $fileInfo = $response.Content | ConvertFrom-Json
+    $base64 = ([string]$fileInfo.content) -replace '\s', ''
+    return ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($base64))).TrimStart([char]0xFEFF)
+}
+
 function Get-Manifest {
-    $json = Get-RemoteText -Uri $ManifestUrl
+    $json = Get-RepositoryFileText -Path "manifest.json"
     return $json | ConvertFrom-Json
 }
 
@@ -182,7 +194,7 @@ function Invoke-RemoteTool {
     New-Item -ItemType Directory -Force -Path $toolCacheDir | Out-Null
 
     $scriptPath = Join-Path $toolCacheDir (Split-Path -Path ([string]$toolInfo.path) -Leaf)
-    $scriptText = Get-RemoteText -Uri $toolUri
+    $scriptText = Get-RepositoryFileText -Path ([string]$toolInfo.path)
     [IO.File]::WriteAllText($scriptPath, [string]$scriptText, [Text.UTF8Encoding]::new($true))
     try {
         Unblock-File -LiteralPath $scriptPath -ErrorAction SilentlyContinue
