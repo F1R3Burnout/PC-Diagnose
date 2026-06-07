@@ -17,6 +17,7 @@ param(
     [int]$EventTimeoutSeconds = 180,
     [int]$StepTimeoutSeconds = 90,
     [switch]$PrivacyMode,
+    [switch]$AutoInstallDebugTools,
     [switch]$NoElevate
 )
 
@@ -72,6 +73,7 @@ function Start-ElevatedBootstrap {
             "-EventTimeoutSeconds $EventTimeoutSeconds " +
             "-StepTimeoutSeconds $StepTimeoutSeconds " +
             "$(if ($PrivacyMode) { '-PrivacyMode ' } else { '' })" +
+            "$(if ($AutoInstallDebugTools) { '-AutoInstallDebugTools ' } else { '' })" +
             "-NoElevate"
     ) -join "; "
 
@@ -166,6 +168,9 @@ function Invoke-RemoteTool {
         $toolArgs.StepTimeoutSeconds = $StepTimeoutSeconds
         if ($PrivacyMode) {
             $toolArgs.PrivacyMode = $true
+        }
+        if ($AutoInstallDebugTools) {
+            $toolArgs.AutoInstallDebugTools = $true
         }
     }
 

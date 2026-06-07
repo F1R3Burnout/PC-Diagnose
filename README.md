@@ -42,7 +42,13 @@ The current version collects diagnostics data, evaluates typical patterns locall
 
 PCDiagLite can run a local `!analyze -v` pass for copied minidumps when `cdb.exe` from Windows Debugging Tools is available.
 
-If `cdb.exe` is not installed, the tool still copies/list dumps and records that analysis was skipped. Install Windows Debugging Tools, then rerun PCDiagLite to populate `06_Minidumps\DumpAnalysis.csv` and `DumpAnalysis_*.txt`.
+If `cdb.exe` is not installed and minidumps are present, the tool can install Windows Debugging Tools through Microsoft's Windows SDK installer and then analyze the dumps. In normal menu runs it asks before installing anything.
+
+For unattended runs, pass `-AutoInstallDebugTools` to the bootstrap command so missing Debugging Tools are installed automatically.
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -AutoInstallDebugTools
+```
 
 ## Privacy
 

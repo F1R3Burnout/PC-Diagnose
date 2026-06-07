@@ -43,7 +43,8 @@ param(
     [int]$MaxEvents = 2000,
     [int]$EventTimeoutSeconds = 180,
     [int]$StepTimeoutSeconds = 90,
-    [switch]$PrivacyMode
+    [switch]$PrivacyMode,
+    [switch]$AutoInstallDebugTools
 )
 
 # ==================================================================================================
@@ -54,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v20 Minidump Analysis"
+$ToolVersion = "Lite v21 Debug Tools Installer"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -436,6 +437,62 @@ function Get-DumpDebuggerPath {
     }
 
     return ""
+}
+
+function Test-InteractivePromptAvailable {
+    try {
+        return [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+    } catch {
+        return $false
+    }
+}
+
+function Install-WindowsDebuggingTools {
+    param([string]$StatusPath = "")
+
+    $installerUrl = "https://go.microsoft.com/fwlink/?linkid=2366211"
+    $installerPath = Join-Path $Dirs.Runtime "winsdksetup.exe"
+
+    try {
+        Write-ProgressLine "Downloading Windows SDK installer for Debugging Tools..." "Cyan"
+        Invoke-WebRequest -UseBasicParsing -Uri $installerUrl -OutFile $installerPath -ErrorAction Stop
+
+        if (-not (Test-Path -LiteralPath $installerPath)) {
+            throw "Windows SDK installer was not downloaded."
+        }
+
+        Write-ProgressLine "Installing Windows Debugging Tools only. This can take several minutes..." "Cyan"
+        $arguments = "/features OptionId.WindowsDesktopDebuggers /quiet /norestart /ceip off"
+        $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -PassThru -WindowStyle Hidden
+        $timeoutSeconds = 900
+        if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
+            Stop-ProcessTreeSafe -ProcessId ([int]$process.Id) -Reason "Debugging Tools install timeout"
+            throw "Windows Debugging Tools installer timed out after $timeoutSeconds seconds."
+        }
+
+        if ($process.ExitCode -notin 0, 3010) {
+            throw "Windows Debugging Tools installer exit code $($process.ExitCode)."
+        }
+
+        $debugger = Get-DumpDebuggerPath
+        if ([string]::IsNullOrWhiteSpace($debugger) -or -not (Test-Path -LiteralPath $debugger)) {
+            throw "Installation finished, but cdb.exe was not found."
+        }
+
+        Write-ProgressLine "Windows Debugging Tools installed: $debugger" "Green"
+        if (-not [string]::IsNullOrWhiteSpace($StatusPath)) {
+            "Windows Debugging Tools installed: $debugger" | Out-File $StatusPath -Encoding UTF8 -Append
+        }
+        return $debugger
+    } catch {
+        $message = "Windows Debugging Tools installation failed: $($_.Exception.Message)"
+        Write-ProgressLine $message "Yellow"
+        if (-not [string]::IsNullOrWhiteSpace($StatusPath)) {
+            $message | Out-File $StatusPath -Encoding UTF8 -Append
+            "Installer URL: $installerUrl" | Out-File $StatusPath -Encoding UTF8 -Append
+        }
+        return ""
+    }
 }
 
 function Add-Finding {
@@ -2545,11 +2602,32 @@ Invoke-Step "Analyze minidumps when debugger is available" {
 
     if ([string]::IsNullOrWhiteSpace($debugger) -or -not (Test-Path -LiteralPath $debugger)) {
         @"
-No local dump debugger was found, so minidump analysis was skipped.
+No local dump debugger was found.
 
-Install Windows Debugging Tools to enable automatic minidump analysis.
+PCDiagLite can install Windows Debugging Tools automatically and then analyze the copied minidumps.
 Expected debugger: cdb.exe
 "@ | Out-File $statusPath -Encoding UTF8
+
+        $shouldInstallDebugTools = [bool]$AutoInstallDebugTools
+        if (-not $shouldInstallDebugTools -and (Test-InteractivePromptAvailable)) {
+            Write-Host ""
+            Write-Host "Minidumps were found, but cdb.exe is missing." -ForegroundColor Yellow
+            Write-Host "Install Windows Debugging Tools now so the dumps can be analyzed? [Y/N]" -ForegroundColor Yellow
+            $answer = Read-Host "Install Debugging Tools"
+            $shouldInstallDebugTools = ($answer -match '^(y|yes|j|ja)$')
+        }
+
+        if ($shouldInstallDebugTools) {
+            $debugger = Install-WindowsDebuggingTools -StatusPath $statusPath
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($debugger) -or -not (Test-Path -LiteralPath $debugger)) {
+        @"
+Minidump analysis was skipped because cdb.exe is still unavailable.
+
+Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -AutoInstallDebugTools.
+"@ | Out-File $statusPath -Encoding UTF8 -Append
 
         foreach ($dump in $copiedDumps) {
             $analysisRows += [PSCustomObject]@{
@@ -2562,7 +2640,7 @@ Expected debugger: cdb.exe
                 ImageName        = ""
                 FailureBucket    = ""
                 AnalysisFile     = ""
-                Note             = "cdb.exe was not found"
+                Note             = "cdb.exe was not found or installation was declined/failed"
             }
         }
 
