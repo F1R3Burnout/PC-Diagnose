@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v21 Debug Tools Installer"
+$ToolVersion = "Lite v22 Dump Analysis Status"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1496,13 +1496,23 @@ function Write-InitialFindingsReport {
     if ($copiedDumps.Count -gt 0) {
         $dumpEvents = @($copiedDumps | ForEach-Object { [PSCustomObject]@{ TimeCreated = $_.LastWriteTime } })
         $dumpTimeInfo = Get-EventTimeInfo -Rows $dumpEvents
-        $dumpAnalysisRows = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpAnalysis.csv")
+        $dumpAnalysisPath = Join-Path $Dirs.Dumps "DumpAnalysis.csv"
+        $dumpAnalysisStatusPath = Join-Path $Dirs.Dumps "DumpAnalysis_Status.txt"
+        $dumpAnalysisRows = Read-CsvSafe $dumpAnalysisPath
         $completedAnalysisRows = @($dumpAnalysisRows | Where-Object { $_.Status -match 'Success|Warning|Timeout' -and -not [string]::IsNullOrWhiteSpace([string]$_.AnalysisFile) })
         $suspectRows = @($dumpAnalysisRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.ProbablyCausedBy) -or -not [string]::IsNullOrWhiteSpace([string]$_.BugCheck) })
+        $dumpAnalysisStatusText = ""
+        if (Test-Path -LiteralPath $dumpAnalysisStatusPath) {
+            $dumpAnalysisStatusText = (Get-Content -LiteralPath $dumpAnalysisStatusPath -Raw -ErrorAction SilentlyContinue).Trim()
+        }
 
         $evidence = "$($copiedDumps.Count) minidump(s) copied."
         $recommendation = "Analyze minidumps with WinDbg/DebugDiag. The driver name and BugCheck code are often the fastest next clue."
         $detailParts = @((New-ObjectDetailsText -Rows $copiedDumps -Title "Captured dump files"))
+
+        if (-not [string]::IsNullOrWhiteSpace($dumpAnalysisStatusText)) {
+            $detailParts += "Minidump analysis status:`r`n`r`n$dumpAnalysisStatusText"
+        }
 
         if ($dumpAnalysisRows.Count -gt 0) {
             $evidence += " $($completedAnalysisRows.Count) dump analysis file(s) created."
@@ -1520,6 +1530,12 @@ function Write-InitialFindingsReport {
             } else {
                 $recommendation = "Open 06_Minidumps\\DumpAnalysis.csv and any DumpAnalysis_*.txt files. If analysis was skipped, install Windows Debugging Tools with cdb.exe and rerun the tool."
             }
+        } elseif (Test-Path -LiteralPath $dumpAnalysisStatusPath) {
+            $evidence += " Local dump analysis did not produce a summary CSV."
+            $recommendation = "Review the Minidump analysis status below. If cdb.exe was installed during this run, rerun PCDiagLite once so the debugger can be discovered cleanly and the dump can be analyzed."
+        } else {
+            $evidence += " No local dump analysis status was recorded."
+            $recommendation = "Rerun PCDiagLite v22 or newer. The report should include Minidump analysis status, even when cdb.exe is missing or installation fails."
         }
 
         Add-Finding ([ref]$findings) "High" "Crash" "Minidumps are included in the package" $evidence $recommendation -TimeContext $dumpTimeInfo.TimeContext -FirstSeen $dumpTimeInfo.FirstSeen -LastSeen $dumpTimeInfo.LastSeen -DetailText ($detailParts -join "`r`n`r`n")
