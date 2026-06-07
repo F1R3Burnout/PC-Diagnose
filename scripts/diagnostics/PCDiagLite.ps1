@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v27 Responsive SMART Tables"
+$ToolVersion = "Lite v28 Noteworthy Storage Data"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1958,10 +1958,46 @@ function Write-ResultWindowReport {
     $volumes = Read-CsvSafe (Join-Path $Dirs.Storage "Volumes.csv")
     $storageReliability = Read-CsvSafe (Join-Path $Dirs.Storage "StorageReliabilityCounter.csv")
     $smartPrediction = Read-CsvSafe (Join-Path $Dirs.Storage "Storage_SMART_FailurePrediction.csv")
-    $diskHtml = New-HtmlTable $disks @("Number","FriendlyName","HealthStatus","OperationalStatus","BusType","SizeGB") 20
-    $volumeHtml = New-HtmlTable $volumes @("DriveLetter","FileSystemLabel","FileSystem","HealthStatus","OperationalStatus","SizeGB","FreeGB","FreePercent") 30
-    $storageReliabilityHtml = New-HtmlTable $storageReliability @("FriendlyName","Temperature","TemperatureMax","Wear","ReadErrorsTotal","WriteErrorsTotal","ReadLatencyMax","WriteLatencyMax","LoadUnloadCycleCount","Error") 30
-    $smartPredictionHtml = New-HtmlTable $smartPrediction @("InstanceName","Active","PredictFailure","Reason","Error") 30
+    $noteworthySmartPrediction = @($smartPrediction | Where-Object {
+        ([string]$_.PredictFailure -match 'True|1') -or
+        (-not [string]::IsNullOrWhiteSpace([string]$_.Error))
+    })
+    $noteworthyStorageReliability = @($storageReliability | Where-Object {
+        $currentTemp = ConvertTo-NumberSafe ([string]$_.Temperature)
+        $maxTemp = ConvertTo-NumberSafe ([string]$_.TemperatureMax)
+        $readErrors = ConvertTo-NumberSafe ([string]$_.ReadErrorsTotal)
+        $writeErrors = ConvertTo-NumberSafe ([string]$_.WriteErrorsTotal)
+        $readLatency = ConvertTo-NumberSafe ([string]$_.ReadLatencyMax)
+        $writeLatency = ConvertTo-NumberSafe ([string]$_.WriteLatencyMax)
+        $wear = ConvertTo-NumberSafe ([string]$_.Wear)
+        $loadUnload = ConvertTo-NumberSafe ([string]$_.LoadUnloadCycleCount)
+        $errorText = [string]$_.Error
+        ($null -ne $currentTemp -and $currentTemp -ge 70) -or
+        ($null -ne $maxTemp -and $maxTemp -ge 80) -or
+        ($null -ne $readErrors -and $readErrors -gt 0) -or
+        ($null -ne $writeErrors -and $writeErrors -gt 0) -or
+        ($null -ne $readLatency -and $readLatency -ge 1000) -or
+        ($null -ne $writeLatency -and $writeLatency -ge 1000) -or
+        ($null -ne $wear -and $wear -ge 80) -or
+        ($null -ne $loadUnload -and $loadUnload -ge 300000) -or
+        (-not [string]::IsNullOrWhiteSpace($errorText))
+    })
+    $noteworthyDisks = @($disks | Where-Object {
+        (($_.HealthStatus) -and ($_.HealthStatus -notmatch 'Healthy|Unknown')) -or
+        (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'OK|Online|No Media'))
+    })
+    $noteworthyVolumes = @($volumes | Where-Object {
+        $freePercent = ConvertTo-NumberSafe $_.FreePercent
+        $sizeGb = ConvertTo-NumberSafe $_.SizeGB
+        (($_.HealthStatus) -and ($_.HealthStatus -notmatch 'Healthy|Unknown')) -or
+        (($_.OperationalStatus) -and ($_.OperationalStatus -notmatch 'OK|Online|No Media')) -or
+        ($null -ne $freePercent -and $null -ne $sizeGb -and $sizeGb -ge 10 -and $freePercent -lt 10)
+    })
+    $noteworthyStorageCount = $noteworthySmartPrediction.Count + $noteworthyStorageReliability.Count + $noteworthyDisks.Count + $noteworthyVolumes.Count
+    $diskHtml = New-HtmlTable $noteworthyDisks @("Number","FriendlyName","HealthStatus","OperationalStatus","BusType","SizeGB") 20
+    $volumeHtml = New-HtmlTable $noteworthyVolumes @("DriveLetter","FileSystemLabel","FileSystem","HealthStatus","OperationalStatus","SizeGB","FreeGB","FreePercent") 30
+    $storageReliabilityHtml = New-HtmlTable $noteworthyStorageReliability @("FriendlyName","Temperature","TemperatureMax","Wear","ReadErrorsTotal","WriteErrorsTotal","ReadLatencyMax","WriteLatencyMax","LoadUnloadCycleCount","Error") 30
+    $smartPredictionHtml = New-HtmlTable $noteworthySmartPrediction @("InstanceName","Active","PredictFailure","Reason","Error") 30
     $timelineRows = Read-CsvSafe (Join-Path $Dirs.Runtime "TimelineEvents.csv")
     $timelineHtml = New-TimelineHtml -Rows $timelineRows -MaxRows 140
     $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Will be created after completion." } else { $PackagePath }
@@ -2148,14 +2184,14 @@ function Write-ResultWindowReport {
         <h2>Findings by Primary Area</h2>
         $areaGroupedFindingsHtml
 
-        <h2>Storage SMART and Reliability</h2>
+        <h2>Noteworthy Storage Data</h2>
         <details class="data-section" open>
           <summary>
             <div>
-              <h3>Storage quick data</h3>
-              <p>SMART failure prediction, reliability counters, disks, and volumes from this run.</p>
+              <h3>Storage signals</h3>
+              <p>Only unusual SMART, reliability, disk, volume, or free-space rows from this run. Full raw data stays in 03_Storage.</p>
             </div>
-            <span class="area-count">$($storageReliability.Count)</span>
+            <span class="area-count">$noteworthyStorageCount</span>
           </summary>
           <div class="data-content">
             <div class="data-grid">
@@ -2164,15 +2200,15 @@ function Write-ResultWindowReport {
                 <div class="table-scroll">$smartPredictionHtml</div>
               </section>
               <section class="data-block">
-                <h4>Storage Reliability Counters</h4>
+                <h4>Storage Reliability Counters with Signals</h4>
                 <div class="table-scroll">$storageReliabilityHtml</div>
               </section>
               <section class="data-block">
-                <h4>Disks</h4>
+                <h4>Disks with Non-OK Status</h4>
                 <div class="table-scroll">$diskHtml</div>
               </section>
               <section class="data-block">
-                <h4>Volumes</h4>
+                <h4>Volumes with Non-OK Status or Low Free Space</h4>
                 <div class="table-scroll">$volumeHtml</div>
               </section>
             </div>
