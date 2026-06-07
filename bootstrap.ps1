@@ -153,6 +153,9 @@ function Invoke-RemoteTool {
     $scriptPath = Join-Path $toolCacheDir (Split-Path -Path ([string]$toolInfo.path) -Leaf)
     $scriptText = Get-RemoteText -Uri $toolUri
     [IO.File]::WriteAllText($scriptPath, [string]$scriptText, [Text.UTF8Encoding]::new($true))
+    try {
+        Unblock-File -LiteralPath $scriptPath -ErrorAction SilentlyContinue
+    } catch {}
 
     Write-Host ""
     Write-Host ("Starting {0}..." -f $toolInfo.name) -ForegroundColor Cyan
@@ -174,7 +177,8 @@ function Invoke-RemoteTool {
         }
     }
 
-    & $scriptPath @toolArgs
+    $toolScriptBlock = [scriptblock]::Create([string]$scriptText)
+    & $toolScriptBlock @toolArgs
 }
 
 $manifest = Get-Manifest
