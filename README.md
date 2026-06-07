@@ -34,7 +34,9 @@ It collects and summarizes:
 - clickable captured Event Viewer details for relevant findings
 - system, uptime, BIOS, CPU, RAM, and basic hardware data
 - storage, disks, volumes, partitions, and free-space status
+- SMART failure prediction and storage reliability counters
 - network adapters, IP configuration, DNS, NIC power/offload settings
+- hosts file content check and DNS Client NRPT rules
 - current TCP/UDP endpoint usage by process
 - dynamic TCP/UDP port exhaustion signals
 - power and wake information
@@ -50,10 +52,13 @@ The result view highlights likely problem areas such as:
 
 - crashes, hard resets, and BugCheck indicators
 - storage and file-system problems
+- SMART warning signals, read/write reliability counters, high wear, and high latency
 - low free disk space
 - DNS, network, NIC driver, and TCP/UDP exhaustion issues
+- hosts file permission/content problems and stale custom name mappings
 - Windows Update, AppX, Perflib, and application hangs
 - service start failures and driver-related errors
+- repeated event summaries, such as which service failed several times or which Windows Stack update/app error repeated
 - suspicious current system state, such as high endpoint usage
 
 The analysis is heuristic. It is meant to point to the most likely next checks, not to replace manual diagnosis.

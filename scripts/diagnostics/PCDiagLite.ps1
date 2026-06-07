@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v24 Dump Text Fallback"
+$ToolVersion = "Lite v25 SMART and Repeated Events"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -714,6 +714,57 @@ function New-EventDetailsText {
     [void]$sb.AppendLine("Matching captured Event Viewer records: $($items.Count)")
     [void]$sb.AppendLine("")
 
+    $summaryRows = @($items | ForEach-Object {
+        $message = [string]$_.Message
+        $subject = ""
+        if ($_.ProviderName -match 'Service Control Manager') {
+            if ($message -match '(?i)^The\s+(.+?)\s+service\s+(?:failed|was|terminated|entered|did not|could not)') { $subject = $matches[1].Trim() }
+            elseif ($message -match '(?i)(?:service|dienst)\s+["'']([^"'']+)["'']') { $subject = $matches[1].Trim() }
+            elseif ($message -match '(?i)^([^:]+?)\s+(?:service|dienst)') { $subject = $matches[1].Trim() }
+        } elseif ($_.ProviderName -match 'WindowsUpdateClient') {
+            if ($message -match '(?i)(?:Update|Updates?)\s+(?:for|für)\s+(.+?)(?:\s+failed|\s+fehlgeschlagen|\.|$)') { $subject = $matches[1].Trim() }
+            elseif ($message -match '(?i)(?:error|Fehler)\s+0x[0-9a-f]+\s*(?:failed|fehlgeschlagen)?\s*:\s*([A-Za-z0-9_.-]+)') { $subject = $matches[1].Trim() }
+            elseif ($message -match '(?i)(0x[0-9a-f]+)') { $subject = $matches[1] }
+        } elseif ($_.ProviderName -match 'AppModel|AppX|Store') {
+            if ($message -match '(?i)(?:package|Paket)\s+([^\s]+)') { $subject = $matches[1].Trim() }
+            elseif ($message -match '(?i)([A-Za-z0-9_.-]+_[A-Za-z0-9_.-]+)') { $subject = $matches[1].Trim() }
+        } elseif ($_.ProviderName -match 'DNS|Time') {
+            if ($message -match '(?i)(?:name|Namen)\s+([^\s,;]+)') { $subject = $matches[1].Trim() }
+            elseif ($message -match '(?i)([a-z0-9.-]+\.[a-z]{2,})') { $subject = $matches[1].Trim() }
+        } elseif ($_.ProviderName -match 'disk|Ntfs|stor|volmgr') {
+            if ($message -match '(?i)(?:device|Gerät|Volume)\s+["'']?([^,"''\r\n]+)') { $subject = $matches[1].Trim() }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($subject)) {
+            $subject = "same provider/event"
+        } else {
+            $subject = $subject.Trim().TrimEnd('.', ';', ',')
+        }
+
+        [PSCustomObject]@{
+            Key = "$($_.ProviderName)|$($_.Id)|$subject"
+            ProviderName = [string]$_.ProviderName
+            EventId = [string]$_.Id
+            Subject = $subject
+            TimeCreated = [string]$_.TimeCreated
+        }
+    })
+
+    $summaryGroups = @($summaryRows | Group-Object Key | Sort-Object Count -Descending | Select-Object -First 8)
+    if ($summaryGroups.Count -gt 0) {
+        [void]$sb.AppendLine("Top repeated event groups:")
+        foreach ($group in $summaryGroups) {
+            $firstRow = $group.Group[0]
+            $dates = @($group.Group | ForEach-Object { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } | Where-Object { $null -ne $_ } | Sort-Object)
+            $timeText = ""
+            if ($dates.Count -gt 0) {
+                $timeText = " first=$(Format-FindingDate $dates[0]); last=$(Format-FindingDate $dates[-1])"
+            }
+            [void]$sb.AppendLine(("- {0}x {1} {2}: {3}{4}" -f $group.Count, $firstRow.ProviderName, $firstRow.EventId, $firstRow.Subject, $timeText))
+        }
+        [void]$sb.AppendLine("")
+    }
+
     $index = 1
     foreach ($row in $items) {
         $eventTime = ConvertTo-DateTimeSafe ([string]$row.TimeCreated)
@@ -1295,7 +1346,7 @@ function Write-InitialFindingsReport {
         )
     })
     if ($storageEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Storage" "Storage or file system events found" "$($storageEvents.Count) matching Disk/Ntfs/Storage/volmgr event(s) or typical storage event ID(s)." "Check SMART/vendor diagnostics, cables/backplane, controller/NVMe/SATA drivers, and file system health. For NTFS 55/98 or Disk 51/153, verify backups soon." -EventRows $storageEvents
+        Add-Finding ([ref]$findings) "High" "Storage" "Storage or file system events found" "$($storageEvents.Count) matching Disk/Ntfs/Storage/volmgr event(s) or typical storage event ID(s)." "Review the repeated event summary, StorageReliabilityCounter.csv, and Storage_SMART_FailurePrediction.csv. Then check vendor diagnostics, cables/backplane, controller/NVMe/SATA drivers, and file system health. For NTFS 55/98 or Disk 51/153, verify backups soon." -EventRows $storageEvents
     }
 
     $usbStorageEvents = @($allEvents | Where-Object {
@@ -1322,13 +1373,47 @@ function Write-InitialFindingsReport {
         Add-Finding ([ref]$findings) "High" "Network" "Network computer name conflict detected" "$($nameConflictEvents.Count) NetBT 4321 event(s)." "Make sure this PC has a unique computer name on the network. Check cloned Windows installations, stale DHCP/DNS records, and other PCs using the same NetBIOS name." -EventRows $nameConflictEvents
     }
 
+    $hostsCheckRows = @(Read-CsvSafe (Join-Path $Dirs.Network "Hosts_File_Check.csv"))
+    $hostsEntryRows = @(Read-CsvSafe (Join-Path $Dirs.Network "Hosts_File_ActiveEntries.csv"))
+    $nrptRows = @(Read-CsvSafe (Join-Path $Dirs.Network "DnsClientNrptRule.csv"))
+    $hostsCheck = if ($hostsCheckRows.Count -gt 0) { $hostsCheckRows[0] } else { $null }
+    if ($null -ne $hostsCheck) {
+        $invalidHostLines = ConvertTo-NumberSafe ([string]$hostsCheck.InvalidLineCount)
+        $activeHostEntries = ConvertTo-NumberSafe ([string]$hostsCheck.ActiveEntryCount)
+        $hostsReadable = [string]$hostsCheck.Readable
+        $hostsError = [string]$hostsCheck.Error
+        $hostsDetails = @((New-ObjectDetailsText -Rows $hostsCheckRows -Title "Hosts file check"))
+        if ($hostsEntryRows.Count -gt 0) {
+            $hostsDetails += (New-ObjectDetailsText -Rows $hostsEntryRows -Title "Active hosts file entries")
+        }
+        if ($nrptRows.Count -gt 0) {
+            $hostsDetails += (New-ObjectDetailsText -Rows $nrptRows -Title "DNS Client NRPT rules")
+        }
+
+        if (($hostsReadable -match 'False') -or (-not [string]::IsNullOrWhiteSpace($hostsError)) -or ($null -ne $invalidHostLines -and $invalidHostLines -gt 0)) {
+            Add-Finding ([ref]$findings) "High" "Network" "Hosts file content or permissions need review" "Hosts file readable=$hostsReadable, invalid lines=$invalidHostLines, error=$hostsError." "Review 04_Network\\Hosts_File_Check.csv and Hosts_File_ActiveEntries.csv. Fix unreadable permissions or malformed active lines before changing DNS/VPN settings." -TimeContext $currentObservation -DetailText ($hostsDetails -join "`r`n`r`n")
+        } elseif ($null -ne $activeHostEntries -and $activeHostEntries -ge 5) {
+            Add-Finding ([ref]$findings) "Info" "Network" "Hosts file contains multiple active custom mappings" "$activeHostEntries active hosts file mapping(s) were detected." "Review whether these entries are intentional. Stale hosts overrides can break websites, updates, VPN names, and local services." -TimeContext $currentObservation -DetailText ($hostsDetails -join "`r`n`r`n")
+        }
+    }
+
     $dnsClientConfigEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         $_.ProviderName -match 'Microsoft-Windows-DNS-Client|DNS Client Events' -and
         $_.Id -in @('1012','1023')
     })
     if ($dnsClientConfigEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Network" "DNS client hosts or NRPT configuration errors found" "$($dnsClientConfigEvents.Count) DNS client event(s) with ID 1012 or 1023." "Check C:\Windows\System32\drivers\etc\hosts permissions/content and review Get-DnsClientNrptRule. VPN, DNS filtering, and remote-access tools can create NRPT rules, so inspect before deleting anything." -EventRows $dnsClientConfigEvents
+        $dnsConfigDetails = @((New-EventDetailsText -Rows $dnsClientConfigEvents))
+        if ($hostsCheckRows.Count -gt 0) {
+            $dnsConfigDetails += (New-ObjectDetailsText -Rows $hostsCheckRows -Title "Hosts file check")
+        }
+        if ($hostsEntryRows.Count -gt 0) {
+            $dnsConfigDetails += (New-ObjectDetailsText -Rows $hostsEntryRows -Title "Active hosts file entries")
+        }
+        if ($nrptRows.Count -gt 0) {
+            $dnsConfigDetails += (New-ObjectDetailsText -Rows $nrptRows -Title "DNS Client NRPT rules")
+        }
+        Add-Finding ([ref]$findings) "High" "Network" "DNS client hosts or NRPT configuration errors found" "$($dnsClientConfigEvents.Count) DNS client event(s) with ID 1012 or 1023." "Check C:\Windows\System32\drivers\etc\hosts permissions/content and review 04_Network\\DnsClientNrptRule.csv. VPN, DNS filtering, and remote-access tools can create NRPT rules, so inspect before deleting anything." -EventRows $dnsClientConfigEvents -DetailText ($dnsConfigDetails -join "`r`n`r`n")
     }
 
     $dnsTimeEvents = @($allEvents | Where-Object {
@@ -1510,6 +1595,35 @@ function Write-InitialFindingsReport {
     }
 
     $reliabilityRows = Read-CsvSafe (Join-Path $Dirs.Storage "StorageReliabilityCounter.csv")
+    $smartPredictionRows = Read-CsvSafe (Join-Path $Dirs.Storage "Storage_SMART_FailurePrediction.csv")
+    $smartFailureRows = @($smartPredictionRows | Where-Object { [string]$_.PredictFailure -match 'True|1' })
+    if ($smartFailureRows.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Storage" "SMART failure prediction is active" "$($smartFailureRows.Count) disk row(s) report PredictFailure." "Back up important data immediately, identify the affected disk, and replace or vendor-test the drive before continuing normal use." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $smartFailureRows -Title "SMART failure prediction rows")
+    }
+
+    $suspiciousReliabilityRows = @($reliabilityRows | Where-Object {
+        $readErrors = ConvertTo-NumberSafe ([string]$_.ReadErrorsTotal)
+        $writeErrors = ConvertTo-NumberSafe ([string]$_.WriteErrorsTotal)
+        $readLatency = ConvertTo-NumberSafe ([string]$_.ReadLatencyMax)
+        $writeLatency = ConvertTo-NumberSafe ([string]$_.WriteLatencyMax)
+        $wear = ConvertTo-NumberSafe ([string]$_.Wear)
+        $loadUnload = ConvertTo-NumberSafe ([string]$_.LoadUnloadCycleCount)
+        $errorText = [string]$_.Error
+        ($null -ne $readErrors -and $readErrors -gt 0) -or
+        ($null -ne $writeErrors -and $writeErrors -gt 0) -or
+        ($null -ne $readLatency -and $readLatency -ge 1000) -or
+        ($null -ne $writeLatency -and $writeLatency -ge 1000) -or
+        ($null -ne $wear -and $wear -ge 80) -or
+        ($null -ne $loadUnload -and $loadUnload -ge 300000) -or
+        (-not [string]::IsNullOrWhiteSpace($errorText))
+    })
+    if ($suspiciousReliabilityRows.Count -gt 0) {
+        $smartSummary = (($suspiciousReliabilityRows | Select-Object -First 5 | ForEach-Object {
+            "$($_.FriendlyName): readErrors=$($_.ReadErrorsTotal), writeErrors=$($_.WriteErrorsTotal), wear=$($_.Wear), temp=$($_.Temperature), maxTemp=$($_.TemperatureMax), error=$($_.Error)"
+        }) -join "; ")
+        Add-Finding ([ref]$findings) "Medium" "Storage" "SMART or storage reliability counters need review" $smartSummary "Review StorageReliabilityCounter.csv and Storage_SMART_FailurePrediction.csv. If errors, high wear, high latency, or PredictFailure are present, back up data and run the vendor diagnostic tool." -TimeContext $currentObservation -DetailText ((New-ObjectDetailsText -Rows $suspiciousReliabilityRows -Title "Suspicious storage reliability rows") + "`r`n`r`n" + (New-ObjectDetailsText -Rows $smartPredictionRows -Title "SMART failure prediction rows"))
+    }
+
     $hotStorageRows = @($reliabilityRows | Where-Object {
         $currentTemp = ConvertTo-NumberSafe ([string]$_.Temperature)
         $maxTemp = ConvertTo-NumberSafe ([string]$_.TemperatureMax)
@@ -1709,7 +1823,11 @@ function Write-HtmlReport {
     $analysisStatus = Get-AnalysisStatus $findings
     $disks = Read-CsvSafe (Join-Path $Dirs.Storage "Disks.csv")
     $volumes = Read-CsvSafe (Join-Path $Dirs.Storage "Volumes.csv")
+    $smartPrediction = Read-CsvSafe (Join-Path $Dirs.Storage "Storage_SMART_FailurePrediction.csv")
     $netAdapters = Read-CsvSafe (Join-Path $Dirs.Network "NetAdapters.csv")
+    $hostsCheck = Read-CsvSafe (Join-Path $Dirs.Network "Hosts_File_Check.csv")
+    $hostsEntries = Read-CsvSafe (Join-Path $Dirs.Network "Hosts_File_ActiveEntries.csv")
+    $nrptRules = Read-CsvSafe (Join-Path $Dirs.Network "DnsClientNrptRule.csv")
     $endpointSummary = Read-CsvSafe (Join-Path $Dirs.Network "Endpoint_Summary.csv")
     $tcpTop = Read-CsvSafe (Join-Path $Dirs.Network "TCP_Endpoints_By_Process_Top30.csv")
     $udpTop = Read-CsvSafe (Join-Path $Dirs.Network "UDP_Endpoints_By_Process_Top30.csv")
@@ -1727,7 +1845,11 @@ function Write-HtmlReport {
     $findingsHtml = New-HtmlTable $findings @("Severity","Category","Title","TimeContext","Evidence","Recommendation") 50
     $diskHtml = New-HtmlTable $disks @("Number","FriendlyName","HealthStatus","OperationalStatus","BusType","SizeGB") 20
     $volumeHtml = New-HtmlTable $volumes @("DriveLetter","FileSystemLabel","FileSystem","HealthStatus","OperationalStatus","SizeGB","FreeGB","FreePercent") 30
+    $smartPredictionHtml = New-HtmlTable $smartPrediction @("InstanceName","Active","PredictFailure","Reason","Error") 30
     $netHtml = New-HtmlTable $netAdapters @("Name","InterfaceDescription","Status","LinkSpeed","DriverVersion","DriverDate") 30
+    $hostsCheckHtml = New-HtmlTable $hostsCheck @("Path","Exists","Readable","SizeBytes","LastWriteTime","ActiveEntryCount","InvalidLineCount","LoopbackEntryCount","Error") 5
+    $hostsEntriesHtml = New-HtmlTable $hostsEntries @("LineNumber","Target","Hostnames","EntryType","RawLine") 50
+    $nrptRulesHtml = New-HtmlTable $nrptRules @("Namespace","NameServers","DirectAccessDnsServers","Comment","DisplayName","NameEncoding","DnsSecValidationRequired") 50
     $endpointSummaryHtml = New-HtmlTable $endpointSummary @("Protocol","TotalEndpoints","UniqueProcesses","TopProcessPID","TopProcessCount") 10
     $tcpTopHtml = New-HtmlTable $tcpTop @("PID","Count","Process","Path","States") 30
     $udpTopHtml = New-HtmlTable $udpTop @("PID","Count","Process","Path") 30
@@ -1790,8 +1912,16 @@ function Write-HtmlReport {
     $diskHtml
     <h2>Volumes</h2>
     $volumeHtml
+    <h2>SMART Failure Prediction</h2>
+    $smartPredictionHtml
     <h2>Network Adapters</h2>
     $netHtml
+    <h2>Hosts File Check</h2>
+    $hostsCheckHtml
+    <h2>Active Hosts File Entries</h2>
+    $hostsEntriesHtml
+    <h2>DNS Client NRPT Rules</h2>
+    $nrptRulesHtml
     <h2>Current TCP/UDP Endpoint Usage</h2>
     $endpointSummaryHtml
     <h2>Top TCP Endpoint Processes</h2>
@@ -2292,6 +2422,7 @@ Invoke-ChildPowerShellWithTimeout -Name "Storage and drive mapping" -ScriptConte
 $StorageReliabilityScript = @"
 `$ErrorActionPreference = 'Continue'
 `$outFile = '$($Dirs.Storage.Replace("'","''"))\StorageReliabilityCounter.csv'
+`$smartFile = '$($Dirs.Storage.Replace("'","''"))\Storage_SMART_FailurePrediction.csv'
 `$result = foreach (`$pd in Get-PhysicalDisk) {
     try {
         Get-StorageReliabilityCounter -PhysicalDisk `$pd -ErrorAction Stop |
@@ -2307,6 +2438,20 @@ $StorageReliabilityScript = @"
     }
 }
 `$result | Export-Csv `$outFile -NoTypeInformation -Encoding UTF8
+
+try {
+    Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction Stop |
+        Select-Object InstanceName, Active, PredictFailure, Reason |
+        Export-Csv `$smartFile -NoTypeInformation -Encoding UTF8
+} catch {
+    [PSCustomObject]@{
+        InstanceName = ""
+        Active = ""
+        PredictFailure = ""
+        Reason = ""
+        Error = `$_.Exception.Message
+    } | Export-Csv `$smartFile -NoTypeInformation -Encoding UTF8
+}
 "@
 
 Invoke-ChildPowerShellWithTimeout -Name "Storage Reliability Counter" -ScriptContent $StorageReliabilityScript -TimeoutSeconds 45 | Out-Null
@@ -2343,6 +2488,93 @@ Get-DnsClientServerAddress |
                   @{Name="ServerAddresses";Expression={($_.ServerAddresses -join "; ")}},
                   @{Name="AddressCount";Expression={@($_.ServerAddresses).Count}} |
     Export-Csv (Join-Path $Dirs.Network "DnsClientServerAddress.csv") -NoTypeInformation -Encoding UTF8
+
+Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+    Select-Object Namespace, NameServers, DirectAccessDnsServers, Comment, DisplayName, NameEncoding, DnsSecValidationRequired |
+    Export-Csv (Join-Path $Dirs.Network "DnsClientNrptRule.csv") -NoTypeInformation -Encoding UTF8
+
+$hostsPath = Join-Path $env:WINDIR "System32\drivers\etc\hosts"
+$hostsEntries = New-Object System.Collections.Generic.List[object]
+$hostsStatus = [ordered]@{
+    Path = $hostsPath
+    Exists = [System.IO.File]::Exists($hostsPath)
+    Readable = $false
+    SizeBytes = ""
+    LastWriteTime = ""
+    ActiveEntryCount = 0
+    InvalidLineCount = 0
+    LoopbackEntryCount = 0
+    Error = ""
+}
+
+try {
+    if ($hostsStatus.Exists) {
+        $hostsFile = Get-Item -LiteralPath $hostsPath -ErrorAction Stop
+        $hostsStatus.SizeBytes = $hostsFile.Length
+        $hostsStatus.LastWriteTime = $hostsFile.LastWriteTime
+        $lines = @(Get-Content -LiteralPath $hostsPath -ErrorAction Stop)
+        $hostsStatus.Readable = $true
+        for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+            $rawLine = [string]$lines[$lineIndex]
+            $trimmedLine = $rawLine.Trim()
+            if ([string]::IsNullOrWhiteSpace($trimmedLine) -or $trimmedLine.StartsWith("#")) {
+                continue
+            }
+
+            $contentPart = ($trimmedLine -split '#', 2)[0].Trim()
+            if ([string]::IsNullOrWhiteSpace($contentPart)) {
+                continue
+            }
+
+            $parts = @($contentPart -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            $parsedIp = $null
+            $isIpAddress = $parts.Count -ge 2 -and [System.Net.IPAddress]::TryParse([string]$parts[0], [ref]$parsedIp)
+            if (-not $isIpAddress) {
+                $hostsStatus.InvalidLineCount++
+                $hostsEntries.Add([PSCustomObject]@{
+                    LineNumber = $lineIndex + 1
+                    Target = if ($parts.Count -gt 0) { $parts[0] } else { "" }
+                    Hostnames = ""
+                    EntryType = "Invalid"
+                    RawLine = $rawLine
+                })
+                continue
+            }
+
+            $hostNames = @($parts | Select-Object -Skip 1)
+            $isLoopback = [string]$parts[0] -match '^(127\.|::1$|0\.0\.0\.0$)'
+            if ($isLoopback) {
+                $hostsStatus.LoopbackEntryCount++
+            }
+            $hostsStatus.ActiveEntryCount++
+            $hostsEntries.Add([PSCustomObject]@{
+                LineNumber = $lineIndex + 1
+                Target = [string]$parts[0]
+                Hostnames = ($hostNames -join "; ")
+                EntryType = if ($isLoopback) { "Loopback/block" } else { "Custom mapping" }
+                RawLine = $rawLine
+            })
+        }
+    }
+} catch {
+    $hostsStatus.Error = $_.Exception.Message
+}
+
+[PSCustomObject]$hostsStatus |
+    Export-Csv (Join-Path $Dirs.Network "Hosts_File_Check.csv") -NoTypeInformation -Encoding UTF8
+
+if ($hostsEntries.Count -gt 0) {
+    $hostsEntries |
+        Export-Csv (Join-Path $Dirs.Network "Hosts_File_ActiveEntries.csv") -NoTypeInformation -Encoding UTF8
+} else {
+    [PSCustomObject]@{
+        LineNumber = ""
+        Target = ""
+        Hostnames = ""
+        EntryType = ""
+        RawLine = ""
+    } | Export-Csv (Join-Path $Dirs.Network "Hosts_File_ActiveEntries.csv") -NoTypeInformation -Encoding UTF8
+}
 
 function Resolve-EndpointProcess {
     param([AllowNull()][int]$ProcessIdValue)
