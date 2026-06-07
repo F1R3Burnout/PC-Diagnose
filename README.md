@@ -14,6 +14,8 @@ irm https://kiwus-it.de/r|iex
 
 The starter reads `manifest.json`, shows all registered tools, elevates through UAC when a tool requires Administrator rights, downloads the selected tool, and runs it from the loaded script text. This avoids common Execution Policy blocks on the temporary `.ps1` cache file.
 
+When PCDiagLite is started from the menu, the starter asks how many days back should be analyzed. Press Enter to use the default of 30 days.
+
 ## Current Tools
 
 | Tool ID | Name | Purpose | Admin |
@@ -104,7 +106,7 @@ Common bootstrap parameters:
 | Parameter | Purpose |
 | --- | --- |
 | `-Tool pcdiag` | Starts PCDiagLite directly instead of showing the menu |
-| `-DaysBack 30` | Event analysis range |
+| `-DaysBack 30` | Event analysis range; skips the menu prompt when passed explicitly |
 | `-OutputRoot C:\Temp` | Output location |
 | `-PrivacyMode` | Masks common sensitive values |
 | `-AutoInstallDebugTools` | Installs Windows Debugging Tools automatically when minidumps need analysis |

@@ -18,11 +18,13 @@ param(
     [int]$StepTimeoutSeconds = 90,
     [switch]$PrivacyMode,
     [switch]$AutoInstallDebugTools,
+    [switch]$DaysBackProvided,
     [switch]$NoElevate
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+$DaysBackWasProvided = $PSBoundParameters.ContainsKey("DaysBack") -or [bool]$DaysBackProvided
 
 $RepoOwner = "F1R3Burnout"
 $RepoName = "PC-Diagnose"
@@ -74,6 +76,7 @@ function Start-ElevatedBootstrap {
             "-StepTimeoutSeconds $StepTimeoutSeconds " +
             "$(if ($PrivacyMode) { '-PrivacyMode ' } else { '' })" +
             "$(if ($AutoInstallDebugTools) { '-AutoInstallDebugTools ' } else { '' })" +
+            "$(if ($DaysBackWasProvided) { '-DaysBackProvided ' } else { '' })" +
             "-NoElevate"
     ) -join "; "
 
@@ -123,6 +126,30 @@ function Select-ToolFromMenu {
     return [string]$selection
 }
 
+function Read-DaysBackForTool {
+    param(
+        [Parameter(Mandatory=$true)][string]$ToolId,
+        [int]$DefaultDays = 30
+    )
+
+    if ($ToolId -ne "pcdiag" -or $DaysBackWasProvided) {
+        return $DaysBack
+    }
+
+    Write-Host ""
+    $inputValue = Read-Host "How many days back should be analyzed? [$DefaultDays]"
+    if ([string]::IsNullOrWhiteSpace($inputValue)) {
+        return $DefaultDays
+    }
+
+    $parsed = 0
+    if (-not [int]::TryParse($inputValue, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt 3650) {
+        throw "Invalid DaysBack value: $inputValue. Enter a number between 1 and 3650."
+    }
+
+    return $parsed
+}
+
 function Invoke-RemoteTool {
     param(
         [Parameter(Mandatory=$true)]$Manifest,
@@ -132,6 +159,10 @@ function Invoke-RemoteTool {
     $toolInfo = @($Manifest.tools | Where-Object { $_.id -eq $SelectedTool -or $_.name -eq $SelectedTool }) | Select-Object -First 1
     if (-not $toolInfo) {
         throw "Tool not found: $SelectedTool"
+    }
+
+    if ($toolInfo.id -eq "pcdiag") {
+        $script:DaysBack = Read-DaysBackForTool -ToolId ([string]$toolInfo.id) -DefaultDays 30
     }
 
     if ($toolInfo.requiresAdmin -and -not (Test-IsAdmin)) {
