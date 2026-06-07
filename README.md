@@ -30,6 +30,7 @@ It collects and summarizes:
 
 - local findings with timestamps, severity, evidence, and next steps
 - grouped result view by primary area, collapsed by default
+- directly visible storage SMART and reliability tables in the result view
 - newest-first timeline for finding-related Event Viewer records
 - clickable captured Event Viewer details for relevant findings
 - system, uptime, BIOS, CPU, RAM, and basic hardware data

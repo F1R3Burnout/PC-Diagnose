@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v25 SMART and Repeated Events"
+$ToolVersion = "Lite v26 SMART Result Tables"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1954,6 +1954,14 @@ function Write-ResultWindowReport {
     $statusClass = Get-StatusCssClass $analysisStatus.Label
     $areaGroupedFindingsHtml = New-AreaGroupedFindingCardsHtml -Findings $sortedFindings -MaxRowsPerArea 80
     $allFindingsHtml = New-HtmlTable $sortedFindings @("Severity","Category","Title","TimeContext","Evidence","Recommendation") 80
+    $disks = Read-CsvSafe (Join-Path $Dirs.Storage "Disks.csv")
+    $volumes = Read-CsvSafe (Join-Path $Dirs.Storage "Volumes.csv")
+    $storageReliability = Read-CsvSafe (Join-Path $Dirs.Storage "StorageReliabilityCounter.csv")
+    $smartPrediction = Read-CsvSafe (Join-Path $Dirs.Storage "Storage_SMART_FailurePrediction.csv")
+    $diskHtml = New-HtmlTable $disks @("Number","FriendlyName","HealthStatus","OperationalStatus","BusType","SizeGB") 20
+    $volumeHtml = New-HtmlTable $volumes @("DriveLetter","FileSystemLabel","FileSystem","HealthStatus","OperationalStatus","SizeGB","FreeGB","FreePercent") 30
+    $storageReliabilityHtml = New-HtmlTable $storageReliability @("FriendlyName","Temperature","TemperatureMax","Wear","ReadErrorsTotal","WriteErrorsTotal","ReadLatencyMax","WriteLatencyMax","LoadUnloadCycleCount","Error") 30
+    $smartPredictionHtml = New-HtmlTable $smartPrediction @("InstanceName","Active","PredictFailure","Reason","Error") 30
     $timelineRows = Read-CsvSafe (Join-Path $Dirs.Runtime "TimelineEvents.csv")
     $timelineHtml = New-TimelineHtml -Rows $timelineRows -MaxRows 140
     $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Will be created after completion." } else { $PackagePath }
@@ -2038,6 +2046,17 @@ function Write-ResultWindowReport {
     .finding-details h4 { margin:0 0 9px; font-size:14px; }
     .event-details { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; background:#101827; color:#e5e7eb; padding:13px; border-radius:8px; font-size:12px; line-height:1.45; max-height:620px; overflow:auto; }
     .paths { border:1px solid var(--line); border-radius:8px; padding:12px 13px; background:#f8fafc; overflow-wrap:anywhere; }
+    .data-section { border:1px solid var(--storage-line); border-left:6px solid var(--storage-ink); border-radius:8px; background:var(--storage); overflow:hidden; }
+    .data-section > summary { list-style:none; cursor:pointer; padding:14px 16px; display:flex; justify-content:space-between; align-items:center; gap:16px; }
+    .data-section > summary::-webkit-details-marker { display:none; }
+    .data-section > summary:hover { filter:saturate(1.05); }
+    .data-section h3 { margin:0 0 5px; color:var(--storage-ink); }
+    .data-section p { margin:0; color:var(--muted); font-size:13px; }
+    .data-content { border-top:1px solid var(--storage-line); padding:14px 16px 16px; background:var(--storage); }
+    .data-grid { display:grid; gap:16px; }
+    .data-block h4 { margin:0 0 8px; font-size:13px; color:var(--storage-ink); text-transform:uppercase; letter-spacing:.04em; }
+    .table-scroll { overflow:auto; border-radius:8px; background:#fff; }
+    .table-scroll table { min-width:760px; }
     .timeline-panel { position:sticky; top:18px; max-height:calc(100vh - 36px); overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fff; padding:16px 16px 18px; }
     .timeline-panel h2 { margin:0 0 4px; }
     .timeline-subtitle { color:var(--muted); font-size:12px; margin:0 0 16px; }
@@ -2126,6 +2145,37 @@ function Write-ResultWindowReport {
       <section class="findings-panel">
         <h2>Findings by Primary Area</h2>
         $areaGroupedFindingsHtml
+
+        <h2>Storage SMART and Reliability</h2>
+        <details class="data-section" open>
+          <summary>
+            <div>
+              <h3>Storage quick data</h3>
+              <p>SMART failure prediction, reliability counters, disks, and volumes from this run.</p>
+            </div>
+            <span class="area-count">$($storageReliability.Count)</span>
+          </summary>
+          <div class="data-content">
+            <div class="data-grid">
+              <section class="data-block">
+                <h4>SMART Failure Prediction</h4>
+                <div class="table-scroll">$smartPredictionHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Storage Reliability Counters</h4>
+                <div class="table-scroll">$storageReliabilityHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Disks</h4>
+                <div class="table-scroll">$diskHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Volumes</h4>
+                <div class="table-scroll">$volumeHtml</div>
+              </section>
+            </div>
+          </div>
+        </details>
 
         <h2>All Findings</h2>
         $allFindingsHtml
