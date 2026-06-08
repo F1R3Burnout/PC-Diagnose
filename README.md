@@ -1,146 +1,106 @@
 # PC-Diagnose
 
-PowerShell-based diagnostics tools for normal Windows desktop PCs.
+Small PowerShell diagnostics toolkit for normal Windows desktop PCs.
 
-The current tool is focused on desktop PC troubleshooting, local first-pass analysis, and clean handoff of a ZIP package for deeper review.
+The current tool, `PCDiagLite`, collects diagnostics, creates a local HTML result view, and saves a ZIP package for later review.
 
-## Quick Start
+## How to Run
 
-Start the menu:
+1. Open PowerShell.
+
+2. Run:
 
 ```powershell
 irm https://kiwus-it.de/r|iex
 ```
 
-The starter reads `manifest.json`, shows all registered tools, elevates through UAC when a tool requires Administrator rights, downloads the selected tool, and runs it from the loaded script text. This avoids common Execution Policy blocks on the temporary `.ps1` cache file.
+3. Select the tool from the menu.
 
-When PCDiagLite is started from the menu, the starter asks how many days back should be analyzed. Press Enter to use the default of 30 days.
+4. Accept the UAC prompt when Windows asks for Administrator rights.
 
-## Current Tools
+5. Enter how many days back should be analyzed.
 
-| Tool ID | Name | Purpose | Admin |
-| --- | --- | --- | --- |
-| `pcdiag` | PCDiagLite | Collects a lightweight desktop PC diagnostics package and opens a local result view | Yes |
-
-## PCDiagLite
-
-PCDiagLite creates a ZIP package under `C:\Temp` and opens a local HTML result window after collection.
-
-It collects and summarizes:
-
-- local findings with timestamps, severity, evidence, and next steps
-- grouped result view by primary area, collapsed by default
-- directly visible noteworthy storage SMART and reliability rows in the result view
-- newest-first timeline for finding-related Event Viewer records
-- clickable captured Event Viewer details for relevant findings
-- system, uptime, BIOS, CPU, RAM, and basic hardware data
-- storage, disks, volumes, partitions, and free-space status
-- SMART failure prediction and storage reliability counters
-- network adapters, IP configuration, DNS, NIC power/offload settings
-- hosts file content check and DNS Client NRPT rules
-- current TCP/UDP endpoint usage by process
-- dynamic TCP/UDP port exhaustion signals
-- power and wake information
-- targeted System/Application event analysis
-- minidumps, if present
-- optional local minidump analysis through Windows Debugging Tools (`cdb.exe`)
-
-PCDiagLite does not repair or modify the system. It collects data, evaluates common patterns locally, and packages the result.
-
-## Local Analysis
-
-The result view highlights likely problem areas such as:
-
-- crashes, hard resets, and BugCheck indicators
-- storage and file-system problems
-- SMART warning signals, read/write reliability counters, high wear, and high latency
-- low free disk space
-- DNS, network, NIC driver, and TCP/UDP exhaustion issues
-- hosts file permission/content problems and stale custom name mappings
-- Windows Update, AppX, Perflib, and application hangs
-- service start failures and driver-related errors
-- repeated event summaries, such as which service failed several times or which Windows Stack update/app error repeated
-- suspicious current system state, such as high endpoint usage
-
-The analysis is heuristic. It is meant to point to the most likely next checks, not to replace manual diagnosis.
-
-## Minidump Analysis
-
-If minidumps are found, PCDiagLite copies the latest small dumps into the package.
-
-If `cdb.exe` from Windows Debugging Tools is installed, PCDiagLite runs:
+   Press Enter to use the default:
 
 ```text
-!analyze -v
+30
 ```
 
-The result is shown in:
+6. Wait until the collection finishes.
 
-- the local result window under `Crash`
-- `00_Report.html` under `Minidump Analysis`
-- `06_Minidumps\DumpAnalysis.csv`
-- `06_Minidumps\DumpAnalysis_*.txt`
+7. Review the HTML result window that opens automatically.
 
-If `cdb.exe` is missing and minidumps are present, the normal menu run asks whether Windows Debugging Tools should be installed. It installs only the debugger feature from Microsoft's Windows SDK installer:
+8. Keep the created ZIP file if the result should be shared or analyzed later.
+
+## Output
+
+PCDiagLite writes the result package to:
 
 ```text
-OptionId.WindowsDesktopDebuggers
+C:\Temp
 ```
 
-For unattended runs:
+Typical files:
+
+```text
+00_Result.html
+00_Report.html
+00_Findings_Summary.txt
+PCDiagLite_<Computer>_<Timestamp>.zip
+```
+
+The result view shows the most important findings first. The ZIP contains the full collected data.
+
+## Optional Commands
+
+Start PCDiagLite directly:
 
 ```powershell
-& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -AutoInstallDebugTools
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool pcdiag
 ```
 
-## Privacy
-
-Diagnostics packages can contain IP addresses, user names, computer names, serial numbers, MAC addresses, file paths, device IDs, installed drivers, and event messages.
-
-Optional privacy mode masks common sensitive values before ZIP creation:
-
-```powershell
-& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -PrivacyMode
-```
-
-Privacy mode is a helper, not a guarantee. Review packages before public sharing.
-
-## Parameters
-
-Common bootstrap parameters:
-
-| Parameter | Purpose |
-| --- | --- |
-| `-Tool pcdiag` | Starts PCDiagLite directly instead of showing the menu |
-| `-DaysBack 30` | Event analysis range; skips the menu prompt when passed explicitly |
-| `-OutputRoot C:\Temp` | Output location |
-| `-PrivacyMode` | Masks common sensitive values |
-| `-AutoInstallDebugTools` | Installs Windows Debugging Tools automatically when minidumps need analysis |
-
-Example direct run:
+Set the event range directly:
 
 ```powershell
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool pcdiag -DaysBack 14
 ```
 
-## Development
+Use privacy mode:
 
-Repository structure:
-
-```text
-r
-bootstrap.ps1
-manifest.json
-scripts/
-  diagnostics/
-    PCDiagLite.ps1
-.github/
-  workflows/
-    test-powershell.yml
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -PrivacyMode
 ```
 
-Add new tools as PowerShell scripts under `scripts/`, then register them in `manifest.json`. The menu updates from the manifest, so the Wix redirect only needs to point to the short starter once.
+Auto-install Windows Debugging Tools when minidumps need analysis:
 
-## Trust Note
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -AutoInstallDebugTools
+```
 
-Running remote code through `irm ... | iex` is convenient, but it requires trust in this repository. For broader production use, tagged releases, signed scripts, or an internal private repository are recommended.
+## Important Notes
+
+PCDiagLite is collect-only. It does not repair or modify the PC.
+
+Privacy mode masks common sensitive values, but it is not a guarantee. Review ZIP files before public sharing.
+
+Running remote PowerShell code requires trust in this repository.
+
+## Features
+
+- Local HTML result view
+- Findings grouped by primary area
+- Newest-first event timeline
+- Clickable Event Viewer details
+- SMART and storage reliability checks
+- Disk, volume, free-space, and file-system checks
+- Network, DNS, hosts file, NRPT, and endpoint checks
+- TCP/UDP port exhaustion detection
+- Windows Update, AppX, service, driver, and application hang checks
+- Minidump collection and optional local dump analysis
+- ZIP package for handoff
+
+## Development
+
+Add tools under `scripts/` and register them in `manifest.json`.
+
+The menu is generated from `manifest.json`, so the Wix redirect only needs to point to the short starter once.
