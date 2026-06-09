@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Creates a small, robust diagnostics package for an unstable Windows desktop PC.
 
@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v32 Policy Overview"
+    $ToolVersion = "Lite v32"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -2022,7 +2022,6 @@ Files for manual review:
 - 00_Quick_Summary.txt
 - 00_Report.html
 - 02_System_Hardware\HardwareMigration_*.csv
-- 07_Policies\Changed_Policy_Registry_Values.csv
 - 01_Events\System_Targeted_Stability_Storage_Network_${DaysBack}d.csv
 - 01_Events\System_Targeted_TopEvents_${DaysBack}d.csv
 - 99_Runtime\runtime.log
@@ -2055,7 +2054,6 @@ function Write-HtmlReport {
     $migrationCleanupCandidates = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_CleanupCandidates.csv")
     $dumps = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpFiles.csv")
     $dumpAnalysis = @(Read-DumpAnalysisRows)
-    $changedPolicies = Read-CsvSafe (Join-Path $Dirs.Policies "Changed_Policy_Registry_Values.csv")
 
     $osText = ""
     $overviewPath = Join-Path $Dirs.System "System_Overview.txt"
@@ -2083,7 +2081,6 @@ function Write-HtmlReport {
     $migrationCleanupCandidatesHtml = New-HtmlTable $migrationCleanupCandidates @("CandidateType","ReviewPriority","Name","Class","Identifier","Reason","SuggestedCommand","Caution") 120
     $dumpHtml = New-HtmlTable $dumps @("Type","Path","SizeMB","LastWriteTime") 10
     $dumpAnalysisHtml = New-HtmlTable $dumpAnalysis @("DumpFile","Status","BugCheck","ProbablyCausedBy","ProcessName","ModuleName","ImageName","FailureBucket","ExitCode","AnalysisFile","Note") 10
-    $changedPolicyHtml = New-HtmlTable $changedPolicies @("Scope","PolicyRoot","KeyPath","ValueName","ValueKind","ValueData") 300
 
 @"
 <!doctype html>
@@ -2135,10 +2132,6 @@ function Write-HtmlReport {
     $findingsHtml
     <h2>System</h2>
     <pre>$(Escape-Html $osText)</pre>
-    <h2>Changed Policy Settings</h2>
-    <p class="muted">Only explicit policy registry values found under common local Group Policy locations are shown.</p>
-    $changedPolicyHtml
-    <h2>Hardware Migration / Driver Context</h2>
     <h3>PnP Problem Devices</h3>
     $migrationPnpHtml
     <h3>Old Third-Party Hardware Drivers</h3>
@@ -2244,9 +2237,6 @@ function Write-ResultWindowReport {
     $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Will be created after completion." } else { $PackagePath }
     $reportPath = "00_Report.html"
     $textReportPath = "00_Findings_Summary.txt"
-    $changedPolicies = Read-CsvSafe (Join-Path $Dirs.Policies "Changed_Policy_Registry_Values.csv")
-    $changedPolicyHtml = New-HtmlTable $changedPolicies @("Scope","PolicyRoot","KeyPath","ValueName","ValueKind","ValueData") 300
-    $changedPolicyCount = @($changedPolicies).Count
 
 @"
 <!doctype html>
@@ -2271,7 +2261,6 @@ function Write-ResultWindowReport {
       --remote:#ccfbf1; --remote-line:#5eead4; --remote-ink:#115e59;
       --collection:#f1f5f9; --collection-line:#cbd5e1; --collection-ink:#334155;
       --general:#f8fafc; --general-line:#cbd5e1; --general-ink:#334155;
-      --policy:#f8fafc; --policy-line:#cbd5e1; --policy-ink:#334155;
     }
     * { box-sizing:border-box; }
     body { margin:0; font-family: Segoe UI, Arial, sans-serif; color:var(--ink); background:#ffffff; }
@@ -2339,12 +2328,6 @@ function Write-ResultWindowReport {
     .data-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; min-width:0; }
     .data-block { min-width:0; max-width:100%; }
     .data-block h4 { margin:0 0 8px; font-size:13px; color:var(--storage-ink); text-transform:uppercase; letter-spacing:.04em; }
-    .policy-section { border-color:var(--policy-line); border-left-color:var(--policy-ink); background:var(--policy); }
-    .policy-section > summary,
-    .policy-section .data-content { background:var(--policy); }
-    .policy-section h3,
-    .policy-section .data-block h4 { color:var(--policy-ink); }
-    .policy-section[open] > summary { border-bottom:1px solid var(--policy-line); }
     .table-scroll { display:block; width:100%; max-width:100%; overflow-x:auto; overflow-y:hidden; border-radius:8px; background:#fff; -webkit-overflow-scrolling:touch; }
     .table-scroll table { width:max-content; min-width:100%; max-width:none; }
     .table-scroll th, .table-scroll td { white-space:nowrap; }
@@ -2472,25 +2455,6 @@ function Write-ResultWindowReport {
 
         <h2>All Findings</h2>
         $allFindingsHtml
-
-        <h2>Changed Policy Settings</h2>
-        <details class="data-section policy-section">
-          <summary>
-            <div>
-              <h3>Explicit policy registry values</h3>
-              <p>Only set values from common local Group Policy registry locations. Empty/default policy areas are not listed.</p>
-            </div>
-            <span class="area-count">$changedPolicyCount</span>
-          </summary>
-          <div class="data-content">
-            <div class="data-grid">
-              <section class="data-block">
-                <h4>Changed Policies</h4>
-                <div class="table-scroll">$changedPolicyHtml</div>
-              </section>
-            </div>
-          </div>
-        </details>
 
         <h2>Files</h2>
         <div class="paths">
@@ -3049,94 +3013,38 @@ Invoke-ExternalWithTimeout -Name "powercfg waketimers" -Command "powercfg /waket
 Invoke-ExternalWithTimeout -Name "powercfg wake armed devices" -Command "powercfg /devicequery wake_armed" -OutputFile (Join-Path $Dirs.Power "powercfg_wake_armed_devices.txt") -TimeoutSeconds 20
 
 # ==================================================================================================
-# Section 7: Changed local policy registry values
 # ==================================================================================================
 # Why:
-# Many desktop tweaks and hardening tools leave explicit Group Policy style registry values behind.
-# Only actual value entries under policy locations are exported, so the result stays readable.
 
-$PolicyInventoryScript = New-ChildScript @'
-function Convert-PolicyValueToText {
-    param([AllowNull()][object]$Value)
 
-    if ($null -eq $Value) { return "" }
-    if ($Value -is [byte[]]) {
-        return (($Value | ForEach-Object { $_.ToString("X2") }) -join " ")
     }
-    if ($Value -is [array]) {
-        return (($Value | ForEach-Object { [string]$_ }) -join "; ")
     }
-    return [string]$Value
 }
 
-$roots = @(
-    [PSCustomObject]@{ Scope = "Computer"; RootName = "HKLM\SOFTWARE\Policies"; NativeRootName = "HKEY_LOCAL_MACHINE\SOFTWARE\Policies"; Path = "HKLM:\SOFTWARE\Policies" },
-    [PSCustomObject]@{ Scope = "User"; RootName = "HKCU\SOFTWARE\Policies"; NativeRootName = "HKEY_CURRENT_USER\SOFTWARE\Policies"; Path = "HKCU:\SOFTWARE\Policies" },
-    [PSCustomObject]@{ Scope = "Computer"; RootName = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies"; NativeRootName = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies"; Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies" },
-    [PSCustomObject]@{ Scope = "User"; RootName = "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies"; NativeRootName = "HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies"; Path = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies" },
-    [PSCustomObject]@{ Scope = "Computer"; RootName = "HKLM\SYSTEM\CurrentControlSet\Policies"; NativeRootName = "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Policies"; Path = "HKLM:\SYSTEM\CurrentControlSet\Policies" }
 )
 
-$rows = New-Object System.Collections.Generic.List[object]
-$errors = New-Object System.Collections.Generic.List[string]
-$providerColumns = @("PSPath","PSParentPath","PSChildName","PSDrive","PSProvider")
 
-foreach ($root in $roots) {
-    if (-not (Test-Path -LiteralPath $root.Path)) { continue }
 
-    $keys = @()
     try {
-        $keys += Get-Item -LiteralPath $root.Path -ErrorAction Stop
-        $keys += Get-ChildItem -LiteralPath $root.Path -Recurse -ErrorAction Stop
     } catch {
-        $errors.Add("$($root.RootName): $($_.Exception.Message)") | Out-Null
         try {
-            $keys += Get-ChildItem -LiteralPath $root.Path -Recurse -ErrorAction SilentlyContinue
         } catch {}
     }
 
-    foreach ($key in @($keys | Sort-Object Name -Unique)) {
         try {
-            $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
-            $valueNames = @($props.PSObject.Properties |
-                Where-Object { $providerColumns -notcontains $_.Name } |
-                Select-Object -ExpandProperty Name)
 
-            foreach ($valueName in $valueNames) {
-                $valueKind = ""
-                try { $valueKind = [string]$key.GetValueKind($valueName) } catch {}
-                $relativePath = [string]$key.Name
-                if ($relativePath.StartsWith($root.NativeRootName)) {
-                    $relativePath = $relativePath.Substring($root.NativeRootName.Length).TrimStart('\')
-                } elseif ($relativePath.StartsWith($root.RootName)) {
-                    $relativePath = $relativePath.Substring($root.RootName.Length).TrimStart('\')
                 }
 
-                $rows.Add([PSCustomObject]@{
-                    Scope      = $root.Scope
-                    PolicyRoot = $root.RootName
-                    KeyPath    = $relativePath
-                    ValueName  = $valueName
-                    ValueKind  = $valueKind
-                    ValueData  = Convert-PolicyValueToText $props.$valueName
-                }) | Out-Null
             }
         } catch {
-            $errors.Add("$($key.Name): $($_.Exception.Message)") | Out-Null
         }
     }
 }
 
-$rows |
-    Sort-Object Scope, PolicyRoot, KeyPath, ValueName |
-    Export-Csv (Join-Path $Dirs.Policies "Changed_Policy_Registry_Values.csv") -NoTypeInformation -Encoding UTF8
 
-if ($errors.Count -gt 0) {
-    $errors | Sort-Object -Unique | Out-File (Join-Path $Dirs.Policies "Policy_Registry_Collection_Errors.txt") -Encoding UTF8
 }
 '@
 
-Invoke-ChildPowerShellWithTimeout -Name "Changed policy registry values" -ScriptContent $PolicyInventoryScript -TimeoutSeconds 45 | Out-Null
 
 # ==================================================================================================
 # Section 8: Relevant drivers instead of a full driver list
