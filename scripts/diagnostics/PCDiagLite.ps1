@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v29 CS2 Crash Context"
+$ToolVersion = "Lite v30 Hardware Migration Context"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1120,6 +1120,7 @@ function Get-CategoryCssClass {
         "Network"       { return "cat-network" }
         "Storage"       { return "cat-storage" }
         "Hardware"      { return "cat-hardware" }
+        "Hardware Migration" { return "cat-migration" }
         "Crash"         { return "cat-crash" }
         "Stability"     { return "cat-stability" }
         "Services"      { return "cat-services" }
@@ -1499,6 +1500,17 @@ function Write-InitialFindingsReport {
         Add-Finding ([ref]$findings) "Info" "Network" "NIC power or offload settings are enabled" "$($riskyPowerRows.Count) power management row(s) and $($riskyAdvancedRows.Count) advanced NIC setting row(s) should be reviewed only if network dropouts or wake issues are part of the complaint." "For normal desktop PCs these settings can be acceptable. Only change them if dropouts, wake-from-sleep problems, or remote-access issues correlate with the timestamps." -TimeContext $currentObservation -DetailText ($nicDetails -join "`r`n`r`n")
     }
 
+    $driverPnpEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        (
+            ($_.ProviderName -match 'Kernel-PnP|UserPnp|DeviceSetupManager|DriverFrameworks-UserMode') -or
+            ($_.Id -in @('219','411','400','410','430','442'))
+        )
+    })
+    if ($driverPnpEvents.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Medium" "Hardware Migration" "Driver or device setup events found" "$($driverPnpEvents.Count) Kernel-PnP, UserPnp, DeviceSetupManager, or DriverFrameworks event(s)." "On a Windows installation moved between hardware, these events can point to old devices, incompatible drivers, or missing current hardware drivers. Open the repeated event summary and compare device IDs with the current motherboard, GPU, storage controller, USB devices, and network adapter." -EventRows $driverPnpEvents
+    }
+
     $serviceEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         $_.ProviderName -match 'Service Control Manager' -and
@@ -1645,6 +1657,41 @@ CS2 interpretation:
     $lowLevelRows = @(@($lowLevelDrivers) + @($lowLevelServices))
     if ($lowLevelRows.Count -gt 0) {
         Add-Finding ([ref]$findings) "Info" "Drivers" "Low-level hardware access drivers are installed" "$($lowLevelRows.Count) driver/service row(s) mention inpout, WinRing0, IOMap, OpenLibSys, or similar components." "These components are often installed by monitoring, RGB, fan-control, benchmark, or overclocking tools. They are not automatically bad, but review them if crashes, hangs, or driver service events occur around the same timestamps." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $lowLevelRows -Title "Low-level driver and service rows")
+    }
+
+    $migrationPnpRows = @(Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_PnpProblemDevices.csv") | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.FriendlyName) -and
+        [string]$_.Problem -notmatch 'Get-PnpDevice is not available'
+    })
+    if ($migrationPnpRows.Count -gt 0) {
+        $nonPhantomPnpRows = @($migrationPnpRows | Where-Object { [string]$_.Problem -notmatch 'CM_PROB_PHANTOM' })
+        if ($nonPhantomPnpRows.Count -gt 0) {
+            Add-Finding ([ref]$findings) "Medium" "Hardware Migration" "PnP devices report driver or hardware problems" "$($nonPhantomPnpRows.Count) non-phantom device row(s) are not in OK state; $($migrationPnpRows.Count) total PnP problem row(s)." "If this Windows installation was moved between PCs, check whether these devices belong to old hardware. In Device Manager, review problem devices and hidden devices before removing anything. Prefer vendor chipset, storage, network, audio, and GPU driver packages for the current motherboard/PC." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $migrationPnpRows -Title "PnP problem devices")
+        } else {
+            Add-Finding ([ref]$findings) "Info" "Hardware Migration" "Non-present phantom devices are still registered" "$($migrationPnpRows.Count) PnP row(s) report CM_PROB_PHANTOM, usually devices Windows remembers but does not currently see." "This is common when the same Windows installation is moved across hardware or when USB devices are swapped often. Treat it as cleanup context, not a fault by itself. Review Device Manager hidden devices only if symptoms or driver events point to the same hardware family." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $migrationPnpRows -Title "Phantom PnP devices")
+        }
+    }
+
+    $missingDriverFileRows = @(Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_DriverServices_MissingFiles.csv"))
+    if ($missingDriverFileRows.Count -gt 0) {
+        Add-Finding ([ref]$findings) "Medium" "Hardware Migration" "Driver services reference missing files" "$($missingDriverFileRows.Count) system driver service row(s) point to missing .sys files." "These are strong stale-driver candidates after hardware swaps or incomplete uninstalls. Review the service names, correlate with Service Control Manager events, and remove or reinstall the related vendor package deliberately." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $missingDriverFileRows -Title "Driver services with missing files")
+    }
+
+    $oldThirdPartyDriverRows = @(Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_OldThirdPartyDrivers.csv"))
+    if ($oldThirdPartyDriverRows.Count -gt 0) {
+        $oldDriverSummary = (($oldThirdPartyDriverRows | Group-Object Manufacturer | Sort-Object Count -Descending | Select-Object -First 5 | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+        Add-Finding ([ref]$findings) "Info" "Hardware Migration" "Old third-party hardware drivers are installed" "$($oldThirdPartyDriverRows.Count) non-Microsoft driver row(s) are older than four years. Top manufacturers: $oldDriverSummary." "Old drivers are not automatically wrong, but on installations moved across hardware they are worth reviewing. Prioritize storage, chipset, network, audio, and GPU drivers that no longer match the current PC." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $oldThirdPartyDriverRows -Title "Old third-party drivers")
+    }
+
+    $vendorDriverServiceRows = @(Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_VendorDriverServices.csv"))
+    $vendorGroups = @($vendorDriverServiceRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VendorGroup) } | Group-Object VendorGroup | Sort-Object Count -Descending)
+    $vendorGroupNames = @($vendorGroups | ForEach-Object { [string]$_.Name })
+    $hasAmdAndNvidia = ($vendorGroupNames -contains "AMD") -and ($vendorGroupNames -contains "NVIDIA")
+    if ($hasAmdAndNvidia) {
+        Add-Finding ([ref]$findings) "Medium" "Hardware Migration" "AMD and NVIDIA driver stacks are both present" "Driver services from AMD and NVIDIA are both present." "This can be normal on some systems, but after a GPU swap it is a classic stale-driver clue. If graphics crashes, game crashes, driver resets, or WHEA events occur, consider a clean GPU driver reinstall and remove old vendor packages deliberately." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $vendorDriverServiceRows -Title "Vendor driver services")
+    } elseif ($vendorDriverServiceRows.Count -ge 12 -and $vendorGroups.Count -ge 4) {
+        $vendorSummary = (($vendorGroups | Select-Object -First 8 | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+        Add-Finding ([ref]$findings) "Info" "Hardware Migration" "Many vendor driver services are installed" "$($vendorDriverServiceRows.Count) vendor driver service row(s) across $($vendorGroups.Count) vendor group(s): $vendorSummary." "This is a review hint for PCs that reuse one Windows installation across hardware. Remove only packages you can identify as old hardware, and prioritize entries that correlate with crashes, failed services, or missing driver files." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $vendorDriverServiceRows -Title "Vendor driver services")
     }
 
     $remoteToolRows = Read-CsvSafe (Join-Path $Dirs.System "Remote_Virtualization_Network_Tools.csv")
@@ -1877,6 +1924,7 @@ Next step:     $($finding.Recommendation)
 Files for manual review:
 - 00_Quick_Summary.txt
 - 00_Report.html
+- 02_System_Hardware\HardwareMigration_*.csv
 - 01_Events\System_Targeted_Stability_Storage_Network_${DaysBack}d.csv
 - 01_Events\System_Targeted_TopEvents_${DaysBack}d.csv
 - 99_Runtime\runtime.log
@@ -1902,6 +1950,10 @@ function Write-HtmlReport {
     $udpTop = Read-CsvSafe (Join-Path $Dirs.Network "UDP_Endpoints_By_Process_Top30.csv")
     $topSystem = Read-CsvSafe (Join-Path $Dirs.Events "System_TopEvents_${DaysBack}d.csv")
     $targetedTop = Read-CsvSafe (Join-Path $Dirs.Events "System_Targeted_TopEvents_${DaysBack}d.csv")
+    $migrationPnpProblems = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_PnpProblemDevices.csv")
+    $migrationOldDrivers = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_OldThirdPartyDrivers.csv")
+    $migrationVendorServices = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_VendorDriverServices.csv")
+    $migrationMissingDriverFiles = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_DriverServices_MissingFiles.csv")
     $dumps = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpFiles.csv")
     $dumpAnalysis = @(Read-DumpAnalysisRows)
 
@@ -1924,6 +1976,10 @@ function Write-HtmlReport {
     $udpTopHtml = New-HtmlTable $udpTop @("PID","Count","Process","Path") 30
     $topHtml = New-HtmlTable $topSystem @("Count","Name") 25
     $targetedHtml = New-HtmlTable $targetedTop @("Count","Name") 25
+    $migrationPnpHtml = New-HtmlTable $migrationPnpProblems @("Status","Class","FriendlyName","InstanceId","Problem") 50
+    $migrationOldDriversHtml = New-HtmlTable $migrationOldDrivers @("DeviceName","DeviceClass","Manufacturer","DriverVersion","DriverDate","InfName","DeviceID") 80
+    $migrationVendorServicesHtml = New-HtmlTable $migrationVendorServices @("VendorGroup","Name","DisplayName","State","Status","StartMode","PathName") 80
+    $migrationMissingDriverFilesHtml = New-HtmlTable $migrationMissingDriverFiles @("Name","DisplayName","State","Status","StartMode","MissingPath","OriginalPathName") 80
     $dumpHtml = New-HtmlTable $dumps @("Type","Path","SizeMB","LastWriteTime") 10
     $dumpAnalysisHtml = New-HtmlTable $dumpAnalysis @("DumpFile","Status","BugCheck","ProbablyCausedBy","ProcessName","ModuleName","ImageName","FailureBucket","ExitCode","AnalysisFile","Note") 10
 
@@ -1977,6 +2033,15 @@ function Write-HtmlReport {
     $findingsHtml
     <h2>System</h2>
     <pre>$(Escape-Html $osText)</pre>
+    <h2>Hardware Migration / Driver Context</h2>
+    <h3>PnP Problem Devices</h3>
+    $migrationPnpHtml
+    <h3>Old Third-Party Hardware Drivers</h3>
+    $migrationOldDriversHtml
+    <h3>Vendor Driver Services</h3>
+    $migrationVendorServicesHtml
+    <h3>Driver Services With Missing Files</h3>
+    $migrationMissingDriverFilesHtml
     <h2>Disks</h2>
     $diskHtml
     <h2>Volumes</h2>
@@ -2087,6 +2152,7 @@ function Write-ResultWindowReport {
       --network:#dbeafe; --network-line:#93c5fd; --network-ink:#1e3a8a;
       --storage:#dcfce7; --storage-line:#86efac; --storage-ink:#166534;
       --hardware:#f3e8ff; --hardware-line:#c4b5fd; --hardware-ink:#5b21b6;
+      --migration:#f5f3ff; --migration-line:#c4b5fd; --migration-ink:#6d28d9;
       --stability:#ffedd5; --stability-line:#fdba74; --stability-ink:#9a3412;
       --services:#e0f2fe; --services-line:#7dd3fc; --services-ink:#075985;
       --drivers:#ede9fe; --drivers-line:#a5b4fc; --drivers-ink:#3730a3;
@@ -2197,6 +2263,7 @@ function Write-ResultWindowReport {
     .cat-network { --cat-bg:var(--network); --cat-line:var(--network-line); --cat-ink:var(--network-ink); }
     .cat-storage { --cat-bg:var(--storage); --cat-line:var(--storage-line); --cat-ink:var(--storage-ink); }
     .cat-hardware { --cat-bg:var(--hardware); --cat-line:var(--hardware-line); --cat-ink:var(--hardware-ink); }
+    .cat-migration { --cat-bg:var(--migration); --cat-line:var(--migration-line); --cat-ink:var(--migration-ink); }
     .cat-crash, .cat-stability { --cat-bg:var(--stability); --cat-line:var(--stability-line); --cat-ink:var(--stability-ink); }
     .cat-services { --cat-bg:var(--services); --cat-line:var(--services-line); --cat-ink:var(--services-ink); }
     .cat-drivers { --cat-bg:var(--drivers); --cat-line:var(--drivers-line); --cat-ink:var(--drivers-ink); }
@@ -2860,10 +2927,101 @@ Get-CimInstance Win32_PnPSignedDriver |
     Select-Object DeviceName, DeviceClass, Manufacturer, DriverVersion, DriverDate, InfName, DeviceID |
     Export-Csv (Join-Path $Dirs.System "Relevant_Drivers_Network_Storage_System.csv") -NoTypeInformation -Encoding UTF8
 
+$migrationClasses = @("Net", "SCSIAdapter", "HDC", "DiskDrive", "Storage", "System", "Display", "MEDIA", "USB", "HIDClass", "SoftwareComponent", "Extension")
+$oldDriverCutoff = (Get-Date).AddYears(-4)
+Get-CimInstance Win32_PnPSignedDriver |
+    Where-Object {
+        $migrationClasses -contains $_.DeviceClass -and
+        "$($_.Manufacturer)" -notmatch 'Microsoft|Windows|Standard|Standardsystem|WireGuard|Tailscale' -and
+        $_.DriverDate -and
+        ([datetime]$_.DriverDate) -lt $oldDriverCutoff
+    } |
+    Select-Object DeviceName, DeviceClass, Manufacturer, DriverVersion, DriverDate, InfName, DeviceID |
+    Export-Csv (Join-Path $Dirs.System "HardwareMigration_OldThirdPartyDrivers.csv") -NoTypeInformation -Encoding UTF8
+
+if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
+    Get-PnpDevice -ErrorAction SilentlyContinue |
+        Where-Object {
+            "$($_.Status)" -notmatch '^OK$' -and
+            "$($_.Class)" -notmatch 'LegacyDriver|VolumeSnapshot'
+        } |
+        Select-Object Status, Class, FriendlyName, InstanceId, Problem |
+        Export-Csv (Join-Path $Dirs.System "HardwareMigration_PnpProblemDevices.csv") -NoTypeInformation -Encoding UTF8
+} else {
+    [PSCustomObject]@{
+        Status = ""
+        Class = ""
+        FriendlyName = ""
+        InstanceId = ""
+        Problem = "Get-PnpDevice is not available on this system."
+    } | Export-Csv (Join-Path $Dirs.System "HardwareMigration_PnpProblemDevices.csv") -NoTypeInformation -Encoding UTF8
+}
+
 Get-CimInstance Win32_SystemDriver |
     Where-Object { "$($_.Name) $($_.DisplayName) $($_.PathName)" -match 'inpout|WinRing|WinRing0|IOMap|OpenLibSys' } |
     Select-Object Name, DisplayName, State, Status, StartMode, PathName |
     Export-Csv (Join-Path $Dirs.System "LowLevel_Hardware_Access_Drivers.csv") -NoTypeInformation -Encoding UTF8
+
+$legacyVendorPattern = '(?i)\bAMD\b|\bATI\b|NVIDIA|Intel|Realtek|ASUS|MSI|Micro-Star|Gigabyte|Aorus|ASRock|Razer|Corsair|SteelSeries|Logitech|Elgato|A-Volute|Nahimic|Sonic|Armoury|Aura|iCUE|Killer|Rivet'
+Get-CimInstance Win32_SystemDriver |
+    Where-Object { "$($_.Name) $($_.DisplayName) $($_.PathName)" -match $legacyVendorPattern } |
+    ForEach-Object {
+        $vendorGroup = "Other"
+        $driverText = "$($_.Name) $($_.DisplayName) $($_.PathName)"
+        if ($driverText -match 'AMD|ATI') { $vendorGroup = "AMD" }
+        elseif ($driverText -match 'NVIDIA|nvlddmkm|nvhda|nvvad') { $vendorGroup = "NVIDIA" }
+        elseif ($driverText -match 'Intel|iaStor|e1|e2f|Netwtw') { $vendorGroup = "Intel" }
+        elseif ($driverText -match 'Realtek|RTKVHD|Rtk') { $vendorGroup = "Realtek" }
+        elseif ($driverText -match 'ASUS|Asus|Armoury|Aura|ASIO') { $vendorGroup = "ASUS" }
+        elseif ($driverText -match 'MSI|Micro-Star') { $vendorGroup = "MSI" }
+        elseif ($driverText -match 'Gigabyte|Aorus') { $vendorGroup = "Gigabyte" }
+        elseif ($driverText -match 'Razer') { $vendorGroup = "Razer" }
+        elseif ($driverText -match 'Corsair|iCUE') { $vendorGroup = "Corsair" }
+        elseif ($driverText -match 'SteelSeries') { $vendorGroup = "SteelSeries" }
+        elseif ($driverText -match 'Logitech') { $vendorGroup = "Logitech" }
+        elseif ($driverText -match 'Elgato') { $vendorGroup = "Elgato" }
+        elseif ($driverText -match 'A-Volute|Nahimic|Sonic') { $vendorGroup = "Audio Enhancement" }
+        [PSCustomObject]@{
+            VendorGroup = $vendorGroup
+            Name = $_.Name
+            DisplayName = $_.DisplayName
+            State = $_.State
+            Status = $_.Status
+            StartMode = $_.StartMode
+            PathName = $_.PathName
+        }
+    } |
+    Export-Csv (Join-Path $Dirs.System "HardwareMigration_VendorDriverServices.csv") -NoTypeInformation -Encoding UTF8
+
+Get-CimInstance Win32_SystemDriver |
+    ForEach-Object {
+        $pathText = [string]$_.PathName
+        if (-not [string]::IsNullOrWhiteSpace($pathText)) {
+            $candidate = $pathText.Trim()
+            if ($candidate.StartsWith('"')) {
+                $candidate = ($candidate -split '"')[1]
+            } else {
+                $candidate = ($candidate -split '\s+')[0]
+            }
+            if ($candidate -match '^\\SystemRoot\\') {
+                $candidate = Join-Path $env:WINDIR ($candidate.Substring(12))
+            } elseif ($candidate -match '^System32\\') {
+                $candidate = Join-Path $env:WINDIR $candidate
+            }
+            if ($candidate -match '\.sys$' -and -not (Test-Path -LiteralPath $candidate -ErrorAction SilentlyContinue)) {
+                [PSCustomObject]@{
+                    Name = $_.Name
+                    DisplayName = $_.DisplayName
+                    State = $_.State
+                    Status = $_.Status
+                    StartMode = $_.StartMode
+                    MissingPath = $candidate
+                    OriginalPathName = $_.PathName
+                }
+            }
+        }
+    } |
+    Export-Csv (Join-Path $Dirs.System "HardwareMigration_DriverServices_MissingFiles.csv") -NoTypeInformation -Encoding UTF8
 
 Get-Service |
     Where-Object { "$($_.Name) $($_.DisplayName)" -match 'inpout|WinRing|WinRing0|IOMap|OpenLibSys' } |
@@ -2987,7 +3145,7 @@ foreach (`$log in @('System','Application')) {
 
 `$targeted = `$rawSystem | Where-Object {
     (
-        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|UASPStor|USBSTOR|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NetBT|Netwtw|Time-Service|NtpClient|Service Control Manager|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment'
+        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|UASPStor|USBSTOR|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NetBT|Netwtw|Time-Service|NtpClient|Service Control Manager|Kernel-PnP|UserPnp|DeviceSetupManager|DriverFrameworks-UserMode|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment'
     ) -or
     (
         `$_.Id -in 1,12,13,17,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,4231,4266,4321,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034
