@@ -103,6 +103,7 @@ Running remote PowerShell code requires trust in this repository.
 - Clickable Event Viewer details
 - SMART and storage reliability checks
 - Disk, volume, free-space, and file-system checks
+- Collapsed overview of explicitly changed local policy settings
 - Hardware migration and stale driver context
 - Review-only cleanup commands for stale hardware traces
 - Interactive cleanup assistant for selected stale hardware traces
