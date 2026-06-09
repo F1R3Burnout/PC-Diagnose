@@ -95,6 +95,7 @@ Running remote PowerShell code requires trust in this repository.
 - Disk, volume, free-space, and file-system checks
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
+- Game crash context for Counter-Strike 2 (`cs2.exe`)
 - Windows Update, AppX, service, driver, and application hang checks
 - Minidump collection and optional local dump analysis
 - ZIP package for handoff

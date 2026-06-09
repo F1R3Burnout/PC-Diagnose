@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v28 Noteworthy Storage Data"
+$ToolVersion = "Lite v29 CS2 Crash Context"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -725,6 +725,16 @@ function New-EventDetailsText {
             if ($message -match '(?i)(?:Update|Updates?)\s+(?:for|für)\s+(.+?)(?:\s+failed|\s+fehlgeschlagen|\.|$)') { $subject = $matches[1].Trim() }
             elseif ($message -match '(?i)(?:error|Fehler)\s+0x[0-9a-f]+\s*(?:failed|fehlgeschlagen)?\s*:\s*([A-Za-z0-9_.-]+)') { $subject = $matches[1].Trim() }
             elseif ($message -match '(?i)(0x[0-9a-f]+)') { $subject = $matches[1] }
+        } elseif ($_.ProviderName -match 'Application Error|Application Hang') {
+            $appName = ""
+            $moduleName = ""
+            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung):\s*([^,\r\n]+)') { $appName = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls):\s*([^,\r\n]+)') { $moduleName = $matches[1].Trim() }
+            if (-not [string]::IsNullOrWhiteSpace($appName) -and -not [string]::IsNullOrWhiteSpace($moduleName)) {
+                $subject = "$appName / $moduleName"
+            } elseif (-not [string]::IsNullOrWhiteSpace($appName)) {
+                $subject = $appName
+            }
         } elseif ($_.ProviderName -match 'AppModel|AppX|Store') {
             if ($message -match '(?i)(?:package|Paket)\s+([^\s]+)') { $subject = $matches[1].Trim() }
             elseif ($message -match '(?i)([A-Za-z0-9_.-]+_[A-Za-z0-9_.-]+)') { $subject = $matches[1].Trim() }
@@ -1114,6 +1124,7 @@ function Get-CategoryCssClass {
         "Stability"     { return "cat-stability" }
         "Services"      { return "cat-services" }
         "Drivers"       { return "cat-drivers" }
+        "Games"         { return "cat-games" }
         "Windows Stack" { return "cat-windows" }
         "Remote Access" { return "cat-remote" }
         "Collection"    { return "cat-collection" }
@@ -1507,12 +1518,70 @@ function Write-InitialFindingsReport {
         Add-Finding ([ref]$findings) $driverSeverity "Drivers" "Low-level hardware access driver issue detected" "$($lowLevelDriverEvents.Count) event(s) mention inpout, WinRing0, or similar low-level drivers; $($lowLevelErrorEvents.Count) look like start/failure events." "Identify the related monitoring, RGB, fan-control, benchmark, or overclocking tool. Update or remove it if the service repeatedly fails or if instability correlates with these timestamps." -EventRows $lowLevelDriverEvents
     }
 
+    $cs2Events = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        (
+            ($_.ProviderName -match 'Application Error|Application Hang') -or
+            ($_.Id -in @('1000','1002'))
+        ) -and
+        ($_.Message -match '(?i)\bcs2\.exe\b|Counter-Strike')
+    })
+    if ($cs2Events.Count -gt 0) {
+        $cs2Rows = @($cs2Events | ForEach-Object {
+            $message = [string]$_.Message
+            $faultingApp = ""
+            $faultingModule = ""
+            $exceptionCode = ""
+            $faultOffset = ""
+            $appPath = ""
+            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung):\s*([^,\r\n]+)') { $faultingApp = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls):\s*([^,\r\n]+)') { $faultingModule = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Exception code|Ausnahmecode):\s*(0x[0-9a-f]+)') { $exceptionCode = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Fault offset|Fehleroffset):\s*(0x[0-9a-f]+)') { $faultOffset = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting application path|Pfad der fehlerhaften Anwendung):\s*([^\r\n]+)') { $appPath = $matches[1].Trim() }
+            [PSCustomObject]@{
+                TimeCreated = $_.TimeCreated
+                Source = $_.ProviderName
+                EventId = $_.Id
+                FaultingApplication = $faultingApp
+                FaultingModule = $faultingModule
+                ExceptionCode = $exceptionCode
+                FaultOffset = $faultOffset
+                ApplicationPath = $appPath
+            }
+        })
+        $moduleSummary = (@($cs2Rows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.FaultingModule) } | Group-Object FaultingModule | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+        $exceptionSummary = (@($cs2Rows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.ExceptionCode) } | Group-Object ExceptionCode | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+        if ([string]::IsNullOrWhiteSpace($moduleSummary)) { $moduleSummary = "not captured" }
+        if ([string]::IsNullOrWhiteSpace($exceptionSummary)) { $exceptionSummary = "not captured" }
+        $hasSceneSystem = $cs2Rows | Where-Object { [string]$_.FaultingModule -match 'scenesystem\.dll' } | Select-Object -First 1
+        $hasAccessViolation = $cs2Rows | Where-Object { [string]$_.ExceptionCode -match '0xc0000005' } | Select-Object -First 1
+        $recommendation = "In Steam, verify Counter-Strike 2 game files. Then test once with launch options, autoexec/custom config, overlays, capture tools, and third-party injectors disabled. Update or clean-install the GPU driver and retest with GPU/RAM overclocking or XMP/EXPO disabled if the crashes repeat."
+        if ($hasSceneSystem -and $hasAccessViolation) {
+            $recommendation = "CS2 is crashing in scenesystem.dll with 0xc0000005, an access violation. Verify game files in Steam, remove launch options/autoexec/custom configs for one test, disable overlays/capture tools, update or clean-install the GPU driver, clear shader cache, and test without GPU/RAM overclocking or XMP/EXPO if it repeats."
+        }
+        $cs2Interpretation = @"
+CS2 interpretation:
+
+- cs2.exe is the Counter-Strike 2 game process.
+- scenesystem.dll is part of the game/client rendering and scene stack.
+- 0xc0000005 means access violation. For games this is often caused by corrupted game files, overlays/injectors, graphics driver issues, shader/cache problems, unstable RAM/GPU settings, or a game-side bug.
+- If the timestamps line up with driver resets, WHEA, disk errors, or high storage temperature in this report, prioritize those system findings too.
+"@
+        $detailParts = @()
+        $detailParts += (New-EventDetailsText -Rows $cs2Events)
+        $detailParts += (New-ObjectDetailsText -Rows $cs2Rows -Title "CS2 crash summary rows")
+        $detailParts += $cs2Interpretation.Trim()
+        Add-Finding ([ref]$findings) "Medium" "Games" "Counter-Strike 2 crashes detected" "$($cs2Events.Count) CS2 Application Error/Hang event(s). Modules: $moduleSummary. Exception codes: $exceptionSummary." $recommendation -EventRows $cs2Events -DetailText ($detailParts -join "`r`n`r`n")
+    }
+
     $windowsStackEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         (
             ($_.ProviderName -match 'WindowsUpdateClient|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment|Store|Bits-Client') -or
             ($_.Id -in @('20','1002','1008','1023','5973','1000'))
-        )
+        ) -and
+        ($_.Message -notmatch '(?i)\bcs2\.exe\b|Counter-Strike')
     })
     if ($windowsStackEvents.Count -gt 0) {
         Add-Finding ([ref]$findings) "Medium" "Windows Stack" "Windows update, app, or performance counter issues found" "$($windowsStackEvents.Count) matching WindowsUpdateClient, Perflib, Application Hang/Error, Store/AppX, or BITS event(s)." "After freeing disk space, run DISM /Online /Cleanup-Image /RestoreHealth and sfc /scannow, then review update and Store health again." -EventRows $windowsStackEvents
@@ -2021,6 +2090,7 @@ function Write-ResultWindowReport {
       --stability:#ffedd5; --stability-line:#fdba74; --stability-ink:#9a3412;
       --services:#e0f2fe; --services-line:#7dd3fc; --services-ink:#075985;
       --drivers:#ede9fe; --drivers-line:#a5b4fc; --drivers-ink:#3730a3;
+      --games:#f0fdf4; --games-line:#86efac; --games-ink:#15803d;
       --windows:#fef9c3; --windows-line:#fde68a; --windows-ink:#854d0e;
       --remote:#ccfbf1; --remote-line:#5eead4; --remote-ink:#115e59;
       --collection:#f1f5f9; --collection-line:#cbd5e1; --collection-ink:#334155;
@@ -2130,6 +2200,7 @@ function Write-ResultWindowReport {
     .cat-crash, .cat-stability { --cat-bg:var(--stability); --cat-line:var(--stability-line); --cat-ink:var(--stability-ink); }
     .cat-services { --cat-bg:var(--services); --cat-line:var(--services-line); --cat-ink:var(--services-ink); }
     .cat-drivers { --cat-bg:var(--drivers); --cat-line:var(--drivers-line); --cat-ink:var(--drivers-ink); }
+    .cat-games { --cat-bg:var(--games); --cat-line:var(--games-line); --cat-ink:var(--games-ink); }
     .cat-windows { --cat-bg:var(--windows); --cat-line:var(--windows-line); --cat-ink:var(--windows-ink); }
     .cat-remote { --cat-bg:var(--remote); --cat-line:var(--remote-line); --cat-ink:var(--remote-ink); }
     .cat-collection, .cat-general { --cat-bg:var(--general); --cat-line:var(--general-line); --cat-ink:var(--general-ink); }
