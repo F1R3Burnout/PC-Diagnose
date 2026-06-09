@@ -4,6 +4,8 @@ Small PowerShell diagnostics toolkit for normal Windows desktop PCs.
 
 The current tool, `PCDiagLite`, collects diagnostics, creates a local HTML result view, and saves a ZIP package for later review.
 
+The menu also contains `HardwareCleanupAssist` for interactive cleanup of stale hardware traces.
+
 ## How to Run
 
 1. Open PowerShell.
@@ -77,9 +79,17 @@ Auto-install Windows Debugging Tools when minidumps need analysis:
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -AutoInstallDebugTools
 ```
 
+Start the hardware cleanup assistant directly:
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool hwcleanup
+```
+
 ## Important Notes
 
 PCDiagLite is collect-only. It does not repair or modify the PC.
+
+HardwareCleanupAssist can remove selected non-present device nodes and stale driver services, but only after explicit selection and confirmation.
 
 Privacy mode masks common sensitive values, but it is not a guarantee. Review ZIP files before public sharing.
 
@@ -95,6 +105,7 @@ Running remote PowerShell code requires trust in this repository.
 - Disk, volume, free-space, and file-system checks
 - Hardware migration and stale driver context
 - Review-only cleanup commands for stale hardware traces
+- Interactive cleanup assistant for selected stale hardware traces
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
 - Game crash context for Counter-Strike 2 (`cs2.exe`)

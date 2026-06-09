@@ -34,6 +34,24 @@
           "description": "Masks typical sensitive values before ZIP creation."
         }
       ]
+    },
+    {
+      "id": "hwcleanup",
+      "name": "HardwareCleanupAssist",
+      "category": "maintenance",
+      "description": "Interactively removes selected non-present hardware traces and stale driver services after explicit confirmation.",
+      "path": "scripts/maintenance/HardwareCleanupAssist.ps1",
+      "kind": "powershell",
+      "requiresAdmin": true,
+      "safeMode": "interactive-confirm",
+      "parameters": [
+        {
+          "name": "OutputRoot",
+          "type": "string",
+          "default": "C:\\Temp",
+          "description": "Output folder for cleanup logs."
+        }
+      ]
     }
   ]
 }
