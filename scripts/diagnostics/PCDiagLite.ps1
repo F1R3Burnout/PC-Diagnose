@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v30 Hardware Migration Context"
+$ToolVersion = "Lite v31 Hardware Cleanup Assist"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1694,6 +1694,102 @@ CS2 interpretation:
         Add-Finding ([ref]$findings) "Info" "Hardware Migration" "Many vendor driver services are installed" "$($vendorDriverServiceRows.Count) vendor driver service row(s) across $($vendorGroups.Count) vendor group(s): $vendorSummary." "This is a review hint for PCs that reuse one Windows installation across hardware. Remove only packages you can identify as old hardware, and prioritize entries that correlate with crashes, failed services, or missing driver files." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $vendorDriverServiceRows -Title "Vendor driver services")
     }
 
+    $cleanupCandidates = @()
+    foreach ($row in @($migrationPnpRows | Where-Object { [string]$_.Problem -match 'CM_PROB_PHANTOM' })) {
+        $instanceId = ([string]$row.InstanceId) -replace '"', '\"'
+        $cleanupCandidates += [PSCustomObject]@{
+            CandidateType = "Phantom device"
+            ReviewPriority = "Review"
+            Name = [string]$row.FriendlyName
+            Class = [string]$row.Class
+            Identifier = [string]$row.InstanceId
+            Reason = "Device is registered but currently not present (CM_PROB_PHANTOM)."
+            SuggestedCommand = "pnputil.exe /remove-device ""$instanceId"""
+            Caution = "Use only after confirming this is old hardware or a stale USB/device entry."
+        }
+    }
+    foreach ($row in @($missingDriverFileRows)) {
+        $serviceName = ([string]$row.Name) -replace '"', '\"'
+        $cleanupCandidates += [PSCustomObject]@{
+            CandidateType = "Driver service with missing file"
+            ReviewPriority = "High review"
+            Name = [string]$row.DisplayName
+            Class = "SystemDriver"
+            Identifier = [string]$row.Name
+            Reason = "System driver service references a .sys file that was not found."
+            SuggestedCommand = "sc.exe query ""$serviceName"" ; sc.exe delete ""$serviceName"""
+            Caution = "Deleting a service is destructive. Confirm the missing file path and vendor before using sc.exe delete."
+        }
+    }
+    foreach ($row in @($oldThirdPartyDriverRows | Where-Object { [string]$_.InfName -match '^oem\d+\.inf$' } | Sort-Object InfName -Unique)) {
+        $infName = ([string]$row.InfName) -replace '"', '\"'
+        $cleanupCandidates += [PSCustomObject]@{
+            CandidateType = "Old third-party driver package to review"
+            ReviewPriority = "Review"
+            Name = [string]$row.DeviceName
+            Class = [string]$row.DeviceClass
+            Identifier = [string]$row.InfName
+            Reason = "Driver package is older than four years. It may still belong to current hardware, so it is review-only."
+            SuggestedCommand = "pnputil.exe /enum-drivers | findstr.exe /i ""$infName"""
+            Caution = "This is not a delete command. Use it to inspect the package. Only delete after confirming no current hardware uses it."
+        }
+    }
+    if ($cleanupCandidates.Count -gt 0) {
+        $cleanupCandidatesPath = Join-Path $Dirs.System "HardwareMigration_CleanupCandidates.csv"
+        $cleanupCommandsPath = Join-Path $Dirs.System "HardwareMigration_CleanupCommands_ReviewOnly.ps1"
+        $cleanupGuidePath = Join-Path $Dirs.System "HardwareMigration_CleanupGuide.txt"
+        $cleanupCandidates | Export-Csv $cleanupCandidatesPath -NoTypeInformation -Encoding UTF8
+
+        $commandLines = New-Object System.Collections.Generic.List[string]
+        $commandLines.Add("# Hardware Migration cleanup commands - REVIEW ONLY")
+        $commandLines.Add("#")
+        $commandLines.Add("# Nothing in this file runs automatically because every command is commented out.")
+        $commandLines.Add("# Review HardwareMigration_CleanupCandidates.csv first.")
+        $commandLines.Add("# Recommended safety steps before any cleanup:")
+        $commandLines.Add("# 1. Create a restore point or backup.")
+        $commandLines.Add("# 2. Confirm the device/service/driver belongs to old hardware.")
+        $commandLines.Add("# 3. Prefer vendor uninstallers for GPU, chipset, audio, RGB, and security software.")
+        $commandLines.Add("# 4. Remove one group at a time and reboot/test.")
+        $commandLines.Add("")
+        foreach ($candidate in $cleanupCandidates) {
+            $commandLines.Add("# [$($candidate.ReviewPriority)] $($candidate.CandidateType): $($candidate.Name)")
+            $commandLines.Add("# Class/ID: $($candidate.Class) / $($candidate.Identifier)")
+            $commandLines.Add("# Reason: $($candidate.Reason)")
+            $commandLines.Add("# Caution: $($candidate.Caution)")
+            $commandLines.Add("# $($candidate.SuggestedCommand)")
+            $commandLines.Add("")
+        }
+        $commandLines | Out-File $cleanupCommandsPath -Encoding UTF8
+
+@"
+Hardware Migration Cleanup Guide
+================================
+
+This package found cleanup candidates for an installation that may have been moved across hardware.
+
+Files:
+- HardwareMigration_CleanupCandidates.csv
+- HardwareMigration_CleanupCommands_ReviewOnly.ps1
+
+The PowerShell file is intentionally review-only. Every command is commented out.
+PCDiagLite does not remove devices, drivers, or services automatically.
+
+Suggested order:
+1. Review PnP problem and phantom devices.
+2. Handle missing driver-service files first, because they are strong stale-driver clues.
+3. Review old third-party driver packages only when they do not match current hardware.
+4. Prefer vendor uninstallers for GPU, chipset, audio, RGB, monitoring, and security tools.
+5. Remove one hardware family at a time, reboot, and rerun PCDiagLite.
+
+Typical command meanings:
+- pnputil /remove-device removes a device node, often useful for stale non-present devices.
+- pnputil /delete-driver removes a driver package from the driver store when it is not needed.
+- sc.exe delete removes a service entry and should only be used after confirming it is stale.
+"@ | Out-File $cleanupGuidePath -Encoding UTF8
+
+        Add-Finding ([ref]$findings) "Info" "Hardware Migration" "Hardware cleanup review commands were generated" "$($cleanupCandidates.Count) cleanup candidate command(s) were written as review-only files." "Open 02_System_Hardware\\HardwareMigration_CleanupCandidates.csv and HardwareMigration_CleanupCommands_ReviewOnly.ps1. Commands are commented out by design; only uncomment and run entries that clearly belong to old hardware." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $cleanupCandidates -Title "Hardware cleanup candidates")
+    }
+
     $remoteToolRows = Read-CsvSafe (Join-Path $Dirs.System "Remote_Virtualization_Network_Tools.csv")
     if ($remoteToolRows.Count -ge 5) {
         Add-Finding ([ref]$findings) "Info" "Drivers" "Many remote, VPN, or virtualization components are installed" "$($remoteToolRows.Count) matching driver/service row(s) were collected." "This is not automatically a fault on a desktop PC. If remote control, USB redirection, input devices, VPN, or display capture behave oddly, simplify the stack and test with only the required tools enabled." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $remoteToolRows -Title "Remote, VPN, and virtualization related rows")
@@ -1954,6 +2050,7 @@ function Write-HtmlReport {
     $migrationOldDrivers = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_OldThirdPartyDrivers.csv")
     $migrationVendorServices = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_VendorDriverServices.csv")
     $migrationMissingDriverFiles = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_DriverServices_MissingFiles.csv")
+    $migrationCleanupCandidates = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_CleanupCandidates.csv")
     $dumps = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpFiles.csv")
     $dumpAnalysis = @(Read-DumpAnalysisRows)
 
@@ -1980,6 +2077,7 @@ function Write-HtmlReport {
     $migrationOldDriversHtml = New-HtmlTable $migrationOldDrivers @("DeviceName","DeviceClass","Manufacturer","DriverVersion","DriverDate","InfName","DeviceID") 80
     $migrationVendorServicesHtml = New-HtmlTable $migrationVendorServices @("VendorGroup","Name","DisplayName","State","Status","StartMode","PathName") 80
     $migrationMissingDriverFilesHtml = New-HtmlTable $migrationMissingDriverFiles @("Name","DisplayName","State","Status","StartMode","MissingPath","OriginalPathName") 80
+    $migrationCleanupCandidatesHtml = New-HtmlTable $migrationCleanupCandidates @("CandidateType","ReviewPriority","Name","Class","Identifier","Reason","SuggestedCommand","Caution") 120
     $dumpHtml = New-HtmlTable $dumps @("Type","Path","SizeMB","LastWriteTime") 10
     $dumpAnalysisHtml = New-HtmlTable $dumpAnalysis @("DumpFile","Status","BugCheck","ProbablyCausedBy","ProcessName","ModuleName","ImageName","FailureBucket","ExitCode","AnalysisFile","Note") 10
 
@@ -2042,6 +2140,8 @@ function Write-HtmlReport {
     $migrationVendorServicesHtml
     <h3>Driver Services With Missing Files</h3>
     $migrationMissingDriverFilesHtml
+    <h3>Cleanup Candidates</h3>
+    $migrationCleanupCandidatesHtml
     <h2>Disks</h2>
     $diskHtml
     <h2>Volumes</h2>
@@ -3002,6 +3102,9 @@ Get-CimInstance Win32_SystemDriver |
                 $candidate = ($candidate -split '"')[1]
             } else {
                 $candidate = ($candidate -split '\s+')[0]
+            }
+            if ($candidate -match '^\\\?\?\\') {
+                $candidate = $candidate -replace '^\\\?\?\\', ''
             }
             if ($candidate -match '^\\SystemRoot\\') {
                 $candidate = Join-Path $env:WINDIR ($candidate.Substring(12))

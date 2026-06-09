@@ -94,6 +94,7 @@ Running remote PowerShell code requires trust in this repository.
 - SMART and storage reliability checks
 - Disk, volume, free-space, and file-system checks
 - Hardware migration and stale driver context
+- Review-only cleanup commands for stale hardware traces
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
 - Game crash context for Counter-Strike 2 (`cs2.exe`)
