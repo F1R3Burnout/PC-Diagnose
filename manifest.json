@@ -3,7 +3,7 @@
   "name": "PC-Diagnose",
   "repository": "F1R3Burnout/PC-Diagnose",
   "defaultBranch": "main",
-  "description": "PowerShell-based diagnostics and maintenance tools for normal Windows desktop PCs.",
+  "description": "PowerShell-based diagnostics tool for normal Windows desktop PCs.",
   "tools": [
     {
       "id": "pcdiag",
@@ -32,24 +32,6 @@
           "type": "switch",
           "default": false,
           "description": "Masks typical sensitive values before ZIP creation."
-        }
-      ]
-    },
-    {
-      "id": "hwcleanup",
-      "name": "HardwareCleanupAssist",
-      "category": "maintenance",
-      "description": "Interactively removes selected non-present hardware traces and stale driver services after explicit confirmation.",
-      "path": "scripts/maintenance/HardwareCleanupAssist.ps1",
-      "kind": "powershell",
-      "requiresAdmin": true,
-      "safeMode": "interactive-confirm",
-      "parameters": [
-        {
-          "name": "OutputRoot",
-          "type": "string",
-          "default": "C:\\Temp",
-          "description": "Output folder for cleanup logs."
         }
       ]
     }

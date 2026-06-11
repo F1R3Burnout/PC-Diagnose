@@ -218,8 +218,6 @@ function Invoke-RemoteTool {
         if ($AutoInstallDebugTools) {
             $toolArgs.AutoInstallDebugTools = $true
         }
-    } elseif ($toolInfo.id -eq "hwcleanup") {
-        $toolArgs.OutputRoot = $OutputRoot
     }
 
     $toolScriptBlock = [scriptblock]::Create([string]$scriptText)
