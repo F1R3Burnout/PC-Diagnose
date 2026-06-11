@@ -340,17 +340,22 @@ function Test-PingTarget {
     $times = @()
     $success = 0
 
+    $ping = $null
     try {
-        $replies = @(Test-Connection -ComputerName $target -Count $Count -ErrorAction SilentlyContinue)
-        foreach ($reply in $replies) {
-            $time = Get-FirstProperty -Object $reply -Names @("ResponseTime","Latency")
-            $timeNumber = ConvertTo-Number $time
-            if ($null -ne $timeNumber) {
-                $times += [double]$timeNumber
-                $success++
-            }
+        $ping = New-Object System.Net.NetworkInformation.Ping
+        for ($i = 0; $i -lt $Count; $i++) {
+            try {
+                $reply = $ping.Send($target, 1200)
+                if ($reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                    $times += [double]$reply.RoundtripTime
+                    $success++
+                }
+            } catch {}
         }
-    } catch {}
+    } catch {
+    } finally {
+        if ($ping) { $ping.Dispose() }
+    }
 
     $sent = [Math]::Max(1, $Count)
     $loss = [math]::Round((($sent - $success) / $sent) * 100, 2)
