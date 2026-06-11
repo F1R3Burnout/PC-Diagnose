@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "1.2 All Events by Default"
+$ToolVersion = "1.3 Gaming Event Coverage"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1709,13 +1709,72 @@ CS2 interpretation:
         Add-Finding ([ref]$findings) "Medium" "Games" "Counter-Strike 2 crashes detected" "$($cs2Events.Count) CS2 Application Error/Hang event(s). Modules: $moduleSummary. Exception codes: $exceptionSummary." $recommendation -EventRows $cs2Events -DetailText ($detailParts -join "`r`n`r`n")
     }
 
+    $gamingPattern = '(?i)GameBar|Gaming\.GameBar|Xbox|XboxGame|GamingServices|GamingServicesNet|GameInput|GameDVR|GameOverlay|Steam|steam\.exe|EpicGamesLauncher|Battle\.net|RiotClient|EasyAntiCheat|BattlEye|EA app|EADesktop|Ubisoft|GOG Galaxy|DiscordHook|RTSS|RivaTuner|Overwolf|NVIDIA Share|nvcontainer|AMDRSServ|RadeonSoftware|Counter-Strike|cs2\.exe'
+    $gamingRelatedEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        (
+            ([string]$_.ProviderName -match 'DistributedCOM|Application Error|Application Hang|Service Control Manager|AppModel-Runtime|AppXDeployment|Store|GamingServices|GameInput') -or
+            ([string]$_.Id -in @('1000','1001','1002','10010','5973','7000','7001','7009','7011','7022','7023','7024','7031','7032','7034'))
+        ) -and
+        ([string]$_.Message -match $gamingPattern) -and
+        ([string]$_.Message -notmatch '(?i)\bcs2\.exe\b|Counter-Strike')
+    })
+    if ($gamingRelatedEvents.Count -gt 0) {
+        $gamingRows = @($gamingRelatedEvents | ForEach-Object {
+            $message = [string]$_.Message
+            $component = "Gaming component"
+            if ($message -match '(?i)Windows\.Gaming\.GameBar|GameBar') { $component = "Xbox Game Bar" }
+            elseif ($message -match '(?i)GamingServices') { $component = "Microsoft Gaming Services" }
+            elseif ($message -match '(?i)GameInput') { $component = "Microsoft GameInput" }
+            elseif ($message -match '(?i)Steam') { $component = "Steam" }
+            elseif ($message -match '(?i)EpicGamesLauncher') { $component = "Epic Games Launcher" }
+            elseif ($message -match '(?i)EasyAntiCheat') { $component = "Easy Anti-Cheat" }
+            elseif ($message -match '(?i)BattlEye') { $component = "BattlEye" }
+            elseif ($message -match '(?i)Discord|RTSS|RivaTuner|Overwolf|NVIDIA Share|AMDRSServ|RadeonSoftware') { $component = "Overlay or capture tool" }
+
+            $detail = ""
+            if ($message -match '(?i)PresenceServer|PresenceWriter') { $detail = "Presence writer did not register with DCOM in time." }
+            elseif ($message -match '(?i)timeout|Zeitüberschreitung|did not register with DCOM') { $detail = "Startup/COM registration timeout." }
+            elseif ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung):\s*([^,\r\n]+)') { $detail = "Faulting application: $($matches[1].Trim())" }
+            elseif ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls):\s*([^,\r\n]+)') { $detail = "Faulting module: $($matches[1].Trim())" }
+
+            [PSCustomObject]@{
+                TimeCreated = $_.TimeCreated
+                Source = $_.ProviderName
+                EventId = $_.Id
+                Component = $component
+                Detail = $detail
+            }
+        })
+
+        $componentSummary = (@($gamingRows | Group-Object Component | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+        $gameBarEvents = @($gamingRows | Where-Object { [string]$_.Component -eq "Xbox Game Bar" })
+        $recommendation = "Review the affected gaming component. Update or repair the related app, disable overlays/capture tools for one test, and correlate the timestamps with game crashes, GPU driver resets, DCOM timeouts, or Store/AppX issues."
+        if ($gameBarEvents.Count -gt 0) {
+            $recommendation = "Xbox Game Bar / Game Bar Presence had timeout or registration errors. If gaming, capture, party chat, or overlays are affected, repair or reset Xbox Game Bar and Gaming Services, update Xbox app components from Microsoft Store, and test once with Game Bar overlay/capture disabled."
+        }
+
+        $gamingInterpretation = @"
+Gaming interpretation:
+
+- Xbox Game Bar PresenceServer/PresenceWriter DCOM 10010 usually means a Game Bar background component did not register in time.
+- One isolated entry is often not critical. Repeated entries around game launch, capture, overlay, party chat, or crashes are more relevant.
+- Common next checks: Xbox Game Bar repair/reset, Gaming Services repair, Microsoft Store updates, overlay/capture tools, GPU driver stability, and game-specific crash events at the same timestamps.
+"@
+        $detailParts = @()
+        $detailParts += (New-EventDetailsText -Rows $gamingRelatedEvents)
+        $detailParts += (New-ObjectDetailsText -Rows $gamingRows -Title "Gaming-related event summary rows")
+        $detailParts += $gamingInterpretation.Trim()
+        Add-Finding ([ref]$findings) "Medium" "Games" "Gaming-related Windows, overlay, or launcher events found" "$($gamingRelatedEvents.Count) gaming-related event(s). Components: $componentSummary." $recommendation -EventRows $gamingRelatedEvents -DetailText ($detailParts -join "`r`n`r`n")
+    }
+
     $windowsStackEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         (
-            ($_.ProviderName -match 'WindowsUpdateClient|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment|Store|Bits-Client') -or
-            ($_.Id -in @('20','1002','1008','1023','5973','1000'))
+            ($_.ProviderName -match 'WindowsUpdateClient|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment|Store|Bits-Client|DistributedCOM') -or
+            ($_.Id -in @('20','1002','1008','1023','5973','1000','10010'))
         ) -and
-        ($_.Message -notmatch '(?i)\bcs2\.exe\b|Counter-Strike')
+        ($_.Message -notmatch $gamingPattern)
     })
     if ($windowsStackEvents.Count -gt 0) {
         Add-Finding ([ref]$findings) "Medium" "Windows Stack" "Windows update, app, or performance counter issues found" "$($windowsStackEvents.Count) matching WindowsUpdateClient, Perflib, Application Hang/Error, Store/AppX, or BITS event(s)." "After freeing disk space, run DISM /Online /Cleanup-Image /RestoreHealth and sfc /scannow, then review update and Store health again." -EventRows $windowsStackEvents
@@ -3540,10 +3599,10 @@ if (`$UseStartTime) {
 
 `$targeted = `$rawSystem | Where-Object {
     (
-        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|UASPStor|USBSTOR|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NetBT|Netwtw|Time-Service|NtpClient|Service Control Manager|Kernel-PnP|UserPnp|DeviceSetupManager|DriverFrameworks-UserMode|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment'
+        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|UASPStor|USBSTOR|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NetBT|Netwtw|Time-Service|NtpClient|Service Control Manager|Kernel-PnP|UserPnp|DeviceSetupManager|DriverFrameworks-UserMode|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment|DistributedCOM|GamingServices|GameInput'
     ) -or
     (
-        `$_.Id -in 1,12,13,17,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,4231,4266,4321,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034
+        `$_.Id -in 1,12,13,17,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,4231,4266,4321,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034,10010
     )
 }
 if (`$UseStartTime) {
