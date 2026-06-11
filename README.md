@@ -2,8 +2,6 @@
 
 Small PowerShell diagnostics toolkit for normal Windows desktop PCs.
 
-The current tool, `PCDiagLite`, collects diagnostics, creates a local HTML result view, and saves a ZIP package for later review.
-
 ## How to Run
 
 1. Open PowerShell.
@@ -14,11 +12,16 @@ The current tool, `PCDiagLite`, collects diagnostics, creates a local HTML resul
 irm https://kiwus-it.de/r|iex
 ```
 
-3. Select the tool from the menu.
+3. Select the tool from the menu:
 
-4. Accept the UAC prompt when Windows asks for Administrator rights.
+```text
+1 = PCDiagLite
+2 = NetzwerkDiagnose
+```
 
-5. Choose the event range.
+4. Accept the UAC prompt only when the selected tool asks for it.
+
+5. For `PCDiagLite`, choose the event range.
 
    Press Enter to analyze all available Event Viewer entries:
 
@@ -28,15 +31,15 @@ all
 
    Enter a number only when you want to limit the range, for example `14`.
 
-6. Wait until the collection finishes.
+6. Wait until the tool finishes.
 
 7. Review the HTML result window that opens automatically.
 
-8. Keep the created ZIP file if the result should be shared or analyzed later.
+8. Keep the created output files if the result should be shared or analyzed later.
 
 ## Output
 
-PCDiagLite writes the result package to:
+`PCDiagLite` writes the result package to:
 
 ```text
 C:\Temp
@@ -52,6 +55,12 @@ PCDiagLite_<Computer>_<Timestamp>.zip
 ```
 
 The result view shows the most important findings first. The ZIP contains the full collected data.
+
+`NetzwerkDiagnose` writes an HTML report to:
+
+```text
+C:\Temp\NetzwerkDiagnose
+```
 
 ## Optional Commands
 
@@ -85,9 +94,17 @@ Auto-install Windows Debugging Tools when minidumps need analysis:
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -AutoInstallDebugTools
 ```
 
+Start NetzwerkDiagnose directly:
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool netdiag
+```
+
+For advanced network tests, download `scripts/diagnostics/NetzwerkDiagnose.ps1` and run it locally with the required parameters, for example `-IncludeEventLogs`, `-IncludeTraceroute`, `-SmbTestPath`, or `-LanSpeedTarget`.
+
 ## Important Notes
 
-PCDiagLite is collect-only. It does not repair or modify the PC.
+The tools are collect-only. They do not repair or modify the PC.
 
 Privacy mode masks common sensitive values, but it is not a guarantee. Review ZIP files before public sharing.
 
@@ -95,6 +112,7 @@ Running remote PowerShell code requires trust in this repository.
 
 ## Features
 
+- Menu-based tool selection from one short command
 - Local HTML result view
 - Findings grouped by primary area
 - Newest-first event timeline
@@ -110,6 +128,7 @@ Running remote PowerShell code requires trust in this repository.
 - Gaming-related error interpretation for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, game paths, and Counter-Strike 2 (`cs2.exe`)
 - Windows Update, AppX, service, driver, and application hang checks
 - Minidump copies in the ZIP and optional local `!analyze -v` interpretation
+- Detailed network report for adapters, routes, gateway, DNS, TCP reachability, Wi-Fi, firewall profile, services, optional events, traceroute, MTU, SMB, iperf3, and speed tests
 - ZIP package for handoff
 
 ## Development
