@@ -18,7 +18,7 @@
     If a step hangs, it is skipped after a fixed timeout and the script continues.
 
 .PARAMETER DaysBack
-    Event range in days. Default: 30 days.
+    Event range in days. 0 means all available Event Viewer entries.
 
 .PARAMETER OutputRoot
     Output folder. Default: C:\Temp
@@ -38,7 +38,7 @@
 
 [CmdletBinding()]
 param(
-    [int]$DaysBack = 30,
+    [int]$DaysBack = 0,
     [string]$OutputRoot = "C:\Temp",
     [int]$MaxEvents = 2000,
     [int]$EventTimeoutSeconds = 180,
@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "1.1 Dump, Storage, and Hardware Focus"
+$ToolVersion = "1.2 All Events by Default"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -72,6 +72,8 @@ if (-not (Test-IsAdmin)) {
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $ComputerSafe = ($env:COMPUTERNAME -replace '[\\/:*?"<>| ]', '_')
 $Out = Join-Path $OutputRoot "PCDiagLite_${ComputerSafe}_${Timestamp}"
+$EventRangeLabel = if ($DaysBack -gt 0) { "${DaysBack}d" } else { "all" }
+$EventRangeText = if ($DaysBack -gt 0) { "last $DaysBack days" } else { "all available entries" }
 
 $Dirs = @{
     Root      = $Out
@@ -181,7 +183,7 @@ function Stop-OldDiagnosticProcesses {
 Write-Host ""
 Write-ProgressLine "Creating lightweight diagnostics package..." "Cyan"
 Write-ProgressLine "Output folder: $Out" "Gray"
-Write-ProgressLine "Event range: last $DaysBack days" "Gray"
+Write-ProgressLine "Event range: $EventRangeText" "Gray"
 Write-ProgressLine "Max detailed events per query: $MaxEvents" "Gray"
 Write-ProgressLine "Event timeout: $EventTimeoutSeconds seconds" "Gray"
 Write-ProgressLine "Step timeout: $StepTimeoutSeconds seconds" "Gray"
@@ -198,7 +200,7 @@ $ToolName $ToolVersion
 Computer:      $env:COMPUTERNAME
 User:          $env:USERNAME
 Export time:   $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-DaysBack:      $DaysBack
+Event range:   $EventRangeText
 MaxEvents:     $MaxEvents
 Output folder: $Out
 Privacy mode:  $([bool]$PrivacyMode)
@@ -394,6 +396,8 @@ function New-ChildScript {
 `$ErrorActionPreference = 'Continue'
 `$ProgressPreference = 'SilentlyContinue'
 `$DaysBack = $DaysBack
+`$EventRangeLabel = $(ConvertTo-PSStringLiteral $EventRangeLabel)
+`$EventRangeText = $(ConvertTo-PSStringLiteral $EventRangeText)
 `$MaxEvents = $MaxEvents
 `$ToolVersion = $(ConvertTo-PSStringLiteral $ToolVersion)
 `$Dirs = @{
@@ -1415,9 +1419,9 @@ function Write-InitialFindingsReport {
     $script:TimelineRows = @()
     $currentObservation = "Current state at collection time: $(Format-FindingDate (Get-Date))"
 
-    $targetedPath = Join-Path $Dirs.Events "System_Targeted_Stability_Storage_Network_${DaysBack}d.csv"
-    $systemPath = Join-Path $Dirs.Events "System_WARN_ERR_CRIT_${DaysBack}d.csv"
-    $applicationPath = Join-Path $Dirs.Events "Application_WARN_ERR_CRIT_${DaysBack}d.csv"
+    $targetedPath = Join-Path $Dirs.Events "System_Targeted_Stability_Storage_Network_${EventRangeLabel}.csv"
+    $systemPath = Join-Path $Dirs.Events "System_WARN_ERR_CRIT_${EventRangeLabel}.csv"
+    $applicationPath = Join-Path $Dirs.Events "Application_WARN_ERR_CRIT_${EventRangeLabel}.csv"
 
     $targeted = Read-CsvSafe $targetedPath
     $systemEvents = Read-CsvSafe $systemPath
@@ -2102,7 +2106,7 @@ Local Findings Summary
 Tool:          $ToolName $ToolVersion
 Created:       $(Format-FindingDate (Get-Date))
 Computer:      $env:COMPUTERNAME
-Event range:   last $DaysBack days
+Event range:   $EventRangeText
 PrivacyMode:   $([bool]$PrivacyMode)
 
 Important:
@@ -2147,8 +2151,8 @@ Files for manual review:
 - 00_Report.html
 - 02_System_Hardware\HardwareMigration_*.csv
 - 07_Policies\Changed_Policy_Registry_Values.csv
-- 01_Events\System_Targeted_Stability_Storage_Network_${DaysBack}d.csv
-- 01_Events\System_Targeted_TopEvents_${DaysBack}d.csv
+- 01_Events\System_Targeted_Stability_Storage_Network_${EventRangeLabel}.csv
+- 01_Events\System_Targeted_TopEvents_${EventRangeLabel}.csv
 - 99_Runtime\runtime.log
 - 99_Runtime\errors.txt and timeouts.txt, if present
 "@ | Out-File $reportPath -Encoding UTF8 -Append
@@ -2170,8 +2174,8 @@ function Write-HtmlReport {
     $endpointSummary = Read-CsvSafe (Join-Path $Dirs.Network "Endpoint_Summary.csv")
     $tcpTop = Read-CsvSafe (Join-Path $Dirs.Network "TCP_Endpoints_By_Process_Top30.csv")
     $udpTop = Read-CsvSafe (Join-Path $Dirs.Network "UDP_Endpoints_By_Process_Top30.csv")
-    $topSystem = Read-CsvSafe (Join-Path $Dirs.Events "System_TopEvents_${DaysBack}d.csv")
-    $targetedTop = Read-CsvSafe (Join-Path $Dirs.Events "System_Targeted_TopEvents_${DaysBack}d.csv")
+    $topSystem = Read-CsvSafe (Join-Path $Dirs.Events "System_TopEvents_${EventRangeLabel}.csv")
+    $targetedTop = Read-CsvSafe (Join-Path $Dirs.Events "System_Targeted_TopEvents_${EventRangeLabel}.csv")
     $migrationPnpProblems = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_PnpProblemDevices.csv")
     $migrationOldDrivers = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_OldThirdPartyDrivers.csv")
     $migrationVendorServices = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_VendorDriverServices.csv")
@@ -2239,7 +2243,7 @@ function Write-HtmlReport {
 <body>
   <header>
     <h1>PCDiagLite Report</h1>
-    <div class="meta">$ToolVersion | Created: $(Escape-Html (Format-FindingDate (Get-Date))) | Event range: last $DaysBack days | PrivacyMode: $([bool]$PrivacyMode)</div>
+    <div class="meta">$ToolVersion | Created: $(Escape-Html (Format-FindingDate (Get-Date))) | Event range: $(Escape-Html $EventRangeText) | PrivacyMode: $([bool]$PrivacyMode)</div>
     <div class="grid">
       <div class="stat"><div class="label">Computer</div><div class="value">$(Escape-Html $env:COMPUTERNAME)</div></div>
       <div class="stat"><div class="label">Overall Status</div><div class="value">$(Escape-Html $analysisStatus.Label)</div></div>
@@ -2545,7 +2549,7 @@ function Write-ResultWindowReport {
 <body>
   <header>
     <h1>PCDiagLite Result</h1>
-    <div class="meta">$ToolVersion | Created: $(Escape-Html (Format-FindingDate (Get-Date))) | Computer: $(Escape-Html $env:COMPUTERNAME) | Event range: last $DaysBack days</div>
+    <div class="meta">$ToolVersion | Created: $(Escape-Html (Format-FindingDate (Get-Date))) | Computer: $(Escape-Html $env:COMPUTERNAME) | Event range: $(Escape-Html $EventRangeText)</div>
     <section class="status $statusClass">
       <div class="status-label">Overall status</div>
       <div class="status-value">$(Escape-Html $analysisStatus.Label)</div>
@@ -3461,9 +3465,11 @@ Invoke-ChildPowerShellWithTimeout -Name "Relevant driver classes and updates" -S
 $EventScript = @"
 `$ErrorActionPreference = 'Continue'
 `$DaysBack = $DaysBack
+`$EventRangeLabel = '$EventRangeLabel'
 `$MaxEvents = $MaxEvents
 `$EventsDir = '$($Dirs.Events.Replace("'","''"))'
-`$StartTime = (Get-Date).AddDays(-`$DaysBack)
+`$UseStartTime = (`$DaysBack -gt 0)
+`$StartTime = if (`$UseStartTime) { (Get-Date).AddDays(-`$DaysBack) } else { `$null }
 
 function Get-EventLevelName {
     param([Parameter(Mandatory=`$true)]`$Event)
@@ -3494,27 +3500,43 @@ function Select-EventForCsv {
 foreach (`$log in @('System','Application')) {
     `$safe = `$log -replace '[\\/:*?"<>|]', '_'
 
-    `$events = Get-WinEvent -FilterHashtable @{
+    `$filter = @{
         LogName = `$log
         Level = 1,2,3
-        StartTime = `$StartTime
-    } -MaxEvents `$MaxEvents -ErrorAction SilentlyContinue
+    }
+    if (`$UseStartTime) {
+        `$filter.StartTime = `$StartTime
+    }
+
+    if (`$UseStartTime) {
+        `$events = Get-WinEvent -FilterHashtable `$filter -MaxEvents `$MaxEvents -ErrorAction SilentlyContinue
+    } else {
+        `$events = Get-WinEvent -FilterHashtable `$filter -ErrorAction SilentlyContinue
+    }
 
     `$events |
         Select-EventForCsv |
-        Export-Csv (Join-Path `$EventsDir "`${safe}_WARN_ERR_CRIT_`$(`$DaysBack)d.csv") -NoTypeInformation -Encoding UTF8
+        Export-Csv (Join-Path `$EventsDir "`${safe}_WARN_ERR_CRIT_`$EventRangeLabel.csv") -NoTypeInformation -Encoding UTF8
 
     `$events |
         Group-Object ProviderName, Id, Level |
         Sort-Object Count -Descending |
         Select-Object Count, Name |
-        Export-Csv (Join-Path `$EventsDir "`${safe}_TopEvents_`$(`$DaysBack)d.csv") -NoTypeInformation -Encoding UTF8
+        Export-Csv (Join-Path `$EventsDir "`${safe}_TopEvents_`$EventRangeLabel.csv") -NoTypeInformation -Encoding UTF8
 }
 
-`$rawSystem = Get-WinEvent -FilterHashtable @{
+`$systemFilter = @{
     LogName = 'System'
-    StartTime = `$StartTime
-} -MaxEvents 7000 -ErrorAction SilentlyContinue
+}
+if (`$UseStartTime) {
+    `$systemFilter.StartTime = `$StartTime
+}
+
+if (`$UseStartTime) {
+    `$rawSystem = Get-WinEvent -FilterHashtable `$systemFilter -MaxEvents 7000 -ErrorAction SilentlyContinue
+} else {
+    `$rawSystem = Get-WinEvent -FilterHashtable `$systemFilter -ErrorAction SilentlyContinue
+}
 
 `$targeted = `$rawSystem | Where-Object {
     (
@@ -3523,17 +3545,20 @@ foreach (`$log in @('System','Application')) {
     (
         `$_.Id -in 1,12,13,17,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,4231,4266,4321,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034
     )
-} | Select-Object -First `$MaxEvents
+}
+if (`$UseStartTime) {
+    `$targeted = `$targeted | Select-Object -First `$MaxEvents
+}
 
 `$targeted |
     Select-EventForCsv |
-    Export-Csv (Join-Path `$EventsDir "System_Targeted_Stability_Storage_Network_`$(`$DaysBack)d.csv") -NoTypeInformation -Encoding UTF8
+    Export-Csv (Join-Path `$EventsDir "System_Targeted_Stability_Storage_Network_`$EventRangeLabel.csv") -NoTypeInformation -Encoding UTF8
 
 `$targeted |
     Group-Object ProviderName, Id, Level |
     Sort-Object Count -Descending |
     Select-Object Count, Name |
-    Export-Csv (Join-Path `$EventsDir "System_Targeted_TopEvents_`$(`$DaysBack)d.csv") -NoTypeInformation -Encoding UTF8
+    Export-Csv (Join-Path `$EventsDir "System_Targeted_TopEvents_`$EventRangeLabel.csv") -NoTypeInformation -Encoding UTF8
 
 `$targeted |
     Select-Object -First 200 TimeCreated, Level, ProviderName, Id |
@@ -3750,7 +3775,7 @@ CPU:            $($cpu.Name)
 Total RAM:      $([math]::Round($cs.TotalPhysicalMemory / 1GB,2)) GB
 
 Package type:   $ToolVersion
-Event range:    last $DaysBack days
+Event range:    $EventRangeText
 MaxEvents:      $MaxEvents
 
 This package contains only the most important data:
@@ -3816,7 +3841,7 @@ if (Test-Path $udpTop) {
         Out-File $summaryPath -Encoding UTF8 -Append
 }
 
-$topSystem = Join-Path $Dirs.Events "System_TopEvents_${DaysBack}d.csv"
+$topSystem = Join-Path $Dirs.Events "System_TopEvents_${EventRangeLabel}.csv"
 if (Test-Path $topSystem) {
     "`r`nTop System events, critical/error/warning:`r`n" | Out-File $summaryPath -Encoding UTF8 -Append
     Import-Csv $topSystem |

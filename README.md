@@ -18,13 +18,15 @@ irm https://kiwus-it.de/r|iex
 
 4. Accept the UAC prompt when Windows asks for Administrator rights.
 
-5. Enter how many days back should be analyzed.
+5. Choose the event range.
 
-   Press Enter to use the default:
+   Press Enter to analyze all available Event Viewer entries:
 
 ```text
-30
+all
 ```
+
+   Enter a number only when you want to limit the range, for example `14`.
 
 6. Wait until the collection finishes.
 
@@ -63,6 +65,12 @@ Set the event range directly:
 
 ```powershell
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool pcdiag -DaysBack 14
+```
+
+Analyze all available Event Viewer entries directly:
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool pcdiag -DaysBack 0
 ```
 
 Use privacy mode:

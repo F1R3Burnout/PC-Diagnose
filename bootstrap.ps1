@@ -12,7 +12,7 @@ param(
     [string]$Tool = "menu",
     [string]$Branch = "main",
     [string]$OutputRoot = "C:\Temp",
-    [int]$DaysBack = 30,
+    [int]$DaysBack = 0,
     [int]$MaxEvents = 2000,
     [int]$EventTimeoutSeconds = 180,
     [int]$StepTimeoutSeconds = 90,
@@ -141,7 +141,7 @@ function Select-ToolFromMenu {
 function Read-DaysBackForTool {
     param(
         [Parameter(Mandatory=$true)][string]$ToolId,
-        [int]$DefaultDays = 30
+        [int]$DefaultDays = 0
     )
 
     if ($ToolId -ne "pcdiag" -or $DaysBackWasProvided) {
@@ -149,14 +149,14 @@ function Read-DaysBackForTool {
     }
 
     Write-Host ""
-    $inputValue = Read-Host "How many days back should be analyzed? [$DefaultDays]"
+    $inputValue = Read-Host "How many days back should be analyzed? [all]"
     if ([string]::IsNullOrWhiteSpace($inputValue)) {
-        return $DefaultDays
+        return 0
     }
 
     $parsed = 0
-    if (-not [int]::TryParse($inputValue, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt 3650) {
-        throw "Invalid DaysBack value: $inputValue. Enter a number between 1 and 3650."
+    if (-not [int]::TryParse($inputValue, [ref]$parsed) -or $parsed -lt 0 -or $parsed -gt 3650) {
+        throw "Invalid DaysBack value: $inputValue. Press Enter or enter 0 for all entries, or enter a number between 1 and 3650."
     }
 
     return $parsed
@@ -174,7 +174,7 @@ function Invoke-RemoteTool {
     }
 
     if ($toolInfo.id -eq "pcdiag") {
-        $script:DaysBack = Read-DaysBackForTool -ToolId ([string]$toolInfo.id) -DefaultDays 30
+        $script:DaysBack = Read-DaysBackForTool -ToolId ([string]$toolInfo.id) -DefaultDays 0
     }
 
     if ($toolInfo.requiresAdmin -and -not (Test-IsAdmin)) {

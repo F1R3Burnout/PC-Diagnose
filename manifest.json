@@ -18,8 +18,8 @@
         {
           "name": "DaysBack",
           "type": "int",
-          "default": 30,
-          "description": "Event analysis range in days."
+          "default": 0,
+          "description": "Event analysis range in days. 0 means all available entries."
         },
         {
           "name": "OutputRoot",
