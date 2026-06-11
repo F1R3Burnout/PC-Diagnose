@@ -107,7 +107,7 @@ Running remote PowerShell code requires trust in this repository.
 - Review-only cleanup commands for stale hardware traces
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
-- Gaming-related context for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, and Counter-Strike 2 (`cs2.exe`)
+- Gaming-related error interpretation for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, game paths, and Counter-Strike 2 (`cs2.exe`)
 - Windows Update, AppX, service, driver, and application hang checks
 - Minidump copies in the ZIP and optional local `!analyze -v` interpretation
 - ZIP package for handoff

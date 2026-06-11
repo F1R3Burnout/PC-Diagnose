@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "1.3 Gaming Event Coverage"
+$ToolVersion = "1.4 Gaming Interpretation"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1709,7 +1709,7 @@ CS2 interpretation:
         Add-Finding ([ref]$findings) "Medium" "Games" "Counter-Strike 2 crashes detected" "$($cs2Events.Count) CS2 Application Error/Hang event(s). Modules: $moduleSummary. Exception codes: $exceptionSummary." $recommendation -EventRows $cs2Events -DetailText ($detailParts -join "`r`n`r`n")
     }
 
-    $gamingPattern = '(?i)GameBar|Gaming\.GameBar|Xbox|XboxGame|GamingServices|GamingServicesNet|GameInput|GameDVR|GameOverlay|Steam|steam\.exe|EpicGamesLauncher|Battle\.net|RiotClient|EasyAntiCheat|BattlEye|EA app|EADesktop|Ubisoft|GOG Galaxy|DiscordHook|RTSS|RivaTuner|Overwolf|NVIDIA Share|nvcontainer|AMDRSServ|RadeonSoftware|Counter-Strike|cs2\.exe'
+    $gamingPattern = '(?i)GameBar|Gaming\.GameBar|Xbox|XboxGame|XboxGames|GamingServices|GamingServicesNet|GameInput|GameDVR|GameOverlay|Steam|steam\.exe|steamapps\\common|EpicGamesLauncher|Epic Games|Battle\.net|RiotClient|Riot Games|EasyAntiCheat|EAC|BattlEye|EA app|EADesktop|EA Games|Ubisoft|Ubisoft Game Launcher|GOG Galaxy|DiscordHook|RTSS|RivaTuner|Overwolf|NVIDIA Share|nvcontainer|AMDRSServ|RadeonSoftware|Counter-Strike|cs2\.exe|FortniteClient|League of Legends|VALORANT|RocketLeague|Minecraft|Roblox|EscapeFromTarkov|Cyberpunk2077|GTA5|cod\.exe|ModernWarfare|Warzone'
     $gamingRelatedEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         (
@@ -1722,35 +1722,88 @@ CS2 interpretation:
     if ($gamingRelatedEvents.Count -gt 0) {
         $gamingRows = @($gamingRelatedEvents | ForEach-Object {
             $message = [string]$_.Message
+            $faultingApp = ""
+            $faultingModule = ""
+            $exceptionCode = ""
+            $appPath = ""
+            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung):\s*([^,\r\n]+)') { $faultingApp = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls):\s*([^,\r\n]+)') { $faultingModule = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Exception code|Ausnahmecode):\s*(0x[0-9a-f]+)') { $exceptionCode = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting application path|Pfad der fehlerhaften Anwendung):\s*([^\r\n]+)') { $appPath = $matches[1].Trim() }
+
             $component = "Gaming component"
+            $componentType = "Gaming platform"
+            $signal = "Gaming-related event"
             if ($message -match '(?i)Windows\.Gaming\.GameBar|GameBar') { $component = "Xbox Game Bar" }
             elseif ($message -match '(?i)GamingServices') { $component = "Microsoft Gaming Services" }
             elseif ($message -match '(?i)GameInput') { $component = "Microsoft GameInput" }
             elseif ($message -match '(?i)Steam') { $component = "Steam" }
             elseif ($message -match '(?i)EpicGamesLauncher') { $component = "Epic Games Launcher" }
+            elseif ($message -match '(?i)Battle\.net') { $component = "Battle.net" }
+            elseif ($message -match '(?i)RiotClient|Riot Games') { $component = "Riot Client" }
+            elseif ($message -match '(?i)Ubisoft') { $component = "Ubisoft Connect" }
+            elseif ($message -match '(?i)GOG Galaxy') { $component = "GOG Galaxy" }
+            elseif ($message -match '(?i)EA app|EADesktop|EA Games') { $component = "EA app" }
             elseif ($message -match '(?i)EasyAntiCheat') { $component = "Easy Anti-Cheat" }
             elseif ($message -match '(?i)BattlEye') { $component = "BattlEye" }
             elseif ($message -match '(?i)Discord|RTSS|RivaTuner|Overwolf|NVIDIA Share|AMDRSServ|RadeonSoftware') { $component = "Overlay or capture tool" }
+            elseif (-not [string]::IsNullOrWhiteSpace($faultingApp)) { $component = $faultingApp }
+
+            if ($component -match 'Easy Anti-Cheat|BattlEye') { $componentType = "Anti-cheat" }
+            elseif ($component -match 'Overlay|Game Bar|Discord|RTSS|RivaTuner|Overwolf|NVIDIA Share|Radeon') { $componentType = "Overlay / capture" }
+            elseif ($component -match 'Steam|Epic|Battle\.net|Riot|Ubisoft|GOG|EA app') { $componentType = "Launcher / store" }
+            elseif ($component -match 'Gaming Services|GameInput') { $componentType = "Windows gaming runtime" }
+            elseif ($message -match '(?i)steamapps\\common|XboxGames|Epic Games|Riot Games|EA Games|Ubisoft Game Launcher|GOG Galaxy' -or $faultingApp -match '\.exe$') { $componentType = "Game process" }
+
+            if ($_.ProviderName -match 'Application Error' -or [string]$_.Id -eq '1000') { $signal = "Application crash" }
+            elseif ($_.ProviderName -match 'Application Hang' -or [string]$_.Id -eq '1002') { $signal = "Application hang" }
+            elseif ($_.ProviderName -match 'DistributedCOM' -or [string]$_.Id -eq '10010') { $signal = "COM/DCOM timeout" }
+            elseif ($_.ProviderName -match 'Service Control Manager' -or [string]$_.Id -match '^70') { $signal = "Service failure or timeout" }
+            elseif ($_.ProviderName -match 'AppModel|AppX|Store' -or [string]$_.Id -eq '5973') { $signal = "Store/AppX runtime issue" }
 
             $detail = ""
             if ($message -match '(?i)PresenceServer|PresenceWriter') { $detail = "Presence writer did not register with DCOM in time." }
             elseif ($message -match '(?i)timeout|Zeitüberschreitung|did not register with DCOM') { $detail = "Startup/COM registration timeout." }
             elseif ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung):\s*([^,\r\n]+)') { $detail = "Faulting application: $($matches[1].Trim())" }
             elseif ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls):\s*([^,\r\n]+)') { $detail = "Faulting module: $($matches[1].Trim())" }
+            if (-not [string]::IsNullOrWhiteSpace($exceptionCode)) {
+                if (-not [string]::IsNullOrWhiteSpace($detail)) { $detail += " " }
+                $detail += "Exception: $exceptionCode."
+            }
 
             [PSCustomObject]@{
                 TimeCreated = $_.TimeCreated
                 Source = $_.ProviderName
                 EventId = $_.Id
                 Component = $component
+                ComponentType = $componentType
+                Signal = $signal
+                FaultingApplication = $faultingApp
+                FaultingModule = $faultingModule
+                ExceptionCode = $exceptionCode
+                ApplicationPath = $appPath
                 Detail = $detail
             }
         })
 
         $componentSummary = (@($gamingRows | Group-Object Component | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+        $signalSummary = (@($gamingRows | Group-Object Signal | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
         $gameBarEvents = @($gamingRows | Where-Object { [string]$_.Component -eq "Xbox Game Bar" })
+        $crashEvents = @($gamingRows | Where-Object { [string]$_.Signal -match 'Application crash|Application hang' })
+        $antiCheatEvents = @($gamingRows | Where-Object { [string]$_.ComponentType -eq "Anti-cheat" })
+        $serviceEventsForGames = @($gamingRows | Where-Object { [string]$_.Signal -match 'Service failure|Store/AppX runtime' })
+        $overlayEvents = @($gamingRows | Where-Object { [string]$_.ComponentType -eq "Overlay / capture" })
+        $gamingSeverity = if (($crashEvents.Count + $antiCheatEvents.Count + $serviceEventsForGames.Count) -gt 0) { "Medium" } else { "Info" }
         $recommendation = "Review the affected gaming component. Update or repair the related app, disable overlays/capture tools for one test, and correlate the timestamps with game crashes, GPU driver resets, DCOM timeouts, or Store/AppX issues."
-        if ($gameBarEvents.Count -gt 0) {
+        if ($crashEvents.Count -gt 0) {
+            $recommendation = "One or more gaming-related applications crashed or hung. Verify the affected game files, remove launch options/mods for one test, disable overlays/injectors, update or clean-install the GPU driver, clear shader cache, and test RAM/GPU stability if crashes repeat."
+        } elseif ($antiCheatEvents.Count -gt 0) {
+            $recommendation = "Anti-cheat related events were found. Repair the game launcher, reinstall or repair the anti-cheat component from the game's install folder, remove conflicting overlays/injectors, and check Windows security or virtualization features if the game refuses to start."
+        } elseif ($serviceEventsForGames.Count -gt 0) {
+            $recommendation = "Gaming runtime or launcher services reported failures/timeouts. Repair Gaming Services, GameInput, Xbox app, or the affected launcher, then reboot and retest the game launch."
+        } elseif ($overlayEvents.Count -gt 0) {
+            $recommendation = "Overlay or capture related events were found. Test once with Game Bar, Discord overlay, Steam overlay, RTSS/RivaTuner, GeForce/Radeon overlay, and capture tools disabled."
+        } elseif ($gameBarEvents.Count -gt 0) {
             $recommendation = "Xbox Game Bar / Game Bar Presence had timeout or registration errors. If gaming, capture, party chat, or overlays are affected, repair or reset Xbox Game Bar and Gaming Services, update Xbox app components from Microsoft Store, and test once with Game Bar overlay/capture disabled."
         }
 
@@ -1759,13 +1812,15 @@ Gaming interpretation:
 
 - Xbox Game Bar PresenceServer/PresenceWriter DCOM 10010 usually means a Game Bar background component did not register in time.
 - One isolated entry is often not critical. Repeated entries around game launch, capture, overlay, party chat, or crashes are more relevant.
+- Game crashes/hangs point first to game files, mods/configs, overlays/injectors, GPU driver/shader cache, and RAM/GPU stability.
+- Anti-cheat errors often involve corrupted anti-cheat installs, blocked drivers, virtualization/security features, or overlay/injector conflicts.
 - Common next checks: Xbox Game Bar repair/reset, Gaming Services repair, Microsoft Store updates, overlay/capture tools, GPU driver stability, and game-specific crash events at the same timestamps.
 "@
         $detailParts = @()
         $detailParts += (New-EventDetailsText -Rows $gamingRelatedEvents)
         $detailParts += (New-ObjectDetailsText -Rows $gamingRows -Title "Gaming-related event summary rows")
         $detailParts += $gamingInterpretation.Trim()
-        Add-Finding ([ref]$findings) "Medium" "Games" "Gaming-related Windows, overlay, or launcher events found" "$($gamingRelatedEvents.Count) gaming-related event(s). Components: $componentSummary." $recommendation -EventRows $gamingRelatedEvents -DetailText ($detailParts -join "`r`n`r`n")
+        Add-Finding ([ref]$findings) $gamingSeverity "Games" "Gaming-related errors, crashes, or runtime events found" "$($gamingRelatedEvents.Count) gaming-related event(s). Components: $componentSummary. Signals: $signalSummary." $recommendation -EventRows $gamingRelatedEvents -DetailText ($detailParts -join "`r`n`r`n")
     }
 
     $windowsStackEvents = @($allEvents | Where-Object {
