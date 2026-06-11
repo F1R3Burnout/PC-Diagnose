@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "Lite v32 Policy Overview"
+$ToolVersion = "1.1 Dump, Storage, and Hardware Focus"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -473,6 +473,42 @@ function Convert-DumpAnalysisTextToRow {
     $failureBucket = ""
     if ($text -match '(?im)^\s*FAILURE_BUCKET_ID:\s+(.+?)\s*$') { $failureBucket = $matches[1].Trim() }
 
+    $symbolName = ""
+    if ($text -match '(?im)^\s*SYMBOL_NAME:\s+(.+?)\s*$') { $symbolName = $matches[1].Trim() }
+
+    $failureHash = ""
+    if ($text -match '(?im)^\s*FAILURE_ID_HASH:\s+(.+?)\s*$') { $failureHash = $matches[1].Trim() }
+
+    $suspectedArea = "Unknown"
+    $recommendedAction = "Open the full DumpAnalysis_*.txt output and correlate the crash with recent driver, firmware, BIOS, Windows update, and hardware changes."
+    $suspectText = @($probably, $imageName, $moduleName, $symbolName, $failureBucket) -join " "
+    $bugCheckText = [string]$bugCheck
+
+    if ($suspectText -match '(?i)usb|uasp|usbstor|usbhub|usbccgp|hidusb') {
+        $suspectedArea = "USB / external devices"
+        $recommendedAction = "Check USB devices, hubs, docks, front-panel ports, external drives, controller drivers, and BIOS/chipset firmware. Test with non-essential USB devices removed."
+    } elseif ($suspectText -match '(?i)nvlddmkm|amdkmdag|atikmdag|igdkmdn|dxgkrnl|graphics|display') {
+        $suspectedArea = "Graphics driver / GPU"
+        $recommendedAction = "Perform a clean GPU driver install, check GPU stability, disable unstable overlays/overclocking, and correlate with game or display-driver events."
+    } elseif ($suspectText -match '(?i)stor|stornvme|storahci|iaStor|disk|ntfs|fltmgr|volmgr|partmgr') {
+        $suspectedArea = "Storage / file system"
+        $recommendedAction = "Back up important data, check SMART/vendor diagnostics, storage controller drivers, cabling/enclosure, and file-system health."
+    } elseif ($suspectText -match '(?i)net|tcpip|ndis|wlan|wifi|e1|e2f|rt640|rtwlane|wintun|wireguard|tailscale') {
+        $suspectedArea = "Network driver / VPN"
+        $recommendedAction = "Update NIC/Wi-Fi/VPN drivers and firmware, simplify VPN/filter drivers, and correlate with network disconnect or DNS events."
+    } elseif ($suspectText -match '(?i)memory_corruption|ntkrnlmp|ntoskrnl|hardware|whea|genuineintel|authenticamd') {
+        $suspectedArea = "Kernel / hardware stability"
+        $recommendedAction = "Check RAM stability, CPU/GPU/SoC overclocking, BIOS/UEFI, chipset drivers, thermals, PSU, and WHEA events around the crash."
+    }
+
+    if ($bugCheckText -match '^(9f|0x9f)$') {
+        $suspectedArea = if ($suspectedArea -eq "Unknown") { "Power transition / driver timeout" } else { "$suspectedArea; power transition" }
+        $recommendedAction = "BugCheck 9F usually means a driver did not complete a power transition. Check sleep/resume, USB, storage, Bluetooth, GPU, chipset, and power-management drivers."
+    } elseif ($bugCheckText -match '^(7e|0x7e|3b|0x3b|50|0x50|1a|0x1a)$' -and $suspectedArea -eq "Unknown") {
+        $suspectedArea = "Kernel crash / memory or driver"
+        $recommendedAction = "Correlate the named module with drivers and recent software changes. If no driver is named, test RAM stability and review WHEA/storage events."
+    }
+
     return [PSCustomObject]@{
         DumpFile         = $DumpFile
         Status           = $Status
@@ -481,7 +517,11 @@ function Convert-DumpAnalysisTextToRow {
         ProcessName      = $processName
         ModuleName       = $moduleName
         ImageName        = $imageName
+        SymbolName       = $symbolName
         FailureBucket    = $failureBucket
+        FailureHash      = $failureHash
+        SuspectedArea    = $suspectedArea
+        RecommendedAction = $recommendedAction
         ExitCode         = $ExitCode
         AnalysisFile     = if (Test-Path -LiteralPath $AnalysisPath) { Split-Path -Leaf $AnalysisPath } else { "" }
         Note             = $Note
@@ -803,6 +843,63 @@ function New-EventDetailsText {
     }
 
     return $sb.ToString().TrimEnd()
+}
+
+function Get-StorageDiskContextFromEvents {
+    param([object[]]$EventRows)
+
+    $diskIndexes = New-Object System.Collections.Generic.List[int]
+    foreach ($row in @($EventRows)) {
+        $message = [string]$row.Message
+        foreach ($match in [regex]::Matches($message, '(?i)\\Device\\Harddisk(\d+)')) {
+            $diskIndexes.Add([int]$match.Groups[1].Value) | Out-Null
+        }
+        foreach ($match in [regex]::Matches($message, '(?i)\bdisk\s+(\d+)\b')) {
+            $diskIndexes.Add([int]$match.Groups[1].Value) | Out-Null
+        }
+    }
+
+    $uniqueIndexes = @($diskIndexes | Sort-Object -Unique)
+    if ($uniqueIndexes.Count -eq 0) {
+        return [PSCustomObject]@{ Summary = ""; DetailText = "" }
+    }
+
+    $diskRows = @(Read-CsvSafe (Join-Path $Dirs.Storage "DiskDrive_WMI.csv") | Where-Object {
+        $idx = ConvertTo-NumberSafe ([string]$_.Index)
+        $null -ne $idx -and ([int]$idx) -in $uniqueIndexes
+    })
+    $mappingRows = @(Read-CsvSafe (Join-Path $Dirs.Storage "Disk_To_DriveLetter_Mapping.csv") | Where-Object {
+        $idx = ConvertTo-NumberSafe ([string]$_.DiskIndex)
+        $null -ne $idx -and ([int]$idx) -in $uniqueIndexes
+    })
+    $diskRowsByIndex = @{}
+    foreach ($disk in $diskRows) {
+        $diskRowsByIndex[[string]$disk.Index] = $disk
+    }
+
+    $summaryParts = foreach ($idx in $uniqueIndexes) {
+        $disk = $diskRowsByIndex[[string]$idx]
+        $letters = @($mappingRows | Where-Object { [string]$_.DiskIndex -eq [string]$idx } | ForEach-Object { [string]$_.DriveLetter } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+        $letterText = if ($letters.Count -gt 0) { "drives $($letters -join ', ')" } else { "no drive letter mapping captured" }
+        if ($disk) {
+            "Harddisk$idx = $($disk.Model) [$($disk.InterfaceType)], $letterText"
+        } else {
+            "Harddisk$idx, $letterText"
+        }
+    }
+
+    $detailParts = @()
+    if ($diskRows.Count -gt 0) {
+        $detailParts += (New-ObjectDetailsText -Rows $diskRows -Title "Disk rows matching Event Viewer Harddisk references")
+    }
+    if ($mappingRows.Count -gt 0) {
+        $detailParts += (New-ObjectDetailsText -Rows $mappingRows -Title "Drive-letter mappings for matching disks")
+    }
+
+    return [PSCustomObject]@{
+        Summary = ($summaryParts -join "; ")
+        DetailText = ($detailParts -join "`r`n`r`n")
+    }
 }
 
 function New-ObjectDetailsText {
@@ -1359,7 +1456,16 @@ function Write-InitialFindingsReport {
         )
     })
     if ($storageEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Storage" "Storage or file system events found" "$($storageEvents.Count) matching Disk/Ntfs/Storage/volmgr event(s) or typical storage event ID(s)." "Review the repeated event summary, StorageReliabilityCounter.csv, and Storage_SMART_FailurePrediction.csv. Then check vendor diagnostics, cables/backplane, controller/NVMe/SATA drivers, and file system health. For NTFS 55/98 or Disk 51/153, verify backups soon." -EventRows $storageEvents
+        $storageDiskContext = Get-StorageDiskContextFromEvents -EventRows $storageEvents
+        $storageEvidence = "$($storageEvents.Count) matching Disk/Ntfs/Storage/volmgr event(s) or typical storage event ID(s)."
+        if (-not [string]::IsNullOrWhiteSpace([string]$storageDiskContext.Summary)) {
+            $storageEvidence += " Affected disk hint: $($storageDiskContext.Summary)."
+        }
+        $storageDetails = @((New-EventDetailsText -Rows $storageEvents))
+        if (-not [string]::IsNullOrWhiteSpace([string]$storageDiskContext.DetailText)) {
+            $storageDetails += [string]$storageDiskContext.DetailText
+        }
+        Add-Finding ([ref]$findings) "High" "Storage" "Storage or file system events found" $storageEvidence "Review the repeated event summary, StorageReliabilityCounter.csv, and Storage_SMART_FailurePrediction.csv. Then check vendor diagnostics, cables/backplane, controller/NVMe/SATA drivers, and file system health. For NTFS 55/98 or Disk 51/153, verify backups soon." -EventRows $storageEvents -DetailText ($storageDetails -join "`r`n`r`n")
     }
 
     $usbStorageEvents = @($allEvents | Where-Object {
@@ -1370,7 +1476,16 @@ function Write-InitialFindingsReport {
         )
     })
     if ($usbStorageEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Storage" "USB/UASP or disk I/O resets detected" "$($usbStorageEvents.Count) storage reset or retried-I/O event(s)." "If Windows, games, apps, or active data are on USB-attached storage, check the enclosure, cable, port, and power. Prefer an internal NVMe/SATA SSD for the Windows system drive on a desktop PC." -EventRows $usbStorageEvents
+        $usbDiskContext = Get-StorageDiskContextFromEvents -EventRows $usbStorageEvents
+        $usbEvidence = "$($usbStorageEvents.Count) storage reset or retried-I/O event(s)."
+        if (-not [string]::IsNullOrWhiteSpace([string]$usbDiskContext.Summary)) {
+            $usbEvidence += " Affected disk hint: $($usbDiskContext.Summary)."
+        }
+        $usbDetails = @((New-EventDetailsText -Rows $usbStorageEvents))
+        if (-not [string]::IsNullOrWhiteSpace([string]$usbDiskContext.DetailText)) {
+            $usbDetails += [string]$usbDiskContext.DetailText
+        }
+        Add-Finding ([ref]$findings) "High" "Storage" "USB/UASP or disk I/O resets detected" $usbEvidence "If Windows, games, apps, or active data are on USB-attached storage, check the enclosure, cable, port, and power. Prefer an internal NVMe/SATA SSD for the Windows system drive on a desktop PC." -EventRows $usbStorageEvents -DetailText ($usbDetails -join "`r`n`r`n")
     }
 
     $networkEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NDIS|NetBT|Netwtw|e1|e2f|e2fnexpress' })
@@ -1506,10 +1621,12 @@ function Write-InitialFindingsReport {
         (
             ($_.ProviderName -match 'Kernel-PnP|UserPnp|DeviceSetupManager|DriverFrameworks-UserMode') -or
             ($_.Id -in @('219','411','400','410','430','442'))
-        )
+        ) -and
+        ([string]$_.Message -match '(?i)PCI\\|ACPI\\|HDAUDIO\\|SCSI\\|STORAGE\\|DISPLAY|VEN_|DEV_|NVME|SATA|NVIDIA|AMD|Intel|Realtek|Media|Audio|Controller') -and
+        ([string]$_.Message -notmatch '(?i)USB\\|USBSTOR|HID\\|BTH\\|Bluetooth|SWD\\|ROOT\\')
     })
     if ($driverPnpEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Medium" "Hardware Migration" "Driver or device setup events found" "$($driverPnpEvents.Count) Kernel-PnP, UserPnp, DeviceSetupManager, or DriverFrameworks event(s)." "On a Windows installation moved between hardware, these events can point to old devices, incompatible drivers, or missing current hardware drivers. Open the repeated event summary and compare device IDs with the current motherboard, GPU, storage controller, USB devices, and network adapter." -EventRows $driverPnpEvents
+        Add-Finding ([ref]$findings) "Medium" "Hardware Migration" "Fixed-hardware driver or device setup events found" "$($driverPnpEvents.Count) fixed-hardware-looking Kernel-PnP, UserPnp, DeviceSetupManager, or DriverFrameworks event(s)." "On a Windows installation moved between hardware, these events can point to old motherboard, GPU, storage controller, network, or audio devices. USB, HID, Bluetooth, and removable peripheral events are intentionally filtered out of this area." -EventRows $driverPnpEvents
     }
 
     $serviceEvents = @($allEvents | Where-Object {
@@ -1660,20 +1777,26 @@ CS2 interpretation:
         Add-Finding ([ref]$findings) "Info" "Drivers" "Low-level hardware access drivers are installed" "$($lowLevelRows.Count) driver/service row(s) mention inpout, WinRing0, IOMap, OpenLibSys, or similar components." "These components are often installed by monitoring, RGB, fan-control, benchmark, or overclocking tools. They are not automatically bad, but review them if crashes, hangs, or driver service events occur around the same timestamps." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $lowLevelRows -Title "Low-level driver and service rows")
     }
 
+    $fixedHardwareClasses = @("Display", "Net", "SCSIAdapter", "HDC", "DiskDrive", "Storage", "System", "MEDIA", "Processor")
+    $fixedHardwareDriverPattern = '(?i)\bAMD\b|\bATI\b|NVIDIA|nvlddmkm|Intel|iaStor|e1|e2f|Netwtw|Realtek|RTKVHD|ASUS|MSI|Micro-Star|Gigabyte|Aorus|ASRock|A-Volute|Nahimic|Sonic|Killer|Rivet|storahci|stornvme'
+
     $migrationPnpRows = @(Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_PnpProblemDevices.csv") | Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.FriendlyName) -and
+        $fixedHardwareClasses -contains [string]$_.Class -and
         [string]$_.Problem -notmatch 'Get-PnpDevice is not available'
     })
     if ($migrationPnpRows.Count -gt 0) {
         $nonPhantomPnpRows = @($migrationPnpRows | Where-Object { [string]$_.Problem -notmatch 'CM_PROB_PHANTOM' })
         if ($nonPhantomPnpRows.Count -gt 0) {
-            Add-Finding ([ref]$findings) "Medium" "Hardware Migration" "PnP devices report driver or hardware problems" "$($nonPhantomPnpRows.Count) non-phantom device row(s) are not in OK state; $($migrationPnpRows.Count) total PnP problem row(s)." "If this Windows installation was moved between PCs, check whether these devices belong to old hardware. In Device Manager, review problem devices and hidden devices before removing anything. Prefer vendor chipset, storage, network, audio, and GPU driver packages for the current motherboard/PC." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $migrationPnpRows -Title "PnP problem devices")
+            Add-Finding ([ref]$findings) "Medium" "Hardware Migration" "Fixed hardware devices report driver or hardware problems" "$($nonPhantomPnpRows.Count) non-phantom fixed-hardware device row(s) are not in OK state; $($migrationPnpRows.Count) total relevant PnP problem row(s)." "If this Windows installation was moved between PCs, check whether these devices belong to old motherboard, GPU, storage controller, network, or audio hardware. Prefer vendor chipset, storage, network, audio, and GPU driver packages for the current PC." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $migrationPnpRows -Title "Fixed-hardware PnP problem devices")
         } else {
-            Add-Finding ([ref]$findings) "Info" "Hardware Migration" "Non-present phantom devices are still registered" "$($migrationPnpRows.Count) PnP row(s) report CM_PROB_PHANTOM, usually devices Windows remembers but does not currently see." "This is common when the same Windows installation is moved across hardware or when USB devices are swapped often. Treat it as cleanup context, not a fault by itself. Review Device Manager hidden devices only if symptoms or driver events point to the same hardware family." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $migrationPnpRows -Title "Phantom PnP devices")
+            Add-Finding ([ref]$findings) "Info" "Hardware Migration" "Non-present fixed hardware devices are still registered" "$($migrationPnpRows.Count) fixed-hardware PnP row(s) report CM_PROB_PHANTOM." "This is common when the same Windows installation is moved across motherboard, GPU, storage, network, or audio hardware. Treat it as cleanup context, not a fault by itself. USB, HID, and removable peripherals are intentionally not included here." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $migrationPnpRows -Title "Fixed-hardware phantom PnP devices")
         }
     }
 
-    $missingDriverFileRows = @(Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_DriverServices_MissingFiles.csv"))
+    $missingDriverFileRows = @(Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_DriverServices_MissingFiles.csv") | Where-Object {
+        "$($_.Name) $($_.DisplayName) $($_.OriginalPathName) $($_.MissingPath)" -match $fixedHardwareDriverPattern
+    })
     if ($missingDriverFileRows.Count -gt 0) {
         Add-Finding ([ref]$findings) "Medium" "Hardware Migration" "Driver services reference missing files" "$($missingDriverFileRows.Count) system driver service row(s) point to missing .sys files." "These are strong stale-driver candidates after hardware swaps or incomplete uninstalls. Review the service names, correlate with Service Control Manager events, and remove or reinstall the related vendor package deliberately." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $missingDriverFileRows -Title "Driver services with missing files")
     }
@@ -1913,10 +2036,11 @@ Typical command meanings:
                 $suspectText = @($topSuspect.ProbablyCausedBy, $topSuspect.ImageName, $topSuspect.ModuleName) |
                     Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
                     Select-Object -First 1
+                $recommendedFromDump = [string]$topSuspect.RecommendedAction
                 if (-not [string]::IsNullOrWhiteSpace([string]$suspectText)) {
-                    $recommendation = "Review suspected dump module '$suspectText' together with BugCheck $($topSuspect.BugCheck), related drivers, firmware, and recent software changes. Open the listed DumpAnalysis_*.txt file for the full !analyze -v output."
+                    $recommendation = "Review suspected dump module '$suspectText' together with BugCheck $($topSuspect.BugCheck). $recommendedFromDump Open the listed DumpAnalysis_*.txt file for the full !analyze -v output."
                 } else {
-                    $recommendation = "Open the listed DumpAnalysis_*.txt file for the full !analyze -v output and correlate the BugCheck with drivers, firmware, and recent software changes."
+                    $recommendation = "$recommendedFromDump Open the listed DumpAnalysis_*.txt file for the full !analyze -v output."
                 }
             } else {
                 $recommendation = "Open 06_Minidumps\\DumpAnalysis.csv and any DumpAnalysis_*.txt files. If analysis was skipped, install Windows Debugging Tools with cdb.exe and rerun the tool."
@@ -2064,7 +2188,7 @@ function Write-HtmlReport {
     }
 
     $findingsHtml = New-HtmlTable $findings @("Severity","Category","Title","TimeContext","Evidence","Recommendation") 50
-    $diskHtml = New-HtmlTable $disks @("Number","FriendlyName","HealthStatus","OperationalStatus","BusType","SizeGB") 20
+    $diskHtml = New-HtmlTable $disks @("Number","HarddiskPath","FriendlyName","SerialNumber","HealthStatus","OperationalStatus","BusType","SizeGB") 20
     $volumeHtml = New-HtmlTable $volumes @("DriveLetter","FileSystemLabel","FileSystem","HealthStatus","OperationalStatus","SizeGB","FreeGB","FreePercent") 30
     $smartPredictionHtml = New-HtmlTable $smartPrediction @("InstanceName","Active","PredictFailure","Reason","Error") 30
     $netHtml = New-HtmlTable $netAdapters @("Name","InterfaceDescription","Status","LinkSpeed","DriverVersion","DriverDate") 30
@@ -2081,8 +2205,8 @@ function Write-HtmlReport {
     $migrationVendorServicesHtml = New-HtmlTable $migrationVendorServices @("VendorGroup","Name","DisplayName","State","Status","StartMode","PathName") 80
     $migrationMissingDriverFilesHtml = New-HtmlTable $migrationMissingDriverFiles @("Name","DisplayName","State","Status","StartMode","MissingPath","OriginalPathName") 80
     $migrationCleanupCandidatesHtml = New-HtmlTable $migrationCleanupCandidates @("CandidateType","ReviewPriority","Name","Class","Identifier","Reason","SuggestedCommand","Caution") 120
-    $dumpHtml = New-HtmlTable $dumps @("Type","Path","SizeMB","LastWriteTime") 10
-    $dumpAnalysisHtml = New-HtmlTable $dumpAnalysis @("DumpFile","Status","BugCheck","ProbablyCausedBy","ProcessName","ModuleName","ImageName","FailureBucket","ExitCode","AnalysisFile","Note") 10
+    $dumpHtml = New-HtmlTable $dumps @("Type","Path","PackagePath","SizeMB","LastWriteTime") 10
+    $dumpAnalysisHtml = New-HtmlTable $dumpAnalysis @("DumpFile","Status","BugCheck","ProbablyCausedBy","ProcessName","ModuleName","ImageName","SymbolName","FailureBucket","SuspectedArea","RecommendedAction","ExitCode","AnalysisFile","Note") 10
     $changedPolicyHtml = New-HtmlTable $changedPolicies @("Scope","PolicyRoot","KeyPath","ValueName","ValueKind","ValueData") 300
 
 @"
@@ -2235,7 +2359,7 @@ function Write-ResultWindowReport {
         ($null -ne $freePercent -and $null -ne $sizeGb -and $sizeGb -ge 10 -and $freePercent -lt 10)
     })
     $noteworthyStorageCount = $noteworthySmartPrediction.Count + $noteworthyStorageReliability.Count + $noteworthyDisks.Count + $noteworthyVolumes.Count
-    $diskHtml = New-HtmlTable $noteworthyDisks @("Number","FriendlyName","HealthStatus","OperationalStatus","BusType","SizeGB") 20
+    $diskHtml = New-HtmlTable $noteworthyDisks @("Number","HarddiskPath","FriendlyName","SerialNumber","HealthStatus","OperationalStatus","BusType","SizeGB") 20
     $volumeHtml = New-HtmlTable $noteworthyVolumes @("DriveLetter","FileSystemLabel","FileSystem","HealthStatus","OperationalStatus","SizeGB","FreeGB","FreePercent") 30
     $storageReliabilityHtml = New-HtmlTable $noteworthyStorageReliability @("FriendlyName","Temperature","TemperatureMax","Wear","ReadErrorsTotal","WriteErrorsTotal","ReadLatencyMax","WriteLatencyMax","LoadUnloadCycleCount","Error") 30
     $smartPredictionHtml = New-HtmlTable $noteworthySmartPrediction @("InstanceName","Active","PredictFailure","Reason","Error") 30
@@ -2728,7 +2852,8 @@ Invoke-ChildPowerShellWithTimeout -Name "OS, uptime, and basic hardware inventor
 
 $StorageInventoryScript = New-ChildScript @'
 Get-Disk |
-    Select-Object Number, FriendlyName, SerialNumber, FirmwareVersion, HealthStatus,
+    Select-Object Number, @{Name="HarddiskPath";Expression={"\\Device\\Harddisk$($_.Number)"}},
+                  FriendlyName, SerialNumber, FirmwareVersion, HealthStatus,
                   OperationalStatus, PartitionStyle, BusType,
                   @{Name="SizeGB";Expression={[math]::Round($_.Size / 1GB, 2)}} |
     Export-Csv (Join-Path $Dirs.Storage "Disks.csv") -NoTypeInformation -Encoding UTF8
@@ -2746,13 +2871,35 @@ Get-Volume |
                   @{Name="FreePercent";Expression={if ($_.Size -gt 0) {[math]::Round(($_.SizeRemaining / $_.Size) * 100, 2)} else {$null}}} |
     Export-Csv (Join-Path $Dirs.Storage "Volumes.csv") -NoTypeInformation -Encoding UTF8
 
-Get-Partition |
-    Select-Object DiskNumber, PartitionNumber, DriveLetter, Type, GptType,
-                  @{Name="SizeGB";Expression={[math]::Round($_.Size / 1GB, 2)}} |
-    Export-Csv (Join-Path $Dirs.Storage "Partitions.csv") -NoTypeInformation -Encoding UTF8
+$diskLookup = @{}
+Get-Disk | ForEach-Object { $diskLookup[[string]$_.Number] = $_ }
+
+Get-Partition | ForEach-Object {
+    $partition = $_
+    $disk = $diskLookup[[string]$partition.DiskNumber]
+    $volume = $null
+    try { $volume = $partition | Get-Volume -ErrorAction SilentlyContinue } catch {}
+    $driveLetter = [string]$partition.DriveLetter
+    if ([string]::IsNullOrWhiteSpace($driveLetter) -or ([int][char]$partition.DriveLetter -eq 0)) { $driveLetter = "" }
+    [PSCustomObject]@{
+        DiskNumber = $partition.DiskNumber
+        HarddiskPath = "\\Device\\Harddisk$($partition.DiskNumber)"
+        DiskFriendlyName = if ($disk) { $disk.FriendlyName } else { "" }
+        DiskSerialNumber = if ($disk) { $disk.SerialNumber } else { "" }
+        DiskBusType = if ($disk) { $disk.BusType } else { "" }
+        PartitionNumber = $partition.PartitionNumber
+        DriveLetter = $driveLetter
+        VolumeLabel = if ($volume) { $volume.FileSystemLabel } else { "" }
+        FileSystem = if ($volume) { $volume.FileSystem } else { "" }
+        Type = $partition.Type
+        GptType = $partition.GptType
+        SizeGB = [math]::Round($partition.Size / 1GB, 2)
+    }
+} | Export-Csv (Join-Path $Dirs.Storage "Partitions.csv") -NoTypeInformation -Encoding UTF8
 
 Get-CimInstance Win32_DiskDrive |
-    Select-Object Index, Model, SerialNumber, FirmwareRevision, InterfaceType, MediaType,
+    Select-Object Index, @{Name="HarddiskPath";Expression={"\\Device\\Harddisk$($_.Index)"}},
+                  Model, SerialNumber, FirmwareRevision, InterfaceType, MediaType,
                   Status, PNPDeviceID,
                   @{Name="SizeGB";Expression={[math]::Round($_.Size / 1GB, 2)}} |
     Export-Csv (Join-Path $Dirs.Storage "DiskDrive_WMI.csv") -NoTypeInformation -Encoding UTF8
@@ -2765,6 +2912,7 @@ Get-CimInstance Win32_DiskDrive | ForEach-Object {
         foreach ($logicalDisk in $logicalDisks) {
             [PSCustomObject]@{
                 DiskIndex     = $disk.Index
+                HarddiskPath  = "\\Device\\Harddisk$($disk.Index)"
                 DiskModel     = $disk.Model
                 SerialNumber  = $disk.SerialNumber
                 InterfaceType = $disk.InterfaceType
@@ -3153,7 +3301,7 @@ Get-CimInstance Win32_PnPSignedDriver |
     Select-Object DeviceName, DeviceClass, Manufacturer, DriverVersion, DriverDate, InfName, DeviceID |
     Export-Csv (Join-Path $Dirs.System "Relevant_Drivers_Network_Storage_System.csv") -NoTypeInformation -Encoding UTF8
 
-$migrationClasses = @("Net", "SCSIAdapter", "HDC", "DiskDrive", "Storage", "System", "Display", "MEDIA", "USB", "HIDClass", "SoftwareComponent", "Extension")
+$migrationClasses = @("Display", "Net", "SCSIAdapter", "HDC", "DiskDrive", "Storage", "System", "MEDIA", "Processor")
 $oldDriverCutoff = (Get-Date).AddYears(-4)
 Get-CimInstance Win32_PnPSignedDriver |
     Where-Object {
@@ -3168,6 +3316,7 @@ Get-CimInstance Win32_PnPSignedDriver |
 if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
     Get-PnpDevice -ErrorAction SilentlyContinue |
         Where-Object {
+            $migrationClasses -contains $_.Class -and
             "$($_.Status)" -notmatch '^OK$' -and
             "$($_.Class)" -notmatch 'LegacyDriver|VolumeSnapshot'
         } |
@@ -3188,7 +3337,7 @@ Get-CimInstance Win32_SystemDriver |
     Select-Object Name, DisplayName, State, Status, StartMode, PathName |
     Export-Csv (Join-Path $Dirs.System "LowLevel_Hardware_Access_Drivers.csv") -NoTypeInformation -Encoding UTF8
 
-$legacyVendorPattern = '(?i)\bAMD\b|\bATI\b|NVIDIA|Intel|Realtek|ASUS|MSI|Micro-Star|Gigabyte|Aorus|ASRock|Razer|Corsair|SteelSeries|Logitech|Elgato|A-Volute|Nahimic|Sonic|Armoury|Aura|iCUE|Killer|Rivet'
+$legacyVendorPattern = '(?i)\bAMD\b|\bATI\b|NVIDIA|Intel|Realtek|ASUS|MSI|Micro-Star|Gigabyte|Aorus|ASRock|A-Volute|Nahimic|Sonic|Killer|Rivet'
 Get-CimInstance Win32_SystemDriver |
     Where-Object { "$($_.Name) $($_.DisplayName) $($_.PathName)" -match $legacyVendorPattern } |
     ForEach-Object {
@@ -3201,11 +3350,6 @@ Get-CimInstance Win32_SystemDriver |
         elseif ($driverText -match 'ASUS|Asus|Armoury|Aura|ASIO') { $vendorGroup = "ASUS" }
         elseif ($driverText -match 'MSI|Micro-Star') { $vendorGroup = "MSI" }
         elseif ($driverText -match 'Gigabyte|Aorus') { $vendorGroup = "Gigabyte" }
-        elseif ($driverText -match 'Razer') { $vendorGroup = "Razer" }
-        elseif ($driverText -match 'Corsair|iCUE') { $vendorGroup = "Corsair" }
-        elseif ($driverText -match 'SteelSeries') { $vendorGroup = "SteelSeries" }
-        elseif ($driverText -match 'Logitech') { $vendorGroup = "Logitech" }
-        elseif ($driverText -match 'Elgato') { $vendorGroup = "Elgato" }
         elseif ($driverText -match 'A-Volute|Nahimic|Sonic') { $vendorGroup = "Audio Enhancement" }
         [PSCustomObject]@{
             VendorGroup = $vendorGroup
@@ -3416,10 +3560,13 @@ Invoke-Step "Collect minidumps and list large dumps only" {
             Select-Object -First 5
 
         foreach ($d in $mini) {
-            Copy-Item $d.FullName $Dirs.Dumps -ErrorAction SilentlyContinue
+            $copiedPath = Join-Path $Dirs.Dumps $d.Name
+            Copy-Item $d.FullName $copiedPath -ErrorAction SilentlyContinue
             $dumpList += [PSCustomObject]@{
                 Type = "Minidump copied"
                 Path = $d.FullName
+                PackagePath = "06_Minidumps\$($d.Name)"
+                CopiedPath = $copiedPath
                 SizeMB = [math]::Round($d.Length / 1MB, 2)
                 LastWriteTime = $d.LastWriteTime
             }
@@ -3496,7 +3643,11 @@ Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -
                 ProcessName      = ""
                 ModuleName       = ""
                 ImageName        = ""
+                SymbolName       = ""
                 FailureBucket    = ""
+                FailureHash      = ""
+                SuspectedArea    = "Not analyzed"
+                RecommendedAction = "Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -AutoInstallDebugTools."
                 ExitCode         = ""
                 AnalysisFile     = ""
                 Note             = "cdb.exe was not found or installation was declined/failed"

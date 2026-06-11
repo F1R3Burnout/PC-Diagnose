@@ -103,15 +103,16 @@ Running remote PowerShell code requires trust in this repository.
 - Clickable Event Viewer details
 - SMART and storage reliability checks
 - Disk, volume, free-space, and file-system checks
+- Disk event mapping to physical disk names and drive letters when Windows reports `\Device\Harddisk...`
 - Collapsed overview of explicitly changed local policy settings
-- Hardware migration and stale driver context
+- Hardware migration and stale fixed-hardware driver context
 - Review-only cleanup commands for stale hardware traces
 - Interactive cleanup assistant for selected stale hardware traces
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
 - Game crash context for Counter-Strike 2 (`cs2.exe`)
 - Windows Update, AppX, service, driver, and application hang checks
-- Minidump collection and optional local dump analysis
+- Minidump copies in the ZIP and optional local `!analyze -v` interpretation
 - ZIP package for handoff
 
 ## Development
