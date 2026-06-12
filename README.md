@@ -131,9 +131,9 @@ Running remote PowerShell code requires trust in this repository.
 - Review-only cleanup commands for stale hardware traces
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
+- Main network report separates VPN-related adapters, routes, tests, and findings into a dedicated VPN section at the bottom
 - Dedicated VPN overview for common providers such as Tailscale, OpenVPN, Surfshark, WireGuard, NordVPN, Proton VPN, Mullvad, Cloudflare WARP, ZeroTier, Cisco AnyConnect, Fortinet, GlobalProtect, and similar tools
-- VPN provider tags in adapter, route, target, ping, and TCP tables where Windows exposes the related interface
-- Dedicated VPN route table next to the complete routing table
+- Collapsible network event logs directly above the VPN section
 - WLAN details from Windows built-in diagnostics: active connection, signal, BSSID, band, channel, rates, security mode, driver data, nearby BSSIDs, saved profiles, and Windows WLAN report path when available
 - Network event logs, cautious subnet discovery, and internet speed test run by default
 - Gaming-related error interpretation for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, game paths, and Counter-Strike 2 (`cs2.exe`)

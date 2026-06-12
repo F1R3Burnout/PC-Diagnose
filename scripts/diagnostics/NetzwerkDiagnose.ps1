@@ -333,6 +333,22 @@ function Get-VpnProviderForAlias {
     return Get-VpnProviderName -Text $InterfaceAlias
 }
 
+function Test-RowHasVpnContext {
+    param([AllowNull()][object]$Row)
+
+    if ($null -eq $Row) { return $false }
+    foreach ($name in @("VpnProvider","Category","Role","Target","InterfaceAlias","Value","Details")) {
+        if ($Row.PSObject.Properties.Name -contains $name) {
+            $value = [string]$Row.$name
+            if ($name -eq "Category" -and $value -eq "VPN") { return $true }
+            if (-not [string]::IsNullOrWhiteSpace($value) -and -not [string]::IsNullOrWhiteSpace((Get-VpnProviderName -Text $value))) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
 function Add-Target {
     param(
         [ref]$Targets,
@@ -1387,7 +1403,7 @@ function New-HtmlReport {
         [hashtable]$Data
     )
 
-    $results = @(Get-ResultRows)
+    $results = if ($Data.ContainsKey("MainResults")) { @($Data.MainResults) } else { @(Get-ResultRows) }
     $errors = @($results | Where-Object { $_.Severity -eq "Error" })
     $warnings = @($results | Where-Object { $_.Severity -eq "Warning" })
     $ok = @($results | Where-Object { $_.Severity -eq "OK" })
@@ -1411,27 +1427,35 @@ function New-HtmlReport {
     }
 
     $sectionsHtml = @"
-<section id="system"><h2>System information</h2>$(New-ResultTable $Data.SystemInfo @("ComputerName","UserName","DomainOrWorkgroup","PartOfDomain","Windows","BuildNumber","PowerShellVersion","UptimeDays","DateTime","TimeZone","IsAdmin"))</section>
-<section id="adapters"><h2>Network adapters</h2>$(New-ResultTable $Data.Adapters @("Name","InterfaceDescription","VpnProvider","Status","LinkSpeed","IPv4Address","PrefixLength","Gateway","DnsServers","DhcpEnabled","DhcpServer","InterfaceMetric","NetworkProfile"))</section>
-<section id="vpn"><h2>VPN overview</h2>$(New-ResultTable $Data.Vpn @("Provider","ItemType","Name","Status","InterfaceAlias","RouteCount","DefaultRoute","Details") "No VPN adapter, route, service, or process was detected.")</section>
-<section id="vpnroutes"><h2>VPN routes</h2>$(New-ResultTable $Data.VpnRoutes @("DestinationPrefix","NextHop","InterfaceAlias","VpnProvider","RouteMetric","InterfaceMetric","PolicyStore") "No VPN routes were detected.")</section>
-<section id="routes"><h2>IP configuration and routing</h2>$(New-ResultTable $Data.Routes @("DestinationPrefix","NextHop","InterfaceAlias","VpnProvider","RouteMetric","InterfaceMetric","PolicyStore"))</section>
-<section id="targets"><h2>Detected target matrix</h2>$(New-ResultTable $Data.TargetMatrix @("Role","Target","InterfaceAlias","VpnProvider","Source","TargetType","TestPing","TestDns","TcpPorts"))</section>
-<section id="ping"><h2>Ping tests</h2>$(New-ResultTable $Data.Ping @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","VpnProvider","Sent","Successful","LossPercent","MinMs","AvgMs","MaxMs","JitterMs","Result","Recommendation"))</section>
-<section id="tcp"><h2>TCP port tests</h2>$(New-ResultTable $Data.Tcp @("Severity","Role","Host","Port","TcpTestSucceeded","RemoteAddress","InterfaceAlias","VpnProvider","LatencyMs","Result","Details","Recommendation"))</section>
-<section id="dns"><h2>DNS diagnostics</h2>$(New-ResultTable $Data.Dns @("Severity","Role","Name","Server","Addresses","DurationMs","Result","Error","Recommendation"))</section>
-<section id="trace"><h2>Traceroute</h2>$(New-ResultTable $Data.Traceroute @("Severity","Target","PingSucceeded","TraceRoute","Details"))</section>
-<section id="mtu"><h2>MTU test</h2>$(New-ResultTable $Data.Mtu @("Severity","Role","Target","BestPayload","EstimatedMtu","Result","Recommendation"))</section>
-<section id="wlan"><h2>WLAN diagnostics</h2>$(New-ResultTable $Data.Wlan @("RowType","Severity","Name","SSID","BSSID","SignalPercent","RadioType","Band","Channel","ReceiveRate","TransmitRate","Authentication","Cipher","Profile","Details","Recommendation") "No WLAN interface was detected.")</section>
-<section id="smb"><h2>SMB / NAS test</h2>$(New-ResultTable $Data.Smb @("Severity","Path","Host","Tcp445","TestPath","WriteMBps","ReadMBps","Details"))</section>
-<section id="iperf"><h2>iPerf3 LAN speed test</h2>$(New-ResultTable $Data.Iperf @("Severity","Target","Mode","Mbps","Retransmits","Result","Details"))</section>
-<section id="speedtest"><h2>Internet speed test</h2>$(New-ResultTable $Data.Speedtest @("Severity","Tool","DownloadMbps","UploadMbps","PingMs","Details"))</section>
-<section id="firewall"><h2>Firewall and network profiles</h2>$(New-ResultTable $Data.Firewall @("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction"))</section>
-<section id="services"><h2>Windows network services</h2>$(New-ResultTable $Data.Services @("Name","DisplayName","Status","StartType"))</section>
-<section id="events"><h2>Network event logs</h2>$(New-ResultTable $Data.Events @("TimeCreated","LogName","ProviderName","Id","LevelDisplayName","Message"))</section>
-<section id="subnet"><h2>Subnet discovery</h2>$(New-ResultTable $Data.SubnetDiscovery @("Address","MacAddress","State","Source","Result"))</section>
-<section id="results"><h2>All findings and test results</h2>$(New-ResultTable $results @("Severity","Category","Test","Role","Target","InterfaceAlias","Result","Value","Details","Recommendation"))</section>
-<section id="raw"><h2>Raw data</h2>$rawHtml</section>
+<section id="system" class="section-card utility"><h2>System information</h2>$(New-ResultTable $Data.SystemInfo @("ComputerName","UserName","DomainOrWorkgroup","PartOfDomain","Windows","BuildNumber","PowerShellVersion","UptimeDays","DateTime","TimeZone","IsAdmin"))</section>
+<section id="adapters" class="section-card network"><h2>Main network adapters</h2>$(New-ResultTable $Data.MainAdapters @("Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile") "No non-VPN network adapter was detected.")</section>
+<section id="routes" class="section-card network"><h2>Main IP configuration and routing</h2>$(New-ResultTable $Data.MainRoutes @("DestinationPrefix","NextHop","InterfaceAlias","RouteMetric","InterfaceMetric") "No non-VPN routes were detected.")</section>
+<section id="targets" class="section-card network"><h2>Main detected target matrix</h2>$(New-ResultTable $Data.MainTargetMatrix @("Role","Target","InterfaceAlias","Source","TargetType","TestPing","TestDns","TcpPorts"))</section>
+<section id="ping" class="section-card network"><h2>Main ping tests</h2>$(New-ResultTable $Data.MainPing @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","LossPercent","AvgMs","JitterMs","Result","Recommendation"))</section>
+<section id="tcp" class="section-card network"><h2>Main TCP port tests</h2>$(New-ResultTable $Data.MainTcp @("Severity","Role","Host","Port","TcpTestSucceeded","InterfaceAlias","LatencyMs","Result","Recommendation"))</section>
+<section id="dns" class="section-card network"><h2>DNS diagnostics</h2>$(New-ResultTable $Data.Dns @("Severity","Role","Name","Server","Addresses","DurationMs","Result","Error","Recommendation"))</section>
+<section id="trace" class="section-card network"><h2>Traceroute</h2>$(New-ResultTable $Data.Traceroute @("Severity","Target","PingSucceeded","TraceRoute","Details"))</section>
+<section id="mtu" class="section-card network"><h2>MTU test</h2>$(New-ResultTable $Data.Mtu @("Severity","Role","Target","BestPayload","EstimatedMtu","Result","Recommendation"))</section>
+<section id="wlan" class="section-card network"><h2>WLAN diagnostics</h2>$(New-ResultTable $Data.Wlan @("RowType","Severity","Name","SSID","BSSID","SignalPercent","RadioType","Band","Channel","ReceiveRate","TransmitRate","Authentication","Cipher","Profile","Details","Recommendation") "No WLAN interface was detected.")</section>
+<section id="smb" class="section-card utility"><h2>SMB / NAS test</h2>$(New-ResultTable $Data.Smb @("Severity","Path","Host","Tcp445","TestPath","WriteMBps","ReadMBps","Details"))</section>
+<section id="iperf" class="section-card utility"><h2>iPerf3 LAN speed test</h2>$(New-ResultTable $Data.Iperf @("Severity","Target","Mode","Mbps","Retransmits","Result","Details"))</section>
+<section id="speedtest" class="section-card utility"><h2>Internet speed test</h2>$(New-ResultTable $Data.Speedtest @("Severity","Tool","DownloadMbps","UploadMbps","PingMs","Details"))</section>
+<section id="firewall" class="section-card utility"><h2>Main firewall and network profiles</h2>$(New-ResultTable $Data.MainFirewall @("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction"))</section>
+<section id="services" class="section-card utility"><h2>Windows network services</h2>$(New-ResultTable $Data.Services @("Name","DisplayName","Status","StartType"))</section>
+<section id="subnet" class="section-card network"><h2>Subnet discovery</h2>$(New-ResultTable $Data.SubnetDiscovery @("Address","MacAddress","State","Source","Result"))</section>
+<section id="results" class="section-card utility"><h2>Main findings and test results</h2>$(New-ResultTable $Data.MainResults @("Severity","Category","Test","Role","Target","Result","Value","Recommendation"))</section>
+<details id="raw" class="fold-section raw"><summary>Raw data</summary><div class="fold-body">$rawHtml</div></details>
+<details id="events" class="fold-section logs"><summary>Network event logs</summary><div class="fold-body">$(New-ResultTable $Data.Events @("TimeCreated","LogName","ProviderName","Id","LevelDisplayName","Message"))</div></details>
+<section id="vpn" class="section-card vpn"><h2>VPN context</h2>
+<h3>VPN overview</h3>$(New-ResultTable $Data.Vpn @("Provider","ItemType","Name","Status","InterfaceAlias","RouteCount","DefaultRoute","Details") "No VPN adapter, route, service, or process was detected.")
+<h3>VPN adapters and IP configuration</h3>$(New-ResultTable $Data.VpnAdapters @("Provider","Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile") "No VPN network adapter was detected.")
+<h3>VPN routes</h3>$(New-ResultTable $Data.VpnRoutes @("DestinationPrefix","NextHop","InterfaceAlias","VpnProvider","RouteMetric","InterfaceMetric") "No VPN routes were detected.")
+<h3>VPN target matrix</h3>$(New-ResultTable $Data.VpnTargetMatrix @("Role","Target","InterfaceAlias","VpnProvider","Source","TargetType","TestPing","TestDns","TcpPorts") "No VPN targets were detected.")
+<h3>VPN ping tests</h3>$(New-ResultTable $Data.VpnPing @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","VpnProvider","LossPercent","AvgMs","JitterMs","Result","Recommendation") "No VPN ping tests were collected.")
+<h3>VPN TCP port tests</h3>$(New-ResultTable $Data.VpnTcp @("Severity","Role","Host","Port","TcpTestSucceeded","InterfaceAlias","VpnProvider","LatencyMs","Result","Recommendation") "No VPN TCP tests were collected.")
+<h3>VPN firewall and profile rows</h3>$(New-ResultTable $Data.VpnFirewall @("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction") "No VPN firewall or profile rows were detected.")
+<h3>VPN findings and test results</h3>$(New-ResultTable $Data.VpnResults @("Severity","Category","Test","Role","Target","InterfaceAlias","Result","Value","Details","Recommendation") "No VPN-specific findings were detected.")
+</section>
 "@
 
     $html = @"
@@ -1441,13 +1465,14 @@ function New-HtmlReport {
   <meta charset="utf-8">
   <title>Network Diagnostics Report</title>
   <style>
-    :root { --ink:#17202a; --muted:#64748b; --line:#d7dee8; --soft:#f8fafc; --ok:#15803d; --warn:#b45309; --error:#b42318; --info:#2563eb; }
+    :root { color-scheme:light; --ink:#17202a; --muted:#5d6978; --line:#d8dde6; --soft:#f3f6fa; --accent:#0f766e; --ok:#15803d; --warn:#a16207; --error:#b42318; --info:#2563eb; --net-bg:#dbeafe; --net-border:#93c5fd; --net-left:#1d4ed8; --vpn-bg:#f5f3ff; --vpn-border:#c4b5fd; --vpn-left:#7c3aed; --log-bg:#fef9c3; --log-border:#fde68a; --log-left:#a16207; }
     * { box-sizing:border-box; }
     body { margin:0; font-family:Segoe UI, Arial, sans-serif; color:var(--ink); background:#fff; }
     header { padding:28px 34px 20px; background:#f8fafc; border-bottom:1px solid var(--line); }
-    main { padding:22px 34px 42px; max-width:1700px; margin:0 auto; }
-    h1 { margin:0 0 8px; font-size:28px; }
-    h2 { margin:30px 0 10px; font-size:20px; }
+    main { padding:22px 34px 42px; max-width:1500px; margin:0 auto; }
+    h1 { margin:0 0 8px; font-size:26px; font-weight:650; letter-spacing:0; }
+    h2 { margin:0 0 10px; font-size:18px; }
+    h3 { margin:18px 0 8px; font-size:15px; }
     .meta { color:var(--muted); font-size:13px; }
     .summary { margin-top:18px; border:1px solid var(--line); border-left:7px solid var(--info); border-radius:8px; padding:16px; background:#fff; }
     .summary.Error { border-left-color:var(--error); }
@@ -1460,10 +1485,15 @@ function New-HtmlReport {
     nav { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 6px; }
     nav a { color:#0f766e; text-decoration:none; border:1px solid #99f6e4; background:#f0fdfa; border-radius:999px; padding:5px 10px; font-size:12px; }
     section { margin-top:18px; }
-    .table-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+    .section-card { border:1px solid var(--line); border-left:6px solid var(--accent); border-radius:8px; padding:14px 16px; background:#fff; }
+    .section-card.network { background:#eff6ff; border-color:var(--net-border); border-left-color:var(--net-left); }
+    .section-card.utility { background:#f8fafc; border-color:var(--line); border-left-color:var(--accent); }
+    .section-card.logs { background:#fffbeb; border-color:var(--log-border); border-left-color:var(--log-left); }
+    .section-card.vpn { background:var(--vpn-bg); border-color:var(--vpn-border); border-left-color:var(--vpn-left); }
+    .table-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fff; }
     table { width:max-content; min-width:100%; border-collapse:collapse; font-size:12px; }
-    th, td { padding:8px 9px; border-bottom:1px solid var(--line); border-right:1px solid var(--line); vertical-align:top; text-align:left; white-space:normal; max-width:520px; overflow-wrap:anywhere; }
-    th { background:#f1f5f9; font-weight:700; }
+    th, td { padding:6px 7px; border-bottom:1px solid var(--line); border-right:1px solid var(--line); vertical-align:top; text-align:left; white-space:normal; max-width:360px; overflow-wrap:anywhere; }
+    th { background:var(--soft); font-weight:700; }
     .badge { border-radius:999px; padding:3px 9px; font-weight:700; font-size:11px; display:inline-block; }
     .sev-ok { color:#14532d; background:#dcfce7; border:1px solid #86efac; }
     .sev-warning { color:#7c2d12; background:#ffedd5; border:1px solid #fdba74; }
@@ -1472,6 +1502,12 @@ function New-HtmlReport {
     .empty { border:1px dashed var(--line); border-radius:8px; padding:12px; color:var(--muted); background:#f8fafc; }
     details { border:1px solid var(--line); border-radius:8px; margin:10px 0; background:#fff; }
     summary { cursor:pointer; padding:10px 12px; font-weight:700; }
+    details.fold-section { border:1px solid var(--line); border-left:6px solid var(--accent); border-radius:8px; margin-top:18px; background:#fff; }
+    details.fold-section > summary { padding:14px 16px; list-style:none; }
+    details.fold-section > summary::-webkit-details-marker { display:none; }
+    details.fold-section .fold-body { padding:0 16px 16px; }
+    details.logs { background:#fffbeb; border-color:var(--log-border); border-left-color:var(--log-left); }
+    details.raw { background:#f8fafc; }
     pre { margin:0; padding:12px; overflow:auto; white-space:pre-wrap; background:#0f172a; color:#e5e7eb; border-radius:0 0 8px 8px; }
   </style>
 </head>
@@ -1492,7 +1528,7 @@ function New-HtmlReport {
       $topProblemHtml
     </div>
     <nav>
-      <a href="#system">System</a><a href="#adapters">Adapters</a><a href="#vpn">VPN</a><a href="#vpnroutes">VPN Routes</a><a href="#routes">Routing</a><a href="#targets">Targets</a><a href="#ping">Ping</a><a href="#tcp">TCP</a><a href="#dns">DNS</a><a href="#wlan">WLAN</a><a href="#smb">SMB</a><a href="#events">Events</a><a href="#results">All Results</a><a href="#raw">Raw</a>
+      <a href="#system">System</a><a href="#adapters">Adapters</a><a href="#routes">Routing</a><a href="#targets">Targets</a><a href="#ping">Ping</a><a href="#tcp">TCP</a><a href="#dns">DNS</a><a href="#wlan">WLAN</a><a href="#smb">SMB</a><a href="#subnet">Subnet</a><a href="#results">Results</a><a href="#raw">Raw</a><a href="#events">Logs</a><a href="#vpn">VPN</a>
     </nav>
   </header>
   <main>
@@ -1558,15 +1594,69 @@ if ($IncludeRawData) {
     try { $script:RawData["route print"] = (route.exe print 2>&1) -join "`n" } catch {}
 }
 
+$nonVpnAdapters = @($adapters | Where-Object { -not (Test-RowHasVpnContext $_) } | ForEach-Object {
+    $ipv4Cidr = if (-not [string]::IsNullOrWhiteSpace([string]$_.IPv4Address)) { "{0}/{1}" -f $_.IPv4Address, $_.PrefixLength } else { "" }
+    [PSCustomObject]@{
+        Name = $_.Name
+        Description = $_.InterfaceDescription
+        Status = $_.Status
+        LinkSpeed = $_.LinkSpeed
+        IPv4 = $ipv4Cidr
+        Gateway = $_.Gateway
+        DNS = $_.DnsServers
+        DHCP = $_.DhcpEnabled
+        Metric = $_.InterfaceMetric
+        Profile = $_.NetworkProfile
+    }
+})
+$vpnAdapters = @($adapters | Where-Object { Test-RowHasVpnContext $_ } | ForEach-Object {
+    $ipv4Cidr = if (-not [string]::IsNullOrWhiteSpace([string]$_.IPv4Address)) { "{0}/{1}" -f $_.IPv4Address, $_.PrefixLength } else { "" }
+    [PSCustomObject]@{
+        Provider = $_.VpnProvider
+        Name = $_.Name
+        Description = $_.InterfaceDescription
+        Status = $_.Status
+        LinkSpeed = $_.LinkSpeed
+        IPv4 = $ipv4Cidr
+        Gateway = $_.Gateway
+        DNS = $_.DnsServers
+        DHCP = $_.DhcpEnabled
+        Metric = $_.InterfaceMetric
+        Profile = $_.NetworkProfile
+    }
+})
+$nonVpnRoutes = @($routes | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object DestinationPrefix, NextHop, InterfaceAlias, RouteMetric, InterfaceMetric)
+$vpnRouteRows = @($routes | Where-Object { Test-RowHasVpnContext $_ } | Select-Object DestinationPrefix, NextHop, InterfaceAlias, VpnProvider, RouteMetric, InterfaceMetric)
+$nonVpnTargets = @($targetMatrix | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object Role, Target, InterfaceAlias, Source, TargetType, TestPing, TestDns, TcpPorts)
+$vpnTargets = @($targetMatrix | Where-Object { Test-RowHasVpnContext $_ } | Select-Object Role, Target, InterfaceAlias, VpnProvider, Source, TargetType, TestPing, TestDns, TcpPorts)
+$nonVpnPing = @($pingRows | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object Severity, Role, Target, ResolvedAddress, InterfaceAlias, LossPercent, AvgMs, JitterMs, Result, Recommendation)
+$vpnPing = @($pingRows | Where-Object { Test-RowHasVpnContext $_ } | Select-Object Severity, Role, Target, ResolvedAddress, InterfaceAlias, VpnProvider, LossPercent, AvgMs, JitterMs, Result, Recommendation)
+$nonVpnTcp = @($tcpRows | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object Severity, Role, Host, Port, TcpTestSucceeded, InterfaceAlias, LatencyMs, Result, Recommendation)
+$vpnTcp = @($tcpRows | Where-Object { Test-RowHasVpnContext $_ } | Select-Object Severity, Role, Host, Port, TcpTestSucceeded, InterfaceAlias, VpnProvider, LatencyMs, Result, Recommendation)
+$nonVpnFirewall = @($firewallRows | Where-Object { -not (Test-RowHasVpnContext $_) })
+$vpnFirewall = @($firewallRows | Where-Object { Test-RowHasVpnContext $_ })
+$resultRows = @(Get-ResultRows)
+$mainResults = @($resultRows | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object Severity, Category, Test, Role, Target, Result, Value, Recommendation)
+$vpnResults = @($resultRows | Where-Object { Test-RowHasVpnContext $_ } | Select-Object Severity, Category, Test, Role, Target, InterfaceAlias, Result, Value, Details, Recommendation)
+
 $data = @{
     SystemInfo = $systemInfo
     Adapters = $adapters
+    MainAdapters = $nonVpnAdapters
+    VpnAdapters = $vpnAdapters
     Vpn = $vpnRows
     VpnRoutes = $vpnRouteRows
     Routes = $routes
+    MainRoutes = $nonVpnRoutes
     TargetMatrix = $targetMatrix
+    MainTargetMatrix = $nonVpnTargets
+    VpnTargetMatrix = $vpnTargets
     Ping = $pingRows
+    MainPing = $nonVpnPing
+    VpnPing = $vpnPing
     Tcp = $tcpRows
+    MainTcp = $nonVpnTcp
+    VpnTcp = $vpnTcp
     Dns = $dnsRows
     Traceroute = $traceRows
     Mtu = $mtuRows
@@ -1575,10 +1665,14 @@ $data = @{
     Iperf = $iperfRows
     Speedtest = $speedRows
     Firewall = $firewallRows
+    MainFirewall = $nonVpnFirewall
+    VpnFirewall = $vpnFirewall
     Services = $serviceRows
     Events = $eventRows
     SubnetDiscovery = $subnetRows
-    Results = @(Get-ResultRows)
+    Results = $resultRows
+    MainResults = $mainResults
+    VpnResults = $vpnResults
     RawData = $script:RawData
 }
 
