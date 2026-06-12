@@ -19,7 +19,24 @@ param(
     [switch]$PrivacyMode,
     [switch]$AutoInstallDebugTools,
     [switch]$DaysBackProvided,
-    [switch]$NoElevate
+    [switch]$NoElevate,
+    [string]$OutputPath = "C:\Temp\NetzwerkDiagnose",
+    [string[]]$LocalTargets = @(),
+    [string[]]$TcpTargets = @(),
+    [string[]]$DnsTestNames = @("google.de", "microsoft.com", "dns.msftncsi.com"),
+    [string]$LanSpeedTarget = "",
+    [string]$SmbTestPath = "",
+    [int]$SmbTestSizeMB = 256,
+    [int]$PingCount = 10,
+    [int]$EventHours = 24,
+    [switch]$IncludeEventLogs,
+    [switch]$IncludeRawData,
+    [switch]$IncludeTraceroute,
+    [switch]$IncludeMtuTest,
+    [switch]$IncludeSpeedtest,
+    [switch]$IncludeSubnetDiscovery,
+    [switch]$NoInternetTest,
+    [switch]$NoWriteTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -219,6 +236,39 @@ function Invoke-RemoteTool {
             $toolArgs.AutoInstallDebugTools = $true
         }
     } elseif ($toolInfo.id -eq "netdiag") {
+        $toolArgs.OutputPath = $OutputPath
+        $toolArgs.LocalTargets = $LocalTargets
+        $toolArgs.TcpTargets = $TcpTargets
+        $toolArgs.DnsTestNames = $DnsTestNames
+        $toolArgs.LanSpeedTarget = $LanSpeedTarget
+        $toolArgs.SmbTestPath = $SmbTestPath
+        $toolArgs.SmbTestSizeMB = $SmbTestSizeMB
+        $toolArgs.PingCount = $PingCount
+        $toolArgs.EventHours = $EventHours
+        if ($IncludeEventLogs) {
+            $toolArgs.IncludeEventLogs = $true
+        }
+        if ($IncludeRawData) {
+            $toolArgs.IncludeRawData = $true
+        }
+        if ($IncludeTraceroute) {
+            $toolArgs.IncludeTraceroute = $true
+        }
+        if ($IncludeMtuTest) {
+            $toolArgs.IncludeMtuTest = $true
+        }
+        if ($IncludeSpeedtest) {
+            $toolArgs.IncludeSpeedtest = $true
+        }
+        if ($IncludeSubnetDiscovery) {
+            $toolArgs.IncludeSubnetDiscovery = $true
+        }
+        if ($NoInternetTest) {
+            $toolArgs.NoInternetTest = $true
+        }
+        if ($NoWriteTests) {
+            $toolArgs.NoWriteTests = $true
+        }
         $toolArgs.OpenReport = $true
     }
 

@@ -100,7 +100,13 @@ Start NetzwerkDiagnose directly:
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool netdiag
 ```
 
-For advanced network tests, download `scripts/diagnostics/NetzwerkDiagnose.ps1` and run it locally with the required parameters, for example `-IncludeEventLogs`, `-IncludeTraceroute`, `-SmbTestPath`, or `-LanSpeedTarget`.
+Run NetzwerkDiagnose with optional tests:
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool netdiag -IncludeEventLogs -IncludeTraceroute -IncludeMtuTest
+```
+
+Useful network parameters include `-NoInternetTest`, `-SmbTestPath`, `-LanSpeedTarget`, `-IncludeSpeedtest`, `-IncludeSubnetDiscovery`, `-LocalTargets`, and `-TcpTargets`.
 
 ## Important Notes
 
