@@ -248,11 +248,15 @@ function Get-FirstProperty {
 }
 
 function New-ResultTable {
-    param([object[]]$Rows, [string[]]$Columns)
+    param(
+        [object[]]$Rows,
+        [string[]]$Columns,
+        [string]$EmptyMessage = "No data collected."
+    )
 
     $items = @($Rows)
     if ($items.Count -eq 0) {
-        return '<div class="empty">No data collected.</div>'
+        return '<div class="empty">' + (Escape-Html $EmptyMessage) + '</div>'
     }
 
     $sb = New-Object System.Text.StringBuilder
@@ -284,6 +288,51 @@ function New-ResultTable {
     return $sb.ToString()
 }
 
+function Get-VpnProviderName {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
+    $value = [string]$Text
+    $patterns = [ordered]@{
+        "Tailscale"        = '(?i)tailscale'
+        "OpenVPN"          = '(?i)openvpn|tap-windows|wintun'
+        "WireGuard"        = '(?i)wireguard|wintun userspace tunnel'
+        "Surfshark"        = '(?i)surfshark'
+        "NordVPN"          = '(?i)nordvpn|nordlynx'
+        "Proton VPN"       = '(?i)protonvpn|proton vpn'
+        "Mullvad"          = '(?i)mullvad'
+        "ExpressVPN"       = '(?i)expressvpn|express vpn'
+        "CyberGhost"       = '(?i)cyberghost'
+        "Private Internet Access" = '(?i)private internet access|\bpia\b'
+        "Cloudflare WARP"  = '(?i)cloudflare.*warp|warp tunnel'
+        "ZeroTier"         = '(?i)zerotier'
+        "Cisco AnyConnect" = '(?i)anyconnect|cisco secure client'
+        "Fortinet"         = '(?i)fortinet|forticlient'
+        "GlobalProtect"    = '(?i)globalprotect|palo alto'
+        "Check Point VPN"  = '(?i)check point|checkpoint|endpoint security vpn'
+        "SonicWall"        = '(?i)sonicwall|netextender'
+        "Sophos VPN"       = '(?i)sophos.*vpn'
+        "Hamachi"          = '(?i)hamachi'
+        "Radmin VPN"       = '(?i)radmin vpn'
+        "Generic VPN"      = '(?i)\bvpn\b|virtual private network|tunnel'
+    }
+    foreach ($provider in $patterns.Keys) {
+        if ($value -match $patterns[$provider]) { return $provider }
+    }
+    return ""
+}
+
+function Get-VpnProviderForAlias {
+    param([AllowNull()][string]$InterfaceAlias, [object[]]$AdapterRows)
+
+    if ([string]::IsNullOrWhiteSpace($InterfaceAlias)) { return "" }
+    $adapter = @($AdapterRows | Where-Object { [string]$_.Name -eq [string]$InterfaceAlias } | Select-Object -First 1)
+    if ($adapter.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$adapter[0].VpnProvider)) {
+        return [string]$adapter[0].VpnProvider
+    }
+    return Get-VpnProviderName -Text $InterfaceAlias
+}
+
 function Add-Target {
     param(
         [ref]$Targets,
@@ -305,6 +354,7 @@ function Add-Target {
         Role           = $Role
         Target         = $Target
         InterfaceAlias = $InterfaceAlias
+        VpnProvider    = Get-VpnProviderName -Text $InterfaceAlias
         Source         = $Source
         TestPing       = [bool]$TestPing
         TestDns        = [bool]$TestDns
@@ -411,6 +461,7 @@ function Test-PingTarget {
         Target = $target
         ResolvedAddress = $resolved
         InterfaceAlias = [string]$TargetRow.InterfaceAlias
+        VpnProvider = [string]$TargetRow.VpnProvider
         Sent = $sent
         Successful = $success
         LossPercent = $loss
@@ -428,7 +479,7 @@ function Test-PingTarget {
 }
 
 function Test-TcpTarget {
-    param([string]$HostName, [int]$Port, [string]$Role = "", [string]$InterfaceAlias = "")
+    param([string]$HostName, [int]$Port, [string]$Role = "", [string]$InterfaceAlias = "", [string]$VpnProvider = "")
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $success = $false
@@ -462,6 +513,7 @@ function Test-TcpTarget {
         TcpTestSucceeded = $success
         RemoteAddress = $remoteAddress
         InterfaceAlias = $InterfaceAlias
+        VpnProvider = if ([string]::IsNullOrWhiteSpace($VpnProvider)) { Get-VpnProviderName -Text $InterfaceAlias } else { $VpnProvider }
         LatencyMs = [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
         Severity = $severity
         Result = $result
@@ -578,9 +630,11 @@ function Get-NetworkAdapterRows {
             if ($gwObj.Count -gt 0) { $gateway = [string]$gwObj[0].NextHop }
         }
 
+        $vpnProvider = Get-VpnProviderName -Text ("{0} {1}" -f $alias, [string]$adapter.InterfaceDescription)
         $row = [PSCustomObject]@{
             Name = $alias
             InterfaceDescription = [string]$adapter.InterfaceDescription
+            VpnProvider = $vpnProvider
             Status = [string]$adapter.Status
             LinkSpeed = [string]$adapter.LinkSpeed
             LinkSpeedMbps = Convert-LinkSpeedToMbps ([string]$adapter.LinkSpeed)
@@ -598,13 +652,16 @@ function Get-NetworkAdapterRows {
         $rows += $row
 
         if ($row.Status -match 'Up') {
+            if (-not [string]::IsNullOrWhiteSpace($row.VpnProvider)) {
+                Add-Result -Category "VPN" -Test "VPN adapter detected" -Role $row.VpnProvider -Target $row.Name -InterfaceAlias $row.Name -Severity "Info" -Result "Detected" -Value $row.InterfaceDescription -Recommendation "VPN adapters can intentionally add routes, DNS servers, split tunnels, and lower MTU. Compare connectivity with VPN connected and disconnected."
+            }
             if ($row.IPv4Address -match '^169\.254\.') {
                 Add-Result -Category "Adapters" -Test "IPv4 address" -Role "Active adapter" -Target $row.Name -InterfaceAlias $row.Name -Severity "Error" -Result "APIPA address" -Value $row.IPv4Address -Recommendation "DHCP likely failed. Check DHCP server, switch/Wi-Fi, VLAN, cable, and adapter configuration."
             }
-            if ([string]::IsNullOrWhiteSpace($row.Gateway) -and $row.InterfaceDescription -notmatch '(?i)loopback|virtual|vpn|bluetooth') {
+            if ([string]::IsNullOrWhiteSpace($row.Gateway) -and [string]::IsNullOrWhiteSpace($row.VpnProvider) -and $row.InterfaceDescription -notmatch '(?i)loopback|virtual|vpn|bluetooth') {
                 Add-Result -Category "Adapters" -Test "Default gateway" -Role "Active adapter" -Target $row.Name -InterfaceAlias $row.Name -Severity "Warning" -Result "No gateway" -Recommendation "If this adapter should provide network access, check DHCP/static IP configuration."
             }
-            if ([string]::IsNullOrWhiteSpace($row.DnsServers)) {
+            if ([string]::IsNullOrWhiteSpace($row.DnsServers) -and [string]::IsNullOrWhiteSpace($row.VpnProvider)) {
                 Add-Result -Category "Adapters" -Test "DNS servers" -Role "Active adapter" -Target $row.Name -InterfaceAlias $row.Name -Severity "Error" -Result "No DNS server" -Recommendation "Set DNS via DHCP or static configuration."
             }
             if ($row.NetworkProfile -eq "Public") {
@@ -619,6 +676,8 @@ function Get-NetworkAdapterRows {
 }
 
 function Get-RouteRows {
+    param([object[]]$AdapterRows)
+
     $routes = @(Invoke-Capture "Get-NetRoute" { Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop | Sort-Object DestinationPrefix, RouteMetric, InterfaceMetric } @())
     $defaultRoutes = @($routes | Where-Object { $_.DestinationPrefix -eq "0.0.0.0/0" })
     if ($defaultRoutes.Count -eq 0) {
@@ -632,7 +691,20 @@ function Get-RouteRows {
         }
     }
 
-    return @($routes | Select-Object DestinationPrefix, NextHop, InterfaceAlias, RouteMetric, InterfaceMetric, PolicyStore)
+    $rows = @()
+    foreach ($route in $routes) {
+        $vpnProvider = Get-VpnProviderForAlias -InterfaceAlias ([string]$route.InterfaceAlias) -AdapterRows $AdapterRows
+        $rows += [PSCustomObject]@{
+            DestinationPrefix = [string]$route.DestinationPrefix
+            NextHop = [string]$route.NextHop
+            InterfaceAlias = [string]$route.InterfaceAlias
+            VpnProvider = $vpnProvider
+            RouteMetric = [string]$route.RouteMetric
+            InterfaceMetric = [string]$route.InterfaceMetric
+            PolicyStore = [string]$route.PolicyStore
+        }
+    }
+    return $rows
 }
 
 function Get-PrimaryInterfaceAlias {
@@ -640,6 +712,90 @@ function Get-PrimaryInterfaceAlias {
     $route = @($RouteRows | Where-Object { $_.DestinationPrefix -eq "0.0.0.0/0" } | Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1)
     if ($route.Count -gt 0) { return [string]$route[0].InterfaceAlias }
     return ""
+}
+
+function Get-VpnRows {
+    param(
+        [object[]]$AdapterRows,
+        [object[]]$RouteRows
+    )
+
+    $rows = @()
+    foreach ($adapter in @($AdapterRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VpnProvider) })) {
+        $rows += [PSCustomObject]@{
+            Provider = [string]$adapter.VpnProvider
+            ItemType = "Adapter"
+            Name = [string]$adapter.Name
+            Status = [string]$adapter.Status
+            InterfaceAlias = [string]$adapter.Name
+            Details = [string]$adapter.InterfaceDescription
+            RouteCount = ""
+            DefaultRoute = ""
+        }
+    }
+
+    foreach ($group in @($RouteRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VpnProvider) } | Group-Object VpnProvider, InterfaceAlias)) {
+        $sample = $group.Group | Select-Object -First 1
+        $defaultRoute = if (@($group.Group | Where-Object { $_.DestinationPrefix -eq "0.0.0.0/0" }).Count -gt 0) { "Yes" } else { "No" }
+        $prefixes = @($group.Group | Select-Object -First 8 -ExpandProperty DestinationPrefix) -join ", "
+        $rows += [PSCustomObject]@{
+            Provider = [string]$sample.VpnProvider
+            ItemType = "Routes"
+            Name = [string]$sample.InterfaceAlias
+            Status = "Detected"
+            InterfaceAlias = [string]$sample.InterfaceAlias
+            Details = $prefixes
+            RouteCount = [string]$group.Count
+            DefaultRoute = $defaultRoute
+        }
+    }
+
+    $vpnServices = @(Get-Service -ErrorAction SilentlyContinue | Where-Object {
+        (Get-VpnProviderName -Text ("{0} {1}" -f $_.Name, $_.DisplayName)) -ne ""
+    })
+    foreach ($svc in $vpnServices) {
+        $provider = Get-VpnProviderName -Text ("{0} {1}" -f $svc.Name, $svc.DisplayName)
+        $rows += [PSCustomObject]@{
+            Provider = $provider
+            ItemType = "Service"
+            Name = [string]$svc.Name
+            Status = [string]$svc.Status
+            InterfaceAlias = ""
+            Details = [string]$svc.DisplayName
+            RouteCount = ""
+            DefaultRoute = ""
+        }
+    }
+
+    $vpnProcesses = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        (Get-VpnProviderName -Text $_.ProcessName) -ne ""
+    } | Sort-Object ProcessName -Unique)
+    foreach ($proc in $vpnProcesses) {
+        $provider = Get-VpnProviderName -Text ([string]$proc.ProcessName)
+        $rows += [PSCustomObject]@{
+            Provider = $provider
+            ItemType = "Process"
+            Name = [string]$proc.ProcessName
+            Status = "Running"
+            InterfaceAlias = ""
+            Details = ("PID {0}" -f $proc.Id)
+            RouteCount = ""
+            DefaultRoute = ""
+        }
+    }
+
+    $routeProviders = @($RouteRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VpnProvider) } | Select-Object -ExpandProperty VpnProvider -Unique)
+    if ($rows.Count -gt 0) {
+        Add-Result -Category "VPN" -Test "VPN summary" -Severity "Info" -Result "VPN components detected" -Value (($rows | Select-Object -ExpandProperty Provider -Unique) -join ", ") -Recommendation "When troubleshooting DNS, routing, latency, or unreachable services, compare results with VPN connected and disconnected."
+    }
+    foreach ($provider in $routeProviders) {
+        $providerRoutes = @($RouteRows | Where-Object { [string]$_.VpnProvider -eq [string]$provider })
+        $defaultRoute = @($providerRoutes | Where-Object { $_.DestinationPrefix -eq "0.0.0.0/0" })
+        $severity = if ($defaultRoute.Count -gt 0) { "Info" } else { "Info" }
+        $result = if ($defaultRoute.Count -gt 0) { "VPN default route present" } else { "VPN split routes present" }
+        Add-Result -Category "VPN" -Test "VPN routes" -Role $provider -Severity $severity -Result $result -Value ("{0} route(s)" -f $providerRoutes.Count) -Recommendation "VPN routes can change which adapter is used for DNS, LAN, gaming, SMB, and internet traffic."
+    }
+    return $rows
 }
 
 function Build-TargetMatrix {
@@ -696,6 +852,9 @@ function Build-TargetMatrix {
         Add-Target ([ref]$targets) -Role "Internet DNS/name target" -Target "microsoft.com" -Source "Default" -TestPing $true -TcpPorts @(443) -TargetType "Internet"
     }
 
+    foreach ($target in @($targets.Values)) {
+        $target.VpnProvider = Get-VpnProviderForAlias -InterfaceAlias ([string]$target.InterfaceAlias) -AdapterRows $AdapterRows
+    }
     return @($targets.Values)
 }
 
@@ -704,7 +863,7 @@ function Get-TcpRowsFromTargets {
     $rows = @()
     foreach ($target in @($TargetMatrix)) {
         foreach ($port in @($target.TcpPorts)) {
-            $rows += Test-TcpTarget -HostName ([string]$target.Target) -Port ([int]$port) -Role ([string]$target.Role) -InterfaceAlias ([string]$target.InterfaceAlias)
+            $rows += Test-TcpTarget -HostName ([string]$target.Target) -Port ([int]$port) -Role ([string]$target.Role) -InterfaceAlias ([string]$target.InterfaceAlias) -VpnProvider ([string]$target.VpnProvider)
         }
     }
 
@@ -744,7 +903,9 @@ function Get-DnsRows {
 
 function Get-TracerouteRows {
     param([object[]]$TargetMatrix)
-    if (-not $IncludeTraceroute) { return @() }
+    if (-not $IncludeTraceroute) {
+        return @([PSCustomObject]@{ Severity="Info"; Target=""; PingSucceeded=""; TraceRoute=""; Details="Skipped. Run with -IncludeTraceroute to collect traceroute data." })
+    }
     $rows = @()
     $targets = @()
     $targets += @($LocalTargets)
@@ -790,7 +951,9 @@ function Test-MtuTarget {
 
 function Get-MtuRows {
     param([object[]]$TargetMatrix)
-    if (-not $IncludeMtuTest) { return @() }
+    if (-not $IncludeMtuTest) {
+        return @([PSCustomObject]@{ Severity="Info"; Role=""; Target=""; BestPayload=""; EstimatedMtu=""; Result="Skipped"; Recommendation="Run with -IncludeMtuTest to probe IPv4 MTU." })
+    }
     $rows = @()
     $gateway = @($TargetMatrix | Where-Object { $_.Role -match 'Default Gateway|Gateway for interface' } | Select-Object -First 1)
     if ($gateway.Count -gt 0) { $rows += Test-MtuTarget -Target ([string]$gateway[0].Target) -Role ([string]$gateway[0].Role) }
@@ -799,42 +962,135 @@ function Get-MtuRows {
 }
 
 function Get-WlanRows {
-    $output = ""
-    try { $output = (netsh.exe wlan show interfaces 2>&1) -join "`n" } catch {}
-    if ([string]::IsNullOrWhiteSpace($output) -or $output -match 'There is no wireless interface|Es ist keine Drahtlosschnittstelle') {
+    $rows = @()
+    $interfaces = ""
+    try { $interfaces = (netsh.exe wlan show interfaces 2>&1) -join "`n" } catch {}
+    if ([string]::IsNullOrWhiteSpace($interfaces) -or $interfaces -match 'There is no wireless interface|Es ist keine Drahtlosschnittstelle') {
         return @()
     }
-    $script:RawData["netsh wlan show interfaces"] = $output
-    $signal = ""
+    $script:RawData["netsh wlan show interfaces"] = $interfaces
+
+    $drivers = ""
+    try { $drivers = (netsh.exe wlan show drivers 2>&1) -join "`n" } catch {}
+    if (-not [string]::IsNullOrWhiteSpace($drivers)) { $script:RawData["netsh wlan show drivers"] = $drivers }
+
+    $networks = ""
+    try { $networks = (netsh.exe wlan show networks mode=bssid 2>&1) -join "`n" } catch {}
+    if (-not [string]::IsNullOrWhiteSpace($networks)) { $script:RawData["netsh wlan show networks mode=bssid"] = $networks }
+
+    $profiles = ""
+    try { $profiles = (netsh.exe wlan show profiles 2>&1) -join "`n" } catch {}
+    if (-not [string]::IsNullOrWhiteSpace($profiles)) { $script:RawData["netsh wlan show profiles"] = $profiles }
+
+    $name = ""
+    $state = ""
     $ssid = ""
     $bssid = ""
     $radio = ""
+    $band = ""
     $channel = ""
+    $signal = ""
     $rxRate = ""
     $txRate = ""
-    if ($output -match '(?im)^\s*SSID\s*:\s*(.+?)\s*$') { $ssid = $matches[1].Trim() }
-    if ($output -match '(?im)^\s*BSSID\s*:\s*(.+?)\s*$') { $bssid = $matches[1].Trim() }
-    if ($output -match '(?im)^\s*(Radio type|Funktyp)\s*:\s*(.+?)\s*$') { $radio = $matches[2].Trim() }
-    if ($output -match '(?im)^\s*(Channel|Kanal)\s*:\s*(.+?)\s*$') { $channel = $matches[2].Trim() }
-    if ($output -match '(?im)^\s*(Signal)\s*:\s*(\d+)%') { $signal = $matches[2].Trim() }
-    if ($output -match '(?im)^\s*(Receive rate|Empfangsrate).*?:\s*(.+?)\s*$') { $rxRate = $matches[2].Trim() }
-    if ($output -match '(?im)^\s*(Transmit rate|Ubertragungsrate|Übertragungsrate).*?:\s*(.+?)\s*$') { $txRate = $matches[2].Trim() }
+    $auth = ""
+    $cipher = ""
+    $profile = ""
+    if ($interfaces -match '(?im)^\s*(Name|Name der Schnittstelle)\s*:\s*(.+?)\s*$') { $name = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*(State|Status)\s*:\s*(.+?)\s*$') { $state = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*SSID\s*:\s*(.+?)\s*$') { $ssid = $matches[1].Trim() }
+    if ($interfaces -match '(?im)^\s*BSSID\s*:\s*(.+?)\s*$') { $bssid = $matches[1].Trim() }
+    if ($interfaces -match '(?im)^\s*(Radio type|Funktyp)\s*:\s*(.+?)\s*$') { $radio = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*(Band)\s*:\s*(.+?)\s*$') { $band = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*(Channel|Kanal)\s*:\s*(.+?)\s*$') { $channel = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*(Signal)\s*:\s*(\d+)%') { $signal = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*(Receive rate|Empfangsrate).*?:\s*(.+?)\s*$') { $rxRate = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*(Transmit rate|Ubertragungsrate|Übertragungsrate).*?:\s*(.+?)\s*$') { $txRate = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*(Authentication|Authentifizierung)\s*:\s*(.+?)\s*$') { $auth = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*(Cipher|Verschlusselung|Verschlüsselung)\s*:\s*(.+?)\s*$') { $cipher = $matches[2].Trim() }
+    if ($interfaces -match '(?im)^\s*(Profile|Profil)\s*:\s*(.+?)\s*$') { $profile = $matches[2].Trim() }
 
     $severity = "Info"
     $result = "WLAN data collected"
-    $rec = "Review signal quality, channel, and link rates if Wi-Fi issues are reported."
+    $rec = "Review signal quality, channel, band, link rates, security mode, and nearby networks if Wi-Fi issues are reported."
     $signalNumber = ConvertTo-Number $signal
     if ($null -ne $signalNumber -and $signalNumber -lt 50) {
         $severity = "Warning"
         $result = "Weak Wi-Fi signal"
         $rec = "Wi-Fi signal is weak. Check distance, walls, roaming, interference, antenna, and AP channel plan."
     }
-    Add-Result -Category "WLAN" -Test "Wi-Fi signal" -Role "Active WLAN" -Target $ssid -Severity $severity -Result $result -Value ("signal={0}%; rx={1}; tx={2}" -f $signal, $rxRate, $txRate) -Recommendation $rec
-    return @([PSCustomObject]@{ SSID=$ssid; BSSID=$bssid; SignalPercent=$signal; RadioType=$radio; Channel=$channel; ReceiveRate=$rxRate; TransmitRate=$txRate; Severity=$severity; Recommendation=$rec })
+    Add-Result -Category "WLAN" -Test "Wi-Fi signal" -Role "Active WLAN" -Target $ssid -Severity $severity -Result $result -Value ("signal={0}%; rx={1}; tx={2}; band={3}; channel={4}" -f $signal, $rxRate, $txRate, $band, $channel) -Recommendation $rec
+    $rows += [PSCustomObject]@{ RowType="Active connection"; Name=$name; SSID=$ssid; BSSID=$bssid; SignalPercent=$signal; RadioType=$radio; Band=$band; Channel=$channel; ReceiveRate=$rxRate; TransmitRate=$txRate; Authentication=$auth; Cipher=$cipher; Profile=$profile; Severity=$severity; Recommendation=$rec; Details=$state }
+
+    if (-not [string]::IsNullOrWhiteSpace($drivers)) {
+        $driver = ""
+        $vendor = ""
+        $provider = ""
+        $date = ""
+        $version = ""
+        $radios = ""
+        $hosted = ""
+        $mfp = ""
+        if ($drivers -match '(?im)^\s*(Driver|Treiber)\s*:\s*(.+?)\s*$') { $driver = $matches[2].Trim() }
+        if ($drivers -match '(?im)^\s*(Vendor|Hersteller)\s*:\s*(.+?)\s*$') { $vendor = $matches[2].Trim() }
+        if ($drivers -match '(?im)^\s*(Provider|Anbieter)\s*:\s*(.+?)\s*$') { $provider = $matches[2].Trim() }
+        if ($drivers -match '(?im)^\s*(Date|Datum)\s*:\s*(.+?)\s*$') { $date = $matches[2].Trim() }
+        if ($drivers -match '(?im)^\s*(Version)\s*:\s*(.+?)\s*$') { $version = $matches[2].Trim() }
+        if ($drivers -match '(?im)^\s*(Radio types supported|Unterstutzte Funktypen|Unterstützte Funktypen)\s*:\s*(.+?)\s*$') { $radios = $matches[2].Trim() }
+        if ($drivers -match '(?im)^\s*(Hosted network supported|Unterstutzung fur gehostetes Netzwerk|Unterstützung für gehostetes Netzwerk)\s*:\s*(.+?)\s*$') { $hosted = $matches[2].Trim() }
+        if ($drivers -match '(?im)^\s*(802\.11w Management Frame Protection supported|.*Management Frame Protection.*)\s*:\s*(.+?)\s*$') { $mfp = $matches[2].Trim() }
+        $rows += [PSCustomObject]@{ RowType="Driver"; Name=$name; SSID=""; BSSID=""; SignalPercent=""; RadioType=$radios; Band=""; Channel=""; ReceiveRate=""; TransmitRate=""; Authentication=""; Cipher=""; Profile=""; Severity="Info"; Recommendation="Old WLAN drivers, missing 802.11ax/6 GHz support, or weak security capabilities can affect roaming, latency, and throughput."; Details=("Driver={0}; Vendor={1}; Provider={2}; Date={3}; Version={4}; HostedNetwork={5}; MFP={6}" -f $driver,$vendor,$provider,$date,$version,$hosted,$mfp) }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($networks)) {
+        $currentSsid = ""
+        $bssidCurrent = ""
+        $networkRows = @()
+        foreach ($line in ($networks -split "`r?`n")) {
+            if ($line -match '^\s*SSID\s+\d+\s*:\s*(.+?)\s*$') {
+                $currentSsid = $matches[1].Trim()
+                $bssidCurrent = ""
+                continue
+            }
+            if ($line -match '^\s*BSSID\s+\d+\s*:\s*(.+?)\s*$') {
+                $bssidCurrent = $matches[1].Trim()
+                $networkRows += [PSCustomObject]@{ SSID=$currentSsid; BSSID=$bssidCurrent; Signal=""; RadioType=""; Channel="" }
+                continue
+            }
+            if ($networkRows.Count -gt 0 -and $line -match '^\s*(Signal)\s*:\s*(\d+)%') { $networkRows[$networkRows.Count - 1].Signal = $matches[2].Trim(); continue }
+            if ($networkRows.Count -gt 0 -and $line -match '^\s*(Radio type|Funktyp)\s*:\s*(.+?)\s*$') { $networkRows[$networkRows.Count - 1].RadioType = $matches[2].Trim(); continue }
+            if ($networkRows.Count -gt 0 -and $line -match '^\s*(Channel|Kanal)\s*:\s*(.+?)\s*$') { $networkRows[$networkRows.Count - 1].Channel = $matches[2].Trim(); continue }
+        }
+        foreach ($entry in @($networkRows | Select-Object -First 40)) {
+            $rows += [PSCustomObject]@{ RowType="Nearby BSSID"; Name=""; SSID=[string]$entry.SSID; BSSID=[string]$entry.BSSID; SignalPercent=[string]$entry.Signal; RadioType=[string]$entry.RadioType; Band=""; Channel=[string]$entry.Channel; ReceiveRate=""; TransmitRate=""; Authentication=""; Cipher=""; Profile=""; Severity="Info"; Recommendation="Nearby networks on the same or adjacent channel can affect latency and throughput, especially on 2.4 GHz."; Details="" }
+        }
+        if ($channel -ne "") {
+            $sameChannel = @($networkRows | Where-Object { [string]$_.Channel -eq [string]$channel })
+            if ($sameChannel.Count -ge 4) {
+                Add-Result -Category "WLAN" -Test "Channel congestion" -Role "Nearby BSSIDs" -Target $ssid -Severity "Warning" -Result "Several BSSIDs on current channel" -Value ("channel={0}; count={1}" -f $channel, $sameChannel.Count) -Recommendation "Consider 5 GHz/6 GHz, a cleaner channel, less channel width, or better AP placement."
+            }
+        }
+    }
+
+    $reportPath = ""
+    try {
+        $reportOut = (netsh.exe wlan show wlanreport 2>&1) -join "`n"
+        $script:RawData["netsh wlan show wlanreport"] = $reportOut
+        if ($reportOut -match '(?im)([A-Z]:\\.*?wlan-report-latest\.html)') { $reportPath = $matches[1].Trim() }
+        if ([string]::IsNullOrWhiteSpace($reportPath)) {
+            $candidate = "C:\ProgramData\Microsoft\Windows\WlanReport\wlan-report-latest.html"
+            if (Test-Path -LiteralPath $candidate) { $reportPath = $candidate }
+        }
+    } catch {}
+    if (-not [string]::IsNullOrWhiteSpace($reportPath)) {
+        $rows += [PSCustomObject]@{ RowType="Windows WLAN report"; Name=""; SSID=""; BSSID=""; SignalPercent=""; RadioType=""; Band=""; Channel=""; ReceiveRate=""; TransmitRate=""; Authentication=""; Cipher=""; Profile=""; Severity="Info"; Recommendation="Open this Windows-generated WLAN report for disconnect history, session timelines, driver events, and reason codes."; Details=$reportPath }
+    }
+    return $rows
 }
 
 function Test-SmbPath {
-    if ([string]::IsNullOrWhiteSpace($SmbTestPath)) { return @() }
+    if ([string]::IsNullOrWhiteSpace($SmbTestPath)) {
+        return @([PSCustomObject]@{ Path=""; Host=""; Tcp445=""; TestPath=""; WriteMBps=""; ReadMBps=""; Severity="Info"; Details="Skipped. Provide -SmbTestPath like \\nas\share to test SMB/NAS reachability and throughput." })
+    }
     $rows = @()
     $hostName = ""
     if ($SmbTestPath -match '^\\\\([^\\]+)\\') { $hostName = $matches[1] }
@@ -902,7 +1158,9 @@ function Find-Tool {
 }
 
 function Get-IperfRows {
-    if ([string]::IsNullOrWhiteSpace($LanSpeedTarget)) { return @() }
+    if ([string]::IsNullOrWhiteSpace($LanSpeedTarget)) {
+        return @([PSCustomObject]@{ Target=""; Mode=""; Mbps=""; Retransmits=""; Severity="Info"; Result="Skipped"; Details="Provide -LanSpeedTarget with an iperf3 server host/IP to test LAN throughput." })
+    }
     $iperf = Find-Tool "iperf3.exe"
     if ([string]::IsNullOrWhiteSpace($iperf)) {
         Add-Result -Category "LAN Speed" -Test "iperf3" -Target $LanSpeedTarget -Severity "Info" -Result "Skipped" -Details "iperf3.exe not found" -Recommendation "Install iperf3.exe or place it next to the script, then run with -LanSpeedTarget."
@@ -936,7 +1194,12 @@ function Get-IperfRows {
 }
 
 function Get-SpeedtestRows {
-    if (-not $IncludeSpeedtest -or $NoInternetTest) { return @() }
+    if ($NoInternetTest) {
+        return @([PSCustomObject]@{ Tool=""; DownloadMbps=""; UploadMbps=""; PingMs=""; Severity="Info"; Details="Skipped because -NoInternetTest was used." })
+    }
+    if (-not $IncludeSpeedtest) {
+        return @([PSCustomObject]@{ Tool=""; DownloadMbps=""; UploadMbps=""; PingMs=""; Severity="Info"; Details="Skipped. Run with -IncludeSpeedtest to collect an internet speed probe." })
+    }
     $speedtest = Find-Tool "speedtest.exe"
     $rows = @()
     if (-not [string]::IsNullOrWhiteSpace($speedtest)) {
@@ -1002,7 +1265,9 @@ function Get-ServiceRows {
 }
 
 function Get-NetworkEventRows {
-    if (-not $IncludeEventLogs) { return @() }
+    if (-not $IncludeEventLogs) {
+        return @([PSCustomObject]@{ TimeCreated=""; LogName=""; ProviderName=""; Id=""; LevelDisplayName="Info"; Message="Skipped. Run with -IncludeEventLogs to collect relevant network, DHCP, DNS, and WLAN event log entries." })
+    }
     $rows = @()
     $logs = @(
         "System",
@@ -1049,7 +1314,9 @@ function Convert-UInt32ToIPv4 {
 
 function Get-SubnetDiscoveryRows {
     param([object[]]$AdapterRows, [string]$PrimaryAlias)
-    if (-not $IncludeSubnetDiscovery) { return @() }
+    if (-not $IncludeSubnetDiscovery) {
+        return @([PSCustomObject]@{ Address=""; Result="Skipped. Run with -IncludeSubnetDiscovery to do cautious ping discovery on the primary directly connected subnet." })
+    }
     $adapter = @($AdapterRows | Where-Object { [string]$_.Name -eq $PrimaryAlias } | Select-Object -First 1)
     if ($adapter.Count -eq 0 -or [string]::IsNullOrWhiteSpace([string]$adapter[0].IPv4Address)) {
         Add-Result -Category "Subnet Discovery" -Test "Primary subnet" -Severity "Info" -Result "Skipped" -Recommendation "No primary IPv4 interface was identified."
@@ -1113,15 +1380,16 @@ function New-HtmlReport {
 
     $sectionsHtml = @"
 <section id="system"><h2>System information</h2>$(New-ResultTable $Data.SystemInfo @("ComputerName","UserName","DomainOrWorkgroup","PartOfDomain","Windows","BuildNumber","PowerShellVersion","UptimeDays","DateTime","TimeZone","IsAdmin"))</section>
-<section id="adapters"><h2>Network adapters</h2>$(New-ResultTable $Data.Adapters @("Name","InterfaceDescription","Status","LinkSpeed","IPv4Address","PrefixLength","Gateway","DnsServers","DhcpEnabled","DhcpServer","InterfaceMetric","NetworkProfile"))</section>
-<section id="routes"><h2>IP configuration and routing</h2>$(New-ResultTable $Data.Routes @("DestinationPrefix","NextHop","InterfaceAlias","RouteMetric","InterfaceMetric","PolicyStore"))</section>
-<section id="targets"><h2>Detected target matrix</h2>$(New-ResultTable $Data.TargetMatrix @("Role","Target","InterfaceAlias","Source","TargetType","TestPing","TestDns","TcpPorts"))</section>
-<section id="ping"><h2>Ping tests</h2>$(New-ResultTable $Data.Ping @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","Sent","Successful","LossPercent","MinMs","AvgMs","MaxMs","JitterMs","Result","Recommendation"))</section>
-<section id="tcp"><h2>TCP port tests</h2>$(New-ResultTable $Data.Tcp @("Severity","Role","Host","Port","TcpTestSucceeded","RemoteAddress","InterfaceAlias","LatencyMs","Result","Details","Recommendation"))</section>
+<section id="adapters"><h2>Network adapters</h2>$(New-ResultTable $Data.Adapters @("Name","InterfaceDescription","VpnProvider","Status","LinkSpeed","IPv4Address","PrefixLength","Gateway","DnsServers","DhcpEnabled","DhcpServer","InterfaceMetric","NetworkProfile"))</section>
+<section id="vpn"><h2>VPN overview</h2>$(New-ResultTable $Data.Vpn @("Provider","ItemType","Name","Status","InterfaceAlias","RouteCount","DefaultRoute","Details") "No VPN adapter, route, service, or process was detected.")</section>
+<section id="routes"><h2>IP configuration and routing</h2>$(New-ResultTable $Data.Routes @("DestinationPrefix","NextHop","InterfaceAlias","VpnProvider","RouteMetric","InterfaceMetric","PolicyStore"))</section>
+<section id="targets"><h2>Detected target matrix</h2>$(New-ResultTable $Data.TargetMatrix @("Role","Target","InterfaceAlias","VpnProvider","Source","TargetType","TestPing","TestDns","TcpPorts"))</section>
+<section id="ping"><h2>Ping tests</h2>$(New-ResultTable $Data.Ping @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","VpnProvider","Sent","Successful","LossPercent","MinMs","AvgMs","MaxMs","JitterMs","Result","Recommendation"))</section>
+<section id="tcp"><h2>TCP port tests</h2>$(New-ResultTable $Data.Tcp @("Severity","Role","Host","Port","TcpTestSucceeded","RemoteAddress","InterfaceAlias","VpnProvider","LatencyMs","Result","Details","Recommendation"))</section>
 <section id="dns"><h2>DNS diagnostics</h2>$(New-ResultTable $Data.Dns @("Severity","Role","Name","Server","Addresses","DurationMs","Result","Error","Recommendation"))</section>
 <section id="trace"><h2>Traceroute</h2>$(New-ResultTable $Data.Traceroute @("Severity","Target","PingSucceeded","TraceRoute","Details"))</section>
 <section id="mtu"><h2>MTU test</h2>$(New-ResultTable $Data.Mtu @("Severity","Role","Target","BestPayload","EstimatedMtu","Result","Recommendation"))</section>
-<section id="wlan"><h2>WLAN diagnostics</h2>$(New-ResultTable $Data.Wlan @("Severity","SSID","BSSID","SignalPercent","RadioType","Channel","ReceiveRate","TransmitRate","Recommendation"))</section>
+<section id="wlan"><h2>WLAN diagnostics</h2>$(New-ResultTable $Data.Wlan @("RowType","Severity","Name","SSID","BSSID","SignalPercent","RadioType","Band","Channel","ReceiveRate","TransmitRate","Authentication","Cipher","Profile","Details","Recommendation") "No WLAN interface was detected.")</section>
 <section id="smb"><h2>SMB / NAS test</h2>$(New-ResultTable $Data.Smb @("Severity","Path","Host","Tcp445","TestPath","WriteMBps","ReadMBps","Details"))</section>
 <section id="iperf"><h2>iPerf3 LAN speed test</h2>$(New-ResultTable $Data.Iperf @("Severity","Target","Mode","Mbps","Retransmits","Result","Details"))</section>
 <section id="speedtest"><h2>Internet speed test</h2>$(New-ResultTable $Data.Speedtest @("Severity","Tool","DownloadMbps","UploadMbps","PingMs","Details"))</section>
@@ -1191,7 +1459,7 @@ function New-HtmlReport {
       $topProblemHtml
     </div>
     <nav>
-      <a href="#system">System</a><a href="#adapters">Adapters</a><a href="#routes">Routing</a><a href="#targets">Targets</a><a href="#ping">Ping</a><a href="#tcp">TCP</a><a href="#dns">DNS</a><a href="#wlan">WLAN</a><a href="#smb">SMB</a><a href="#events">Events</a><a href="#results">All Results</a><a href="#raw">Raw</a>
+      <a href="#system">System</a><a href="#adapters">Adapters</a><a href="#vpn">VPN</a><a href="#routes">Routing</a><a href="#targets">Targets</a><a href="#ping">Ping</a><a href="#tcp">TCP</a><a href="#dns">DNS</a><a href="#wlan">WLAN</a><a href="#smb">SMB</a><a href="#events">Events</a><a href="#results">All Results</a><a href="#raw">Raw</a>
     </nav>
   </header>
   <main>
@@ -1210,8 +1478,9 @@ Write-Step "Collecting network adapters..."
 $adapters = @(Get-NetworkAdapterRows)
 
 Write-Step "Collecting routes..."
-$routes = @(Get-RouteRows)
+$routes = @(Get-RouteRows -AdapterRows $adapters)
 $primaryAlias = Get-PrimaryInterfaceAlias -RouteRows $routes
+$vpnRows = @(Get-VpnRows -AdapterRows $adapters -RouteRows $routes)
 
 Write-Step "Building target matrix..."
 $targetMatrix = @(Build-TargetMatrix -AdapterRows $adapters -RouteRows $routes)
@@ -1249,6 +1518,7 @@ if ($IncludeRawData) {
 $data = @{
     SystemInfo = $systemInfo
     Adapters = $adapters
+    Vpn = $vpnRows
     Routes = $routes
     TargetMatrix = $targetMatrix
     Ping = $pingRows
