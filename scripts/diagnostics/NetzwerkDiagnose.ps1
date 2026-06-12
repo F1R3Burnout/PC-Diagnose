@@ -1152,8 +1152,10 @@ function Find-Tool {
     param([string]$Name)
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
     if ($cmd) { return [string]$cmd.Source }
-    $local = Join-Path $PSScriptRoot $Name
-    if (Test-Path -LiteralPath $local) { return $local }
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        $local = Join-Path $PSScriptRoot $Name
+        if (Test-Path -LiteralPath $local) { return $local }
+    }
     return ""
 }
 
