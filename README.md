@@ -134,6 +134,8 @@ Running remote PowerShell code requires trust in this repository.
 - Main network report separates VPN-related adapters, routes, tests, and findings into a dedicated VPN section at the bottom
 - Dedicated VPN overview for common providers such as Tailscale, OpenVPN, Surfshark, WireGuard, NordVPN, Proton VPN, Mullvad, Cloudflare WARP, ZeroTier, Cisco AnyConnect, Fortinet, GlobalProtect, and similar tools
 - Collapsible network event logs directly above the VPN section
+- Sortable network report tables with colored result markers for reachability, DNS resolution, latency, packet loss, Wi-Fi signal, and speed values
+- Internet speed test includes download, upload, ping, and the selected or detected test server/edge
 - WLAN details from Windows built-in diagnostics: active connection, signal, BSSID, band, channel, rates, security mode, driver data, nearby BSSIDs, saved profiles, and Windows WLAN report path when available
 - Network event logs, cautious subnet discovery, and internet speed test run by default
 - Gaming-related error interpretation for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, game paths, and Counter-Strike 2 (`cs2.exe`)

@@ -260,10 +260,10 @@ function New-ResultTable {
     }
 
     $sb = New-Object System.Text.StringBuilder
-    [void]$sb.AppendLine('<div class="table-wrap"><table>')
+    [void]$sb.AppendLine('<div class="table-wrap"><table class="sortable">')
     [void]$sb.AppendLine('<thead><tr>')
     foreach ($col in $Columns) {
-        [void]$sb.AppendLine(("<th>{0}</th>" -f (Escape-Html $col)))
+        [void]$sb.AppendLine(("<th data-sort-column=""{0}"">{0}<span class=""sort-indicator""></span></th>" -f (Escape-Html $col)))
     }
     [void]$sb.AppendLine('</tr></thead><tbody>')
 
@@ -274,11 +274,15 @@ function New-ResultTable {
             if ($row.PSObject.Properties.Name -contains $col) {
                 $value = [string]$row.$col
             }
+            $cellClass = Get-HtmlCellClass -Column $col -Value $value -Row $row
+            $sortValue = Escape-Html $value
             if ($col -eq "Severity") {
                 $class = ("sev-" + $value.ToLowerInvariant())
-                [void]$sb.AppendLine(("<td><span class=""badge {0}"">{1}</span></td>" -f $class, (Escape-Html $value)))
+                [void]$sb.AppendLine(("<td data-sort-value=""{0}""><span class=""badge {1}"">{2}</span></td>" -f $sortValue, $class, (Escape-Html $value)))
+            } elseif (-not [string]::IsNullOrWhiteSpace($cellClass)) {
+                [void]$sb.AppendLine(("<td class=""{0}"" data-sort-value=""{1}""><span class=""cell-pill"">{2}</span></td>" -f $cellClass, $sortValue, (Escape-Html $value)))
             } else {
-                [void]$sb.AppendLine(("<td>{0}</td>" -f (Escape-Html $value)))
+                [void]$sb.AppendLine(("<td data-sort-value=""{0}"">{1}</td>" -f $sortValue, (Escape-Html $value)))
             }
         }
         [void]$sb.AppendLine('</tr>')
@@ -286,6 +290,73 @@ function New-ResultTable {
 
     [void]$sb.AppendLine('</tbody></table></div>')
     return $sb.ToString()
+}
+
+function Get-HtmlCellClass {
+    param(
+        [string]$Column,
+        [AllowNull()][object]$Value,
+        [AllowNull()][object]$Row
+    )
+
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return "" }
+
+    if ($Column -in @("Result","TcpTestSucceeded","PingSucceeded","Status","State","IPv4Connectivity","IPv6Connectivity")) {
+        if ($text -match '(?i)^true$|reachable|resolved|online|up|connected|success|completed|ok|internet') { return "cell-good" }
+        if ($text -match '(?i)skipped|stale|limited|unknown|degraded') { return "cell-info" }
+        if ($text -match '(?i)^false$|not reachable|failed|error|down|disconnected|unreachable|timeout') { return "cell-bad" }
+    }
+
+    if ($Column -in @("LossPercent")) {
+        $num = ConvertTo-Number $text
+        if ($null -ne $num) {
+            if ($num -eq 0) { return "cell-good" }
+            if ($num -lt 20) { return "cell-warn" }
+            return "cell-bad"
+        }
+    }
+
+    if ($Column -in @("SignalPercent")) {
+        $num = ConvertTo-Number $text
+        if ($null -ne $num) {
+            if ($num -ge 70) { return "cell-good" }
+            if ($num -ge 45) { return "cell-warn" }
+            return "cell-bad"
+        }
+    }
+
+    if ($Column -in @("Band","Channel")) {
+        if ($text -match '(?i)6\s*GHz|6GHz|^6$') { return "cell-good" }
+        if ($text -match '(?i)5\s*GHz|5GHz|36|40|44|48|52|56|60|64|100|104|108|112|116|120|124|128|132|136|140') { return "cell-info" }
+        if ($text -match '(?i)2\.4\s*GHz|2,4\s*GHz|2GHz|^1$|^6$|^11$') { return "cell-warn" }
+    }
+
+    if ($Column -in @("DownloadMbps","UploadMbps","AvgMs","LatencyMs","PingMs","DurationMs","JitterMs")) {
+        $num = ConvertTo-Number $text
+        if ($null -ne $num) {
+            if ($Column -in @("AvgMs","LatencyMs","PingMs","DurationMs","JitterMs")) {
+                if ($num -le 30) { return "cell-good" }
+                if ($num -le 80) { return "cell-info" }
+                if ($num -le 150) { return "cell-warn" }
+                return "cell-bad"
+            }
+            if ($Column -eq "DownloadMbps") {
+                if ($num -ge 250) { return "cell-good" }
+                if ($num -ge 100) { return "cell-info" }
+                if ($num -ge 25) { return "cell-warn" }
+                return "cell-bad"
+            }
+            if ($Column -eq "UploadMbps") {
+                if ($num -ge 40) { return "cell-good" }
+                if ($num -ge 15) { return "cell-info" }
+                if ($num -ge 5) { return "cell-warn" }
+                return "cell-bad"
+            }
+        }
+    }
+
+    return ""
 }
 
 function Get-VpnProviderName {
@@ -1213,38 +1284,87 @@ function Get-IperfRows {
 
 function Get-SpeedtestRows {
     if ($NoInternetTest) {
-        return @([PSCustomObject]@{ Tool=""; DownloadMbps=""; UploadMbps=""; PingMs=""; Severity="Info"; Details="Skipped because -NoInternetTest was used." })
+        return @([PSCustomObject]@{ Tool=""; Server=""; DownloadMbps=""; UploadMbps=""; PingMs=""; Severity="Info"; Details="Skipped because -NoInternetTest was used." })
     }
     $speedtest = Find-Tool "speedtest.exe"
     $rows = @()
     if (-not [string]::IsNullOrWhiteSpace($speedtest)) {
         try {
-            $jsonText = (& $speedtest "--format=json" 2>&1) -join "`n"
+            $jsonText = (& $speedtest "--format=json" "--accept-license" "--accept-gdpr" 2>&1) -join "`n"
             $json = $jsonText | ConvertFrom-Json
             $download = if ($json.download.bandwidth) { [math]::Round(($json.download.bandwidth * 8) / 1000000, 2) } else { "" }
             $upload = if ($json.upload.bandwidth) { [math]::Round(($json.upload.bandwidth * 8) / 1000000, 2) } else { "" }
             $ping = if ($json.ping.latency) { [math]::Round($json.ping.latency, 2) } else { "" }
-            Add-Result -Category "Internet Speed" -Test "speedtest.exe" -Target "Internet" -Severity "Info" -Result "Measured" -Value ("down={0} Mbit/s; up={1} Mbit/s; ping={2} ms" -f $download, $upload, $ping) -Recommendation "Internet speed depends on ISP, Wi-Fi, VPN, server selection, and current load."
-            $rows += [PSCustomObject]@{ Tool="speedtest.exe"; DownloadMbps=$download; UploadMbps=$upload; PingMs=$ping; Severity="Info" }
+            $serverParts = @()
+            if ($json.server.name) { $serverParts += [string]$json.server.name }
+            if ($json.server.location) { $serverParts += [string]$json.server.location }
+            if ($json.server.country) { $serverParts += [string]$json.server.country }
+            if ($json.server.host) { $serverParts += ([string]$json.server.host) }
+            $server = ($serverParts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique) -join " | "
+            Add-Result -Category "Internet Speed" -Test "speedtest.exe" -Target "Internet" -Severity "Info" -Result "Measured" -Value ("down={0} Mbit/s; up={1} Mbit/s; ping={2} ms; server={3}" -f $download, $upload, $ping, $server) -Recommendation "Internet speed depends on ISP, Wi-Fi, VPN, server selection, and current load. Compare the listed server with the expected region."
+            $rows += [PSCustomObject]@{ Tool="speedtest.exe"; Server=$server; DownloadMbps=$download; UploadMbps=$upload; PingMs=$ping; Severity="Info"; Details="Ookla speedtest CLI auto-selected this server." }
             return $rows
         } catch {}
     }
 
     try {
-        $url = "https://speed.cloudflare.com/__down?bytes=25000000"
+        $traceUrl = "https://speed.cloudflare.com/cdn-cgi/trace"
+        $trace = ""
+        $colo = ""
+        $loc = ""
+        $ip = ""
+        try {
+            $trace = (Invoke-WebRequest -UseBasicParsing -Uri $traceUrl -TimeoutSec 8).Content
+            foreach ($line in ($trace -split "`n")) {
+                if ($line -match '^colo=(.+)$') { $colo = $Matches[1].Trim() }
+                if ($line -match '^loc=(.+)$') { $loc = $Matches[1].Trim() }
+                if ($line -match '^ip=(.+)$') { $ip = $Matches[1].Trim() }
+            }
+        } catch {}
+
+        $server = "Cloudflare speed.cloudflare.com"
+        if (-not [string]::IsNullOrWhiteSpace($colo)) { $server += " | edge $colo" }
+        if (-not [string]::IsNullOrWhiteSpace($loc)) { $server += " | $loc" }
+
+        $latencies = @()
+        for ($i = 0; $i -lt 3; $i++) {
+            try {
+                $swPing = [Diagnostics.Stopwatch]::StartNew()
+                Invoke-WebRequest -UseBasicParsing -Uri $traceUrl -Headers @{ "User-Agent" = "Mozilla/5.0 PC-Diagnose-NetzwerkDiagnose/1.0" } -TimeoutSec 8 | Out-Null
+                $swPing.Stop()
+                $latencies += $swPing.Elapsed.TotalMilliseconds
+            } catch {}
+        }
+        $ping = if ($latencies.Count -gt 0) { [math]::Round((($latencies | Measure-Object -Average).Average), 2) } else { "" }
+
+        $url = "https://speed.cloudflare.com/__down?bytes=100000000"
         $tempFile = Join-Path $env:TEMP ("NetzwerkDiagnose_http_{0}.bin" -f ([guid]::NewGuid().ToString("N")))
-        $wc = New-Object Net.WebClient
+        $headers = @{
+            "User-Agent" = "Mozilla/5.0 PC-Diagnose-NetzwerkDiagnose/1.0"
+            "Accept" = "*/*"
+            "Referer" = "https://speed.cloudflare.com/"
+        }
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        $wc.DownloadFile($url, $tempFile)
+        Invoke-WebRequest -UseBasicParsing -Uri $url -Headers $headers -OutFile $tempFile -TimeoutSec 60 | Out-Null
         $sw.Stop()
         $size = (Get-Item -LiteralPath $tempFile).Length
         Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
-        $mbit = [math]::Round((($size * 8) / 1000000) / $sw.Elapsed.TotalSeconds, 2)
-        Add-Result -Category "Internet Speed" -Test "HTTP download probe" -Target $url -Severity "Info" -Result "Measured" -Value ("{0} Mbit/s" -f $mbit) -Recommendation "This is a rough single-download probe, not a full speedtest."
-        $rows += [PSCustomObject]@{ Tool="HTTP download probe"; DownloadMbps=$mbit; UploadMbps=""; PingMs=""; Severity="Info" }
+        $downloadMbit = [math]::Round((($size * 8) / 1000000) / $sw.Elapsed.TotalSeconds, 2)
+
+        $uploadBytes = New-Object byte[] 10000000
+        ([System.Random]::new()).NextBytes($uploadBytes)
+        $headers["Content-Type"] = "application/octet-stream"
+        $swUp = [Diagnostics.Stopwatch]::StartNew()
+        Invoke-WebRequest -UseBasicParsing -Uri "https://speed.cloudflare.com/__up" -Method Post -Headers $headers -Body $uploadBytes -TimeoutSec 60 | Out-Null
+        $swUp.Stop()
+        $uploadMbit = [math]::Round((($uploadBytes.Length * 8) / 1000000) / $swUp.Elapsed.TotalSeconds, 2)
+
+        Add-Result -Category "Internet Speed" -Test "Cloudflare HTTP speed probe" -Target $server -Severity "Info" -Result "Measured" -Value ("down={0} Mbit/s; up={1} Mbit/s; ping={2} ms" -f $downloadMbit, $uploadMbit, $ping) -Recommendation "This fallback uses Cloudflare's nearest visible edge and is still a lightweight probe. Browser-based or Ookla tests can differ because of parallel streams, server choice, VPN, Wi-Fi, and current load."
+        $detail = "Fallback HTTP probe. ClientIP={0}; DownloadEndpoint={1}; UploadEndpoint=https://speed.cloudflare.com/__up" -f $ip, $url
+        $rows += [PSCustomObject]@{ Tool="Cloudflare HTTP speed probe"; Server=$server; DownloadMbps=$downloadMbit; UploadMbps=$uploadMbit; PingMs=$ping; Severity="Info"; Details=$detail }
     } catch {
         Add-Result -Category "Internet Speed" -Test "HTTP download probe" -Target "Internet" -Severity "Warning" -Result "Failed" -Details $_.Exception.Message -Recommendation "Check internet access, proxy, TLS inspection, VPN, and firewall."
-        $rows += [PSCustomObject]@{ Tool="HTTP download probe"; DownloadMbps=""; UploadMbps=""; PingMs=""; Severity="Warning"; Details=$_.Exception.Message }
+        $rows += [PSCustomObject]@{ Tool="HTTP speed probe"; Server=""; DownloadMbps=""; UploadMbps=""; PingMs=""; Severity="Warning"; Details=$_.Exception.Message }
     }
     return $rows
 }
@@ -1439,7 +1559,7 @@ function New-HtmlReport {
 <section id="wlan" class="section-card network"><h2>WLAN diagnostics</h2>$(New-ResultTable $Data.Wlan @("RowType","Severity","Name","SSID","BSSID","SignalPercent","RadioType","Band","Channel","ReceiveRate","TransmitRate","Authentication","Cipher","Profile","Details","Recommendation") "No WLAN interface was detected.")</section>
 <section id="smb" class="section-card utility"><h2>SMB / NAS test</h2>$(New-ResultTable $Data.Smb @("Severity","Path","Host","Tcp445","TestPath","WriteMBps","ReadMBps","Details"))</section>
 <section id="iperf" class="section-card utility"><h2>iPerf3 LAN speed test</h2>$(New-ResultTable $Data.Iperf @("Severity","Target","Mode","Mbps","Retransmits","Result","Details"))</section>
-<section id="speedtest" class="section-card utility"><h2>Internet speed test</h2>$(New-ResultTable $Data.Speedtest @("Severity","Tool","DownloadMbps","UploadMbps","PingMs","Details"))</section>
+<section id="speedtest" class="section-card utility"><h2>Internet speed test</h2>$(New-ResultTable $Data.Speedtest @("Severity","Tool","Server","DownloadMbps","UploadMbps","PingMs","Details"))</section>
 <section id="firewall" class="section-card utility"><h2>Main firewall and network profiles</h2>$(New-ResultTable $Data.MainFirewall @("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction"))</section>
 <section id="services" class="section-card utility"><h2>Windows network services</h2>$(New-ResultTable $Data.Services @("Name","DisplayName","Status","StartType"))</section>
 <section id="subnet" class="section-card network"><h2>Subnet discovery</h2>$(New-ResultTable $Data.SubnetDiscovery @("Address","MacAddress","State","Source","Result"))</section>
@@ -1493,12 +1613,21 @@ function New-HtmlReport {
     .table-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fff; }
     table { width:max-content; min-width:100%; border-collapse:collapse; font-size:12px; }
     th, td { padding:6px 7px; border-bottom:1px solid var(--line); border-right:1px solid var(--line); vertical-align:top; text-align:left; white-space:normal; max-width:360px; overflow-wrap:anywhere; }
-    th { background:var(--soft); font-weight:700; }
+    th { background:var(--soft); font-weight:700; cursor:pointer; user-select:none; position:relative; }
+    th:hover { background:#e8edf4; }
+    .sort-indicator::after { content:""; color:var(--muted); font-size:10px; margin-left:6px; }
+    th.sort-asc .sort-indicator::after { content:"▲"; }
+    th.sort-desc .sort-indicator::after { content:"▼"; }
     .badge { border-radius:999px; padding:3px 9px; font-weight:700; font-size:11px; display:inline-block; }
     .sev-ok { color:#14532d; background:#dcfce7; border:1px solid #86efac; }
     .sev-warning { color:#7c2d12; background:#ffedd5; border:1px solid #fdba74; }
     .sev-error { color:#7f1d1d; background:#fee2e2; border:1px solid #fca5a5; }
     .sev-info { color:#1e3a8a; background:#dbeafe; border:1px solid #93c5fd; }
+    .cell-pill { border-radius:999px; padding:3px 8px; display:inline-block; font-weight:650; }
+    .cell-good .cell-pill { color:#14532d; background:#dcfce7; border:1px solid #86efac; }
+    .cell-info .cell-pill { color:#1e3a8a; background:#dbeafe; border:1px solid #93c5fd; }
+    .cell-warn .cell-pill { color:#7c2d12; background:#ffedd5; border:1px solid #fdba74; }
+    .cell-bad .cell-pill { color:#7f1d1d; background:#fee2e2; border:1px solid #fca5a5; }
     .empty { border:1px dashed var(--line); border-radius:8px; padding:12px; color:var(--muted); background:#f8fafc; }
     details { border:1px solid var(--line); border-radius:8px; margin:10px 0; background:#fff; }
     summary { cursor:pointer; padding:10px 12px; font-weight:700; }
@@ -1534,6 +1663,43 @@ function New-HtmlReport {
   <main>
     $sectionsHtml
   </main>
+  <script>
+    function parseSortValue(value) {
+      var text = (value || '').trim();
+      var normalized = text.replace(',', '.');
+      var number = Number(normalized.replace(/[^0-9.+-]/g, ''));
+      if (text !== '' && !Number.isNaN(number) && /[0-9]/.test(text)) {
+        return { type: 'number', value: number };
+      }
+      return { type: 'text', value: text.toLowerCase() };
+    }
+    document.querySelectorAll('table.sortable th').forEach(function(header, index) {
+      header.addEventListener('click', function() {
+        var table = header.closest('table');
+        var tbody = table.querySelector('tbody');
+        var direction = header.classList.contains('sort-asc') ? 'desc' : 'asc';
+        table.querySelectorAll('th').forEach(function(item) {
+          item.classList.remove('sort-asc', 'sort-desc');
+        });
+        header.classList.add(direction === 'asc' ? 'sort-asc' : 'sort-desc');
+        var rows = Array.from(tbody.querySelectorAll('tr'));
+        rows.sort(function(a, b) {
+          var aCell = a.children[index];
+          var bCell = b.children[index];
+          var aVal = parseSortValue(aCell ? (aCell.getAttribute('data-sort-value') || aCell.textContent) : '');
+          var bVal = parseSortValue(bCell ? (bCell.getAttribute('data-sort-value') || bCell.textContent) : '');
+          var result;
+          if (aVal.type === 'number' && bVal.type === 'number') {
+            result = aVal.value - bVal.value;
+          } else {
+            result = String(aVal.value).localeCompare(String(bVal.value), undefined, { numeric: true, sensitivity: 'base' });
+          }
+          return direction === 'asc' ? result : -result;
+        });
+        rows.forEach(function(row) { tbody.appendChild(row); });
+      });
+    });
+  </script>
 </body>
 </html>
 "@
