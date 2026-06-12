@@ -43,7 +43,7 @@
     Event log lookback in hours when IncludeEventLogs is used. Default: 24.
 
 .PARAMETER IncludeEventLogs
-    Include relevant network event logs.
+    Compatibility switch. Relevant network event logs are collected by default.
 
 .PARAMETER IncludeRawData
     Include raw text sections and write a JSON raw data file.
@@ -55,10 +55,10 @@
     Include IPv4 MTU probing.
 
 .PARAMETER IncludeSpeedtest
-    Include internet speed test when speedtest.exe is available, otherwise a small HTTP download probe.
+    Compatibility switch. Internet speed test is collected by default unless NoInternetTest is used.
 
 .PARAMETER IncludeSubnetDiscovery
-    Include cautious ping/ARP discovery for the primary directly connected subnet. Skips large subnets.
+    Compatibility switch. Cautious primary subnet discovery is collected by default. Skips large subnets.
 
 .PARAMETER NoInternetTest
     Disable public internet tests.
@@ -849,7 +849,7 @@ function Build-TargetMatrix {
         Add-Target ([ref]$targets) -Role "Internet target" -Target "1.1.1.1" -Source "Default" -TestPing $true -TargetType "Internet"
         Add-Target ([ref]$targets) -Role "Internet target" -Target "8.8.8.8" -Source "Default" -TestPing $true -TargetType "Internet"
         Add-Target ([ref]$targets) -Role "Internet DNS/name target" -Target "google.de" -Source "Default" -TestPing $true -TcpPorts @(443) -TargetType "Internet"
-        Add-Target ([ref]$targets) -Role "Internet DNS/name target" -Target "microsoft.com" -Source "Default" -TestPing $true -TcpPorts @(443) -TargetType "Internet"
+        Add-Target ([ref]$targets) -Role "Internet HTTPS target" -Target "microsoft.com" -Source "Default" -TestPing $false -TcpPorts @(443) -TargetType "Internet"
     }
 
     foreach ($target in @($targets.Values)) {
@@ -1197,9 +1197,6 @@ function Get-SpeedtestRows {
     if ($NoInternetTest) {
         return @([PSCustomObject]@{ Tool=""; DownloadMbps=""; UploadMbps=""; PingMs=""; Severity="Info"; Details="Skipped because -NoInternetTest was used." })
     }
-    if (-not $IncludeSpeedtest) {
-        return @([PSCustomObject]@{ Tool=""; DownloadMbps=""; UploadMbps=""; PingMs=""; Severity="Info"; Details="Skipped. Run with -IncludeSpeedtest to collect an internet speed probe." })
-    }
     $speedtest = Find-Tool "speedtest.exe"
     $rows = @()
     if (-not [string]::IsNullOrWhiteSpace($speedtest)) {
@@ -1265,9 +1262,6 @@ function Get-ServiceRows {
 }
 
 function Get-NetworkEventRows {
-    if (-not $IncludeEventLogs) {
-        return @([PSCustomObject]@{ TimeCreated=""; LogName=""; ProviderName=""; Id=""; LevelDisplayName="Info"; Message="Skipped. Run with -IncludeEventLogs to collect relevant network, DHCP, DNS, and WLAN event log entries." })
-    }
     $rows = @()
     $logs = @(
         "System",
@@ -1279,9 +1273,9 @@ function Get-NetworkEventRows {
     $start = (Get-Date).AddHours(-1 * [math]::Max(1, $EventHours))
     foreach ($log in $logs) {
         try {
-            $events = @(Get-WinEvent -FilterHashtable @{ LogName=$log; StartTime=$start } -ErrorAction Stop | Where-Object {
+            $events = @(Get-WinEvent -FilterHashtable @{ LogName=$log; StartTime=$start } -MaxEvents 400 -ErrorAction Stop | Where-Object {
                 "$($_.ProviderName) $($_.Message)" -match '(?i)Tcpip|Dhcp|DNS|Netwtw|e1d|e2f|Realtek|NDIS|NetAdapter|WLAN|disconnect|duplicate|lease|name resolution'
-            } | Select-Object -First 200)
+            } | Select-Object -First 80)
             foreach ($ev in $events) {
                 $msg = ""
                 try { $msg = [string]$ev.Message } catch {}
@@ -1314,36 +1308,72 @@ function Convert-UInt32ToIPv4 {
 
 function Get-SubnetDiscoveryRows {
     param([object[]]$AdapterRows, [string]$PrimaryAlias)
-    if (-not $IncludeSubnetDiscovery) {
-        return @([PSCustomObject]@{ Address=""; Result="Skipped. Run with -IncludeSubnetDiscovery to do cautious ping discovery on the primary directly connected subnet." })
-    }
     $adapter = @($AdapterRows | Where-Object { [string]$_.Name -eq $PrimaryAlias } | Select-Object -First 1)
     if ($adapter.Count -eq 0 -or [string]::IsNullOrWhiteSpace([string]$adapter[0].IPv4Address)) {
         Add-Result -Category "Subnet Discovery" -Test "Primary subnet" -Severity "Info" -Result "Skipped" -Recommendation "No primary IPv4 interface was identified."
         return @()
     }
+
+    $rows = @()
+    try {
+        $neighbors = @(Get-NetNeighbor -AddressFamily IPv4 -InterfaceAlias $PrimaryAlias -ErrorAction Stop | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_.IPAddress) -and
+            [string]$_.IPAddress -notmatch '^(224|239|255)\.' -and
+            [string]$_.State -notmatch 'Unreachable|Invalid'
+        } | Sort-Object IPAddress)
+        foreach ($neighbor in $neighbors) {
+            $rows += [PSCustomObject]@{
+                Address = [string]$neighbor.IPAddress
+                MacAddress = [string]$neighbor.LinkLayerAddress
+                State = [string]$neighbor.State
+                Source = "Neighbor cache"
+                Result = "Known neighbor"
+            }
+        }
+    } catch {
+        Add-Result -Category "Subnet Discovery" -Test "Neighbor cache" -Severity "Info" -Result "Unavailable" -Details $_.Exception.Message -Recommendation "Neighbor cache discovery can be unavailable on older Windows builds or restricted sessions."
+    }
+
+    Add-Result -Category "Subnet Discovery" -Test "Neighbor cache" -Severity "Info" -Result "Completed" -Value ("{0} neighbor(s)" -f $rows.Count) -Recommendation "This fast default view uses Windows neighbor/ARP cache. Run with -IncludeSubnetDiscovery for an active ping sweep if needed."
+
+    if (-not $IncludeSubnetDiscovery) {
+        if ($rows.Count -eq 0) {
+            return @([PSCustomObject]@{ Address=""; MacAddress=""; State=""; Source="Neighbor cache"; Result="No cached neighbors found. Run with -IncludeSubnetDiscovery for an active ping sweep." })
+        }
+        return $rows
+    }
+
     $prefix = [int]$adapter[0].PrefixLength
     if ($prefix -lt 24) {
         Add-Result -Category "Subnet Discovery" -Test "Primary subnet" -Severity "Warning" -Result "Skipped large subnet" -Value ("/{0}" -f $prefix) -Recommendation "Subnet discovery is skipped for networks larger than /24 to avoid aggressive scans."
-        return @()
+        return $rows
     }
     $hostCount = [math]::Pow(2, 32 - $prefix) - 2
     if ($hostCount -gt 254) {
         Add-Result -Category "Subnet Discovery" -Test "Primary subnet" -Severity "Warning" -Result "Skipped large subnet" -Value $hostCount -Recommendation "Subnet discovery is limited to small directly connected subnets."
-        return @()
+        return $rows
     }
 
     $ipInt = Convert-IPv4ToUInt32 ([string]$adapter[0].IPv4Address)
     $mask = [uint32]([uint32]::MaxValue -shl (32 - $prefix))
     $network = $ipInt -band $mask
-    $rows = @()
-    for ($i = 1; $i -le $hostCount; $i++) {
-        $ip = Convert-UInt32ToIPv4 ([uint32]($network + $i))
-        try {
-            if (Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue) {
-                $rows += [PSCustomObject]@{ Address=$ip; Result="Responded to ping" }
+    $ping = $null
+    try {
+        $ping = New-Object System.Net.NetworkInformation.Ping
+        for ($i = 1; $i -le $hostCount; $i++) {
+            $ip = Convert-UInt32ToIPv4 ([uint32]($network + $i))
+            try {
+                $reply = $ping.Send($ip, 60)
+                if ($reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                    if (@($rows | Where-Object { [string]$_.Address -eq [string]$ip }).Count -eq 0) {
+                        $rows += [PSCustomObject]@{ Address=$ip; MacAddress=""; State=""; Source="Active ping sweep"; Result="Responded to ping" }
+                    }
+                }
+            } catch {
             }
-        } catch {}
+        }
+    } finally {
+        if ($ping) { $ping.Dispose() }
     }
     Add-Result -Category "Subnet Discovery" -Test "Ping discovery" -Severity "Info" -Result "Completed" -Value ("{0} host(s)" -f $rows.Count) -Recommendation "Discovery is intentionally light and may miss hosts that block ICMP."
     return $rows
@@ -1382,6 +1412,7 @@ function New-HtmlReport {
 <section id="system"><h2>System information</h2>$(New-ResultTable $Data.SystemInfo @("ComputerName","UserName","DomainOrWorkgroup","PartOfDomain","Windows","BuildNumber","PowerShellVersion","UptimeDays","DateTime","TimeZone","IsAdmin"))</section>
 <section id="adapters"><h2>Network adapters</h2>$(New-ResultTable $Data.Adapters @("Name","InterfaceDescription","VpnProvider","Status","LinkSpeed","IPv4Address","PrefixLength","Gateway","DnsServers","DhcpEnabled","DhcpServer","InterfaceMetric","NetworkProfile"))</section>
 <section id="vpn"><h2>VPN overview</h2>$(New-ResultTable $Data.Vpn @("Provider","ItemType","Name","Status","InterfaceAlias","RouteCount","DefaultRoute","Details") "No VPN adapter, route, service, or process was detected.")</section>
+<section id="vpnroutes"><h2>VPN routes</h2>$(New-ResultTable $Data.VpnRoutes @("DestinationPrefix","NextHop","InterfaceAlias","VpnProvider","RouteMetric","InterfaceMetric","PolicyStore") "No VPN routes were detected.")</section>
 <section id="routes"><h2>IP configuration and routing</h2>$(New-ResultTable $Data.Routes @("DestinationPrefix","NextHop","InterfaceAlias","VpnProvider","RouteMetric","InterfaceMetric","PolicyStore"))</section>
 <section id="targets"><h2>Detected target matrix</h2>$(New-ResultTable $Data.TargetMatrix @("Role","Target","InterfaceAlias","VpnProvider","Source","TargetType","TestPing","TestDns","TcpPorts"))</section>
 <section id="ping"><h2>Ping tests</h2>$(New-ResultTable $Data.Ping @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","VpnProvider","Sent","Successful","LossPercent","MinMs","AvgMs","MaxMs","JitterMs","Result","Recommendation"))</section>
@@ -1396,7 +1427,7 @@ function New-HtmlReport {
 <section id="firewall"><h2>Firewall and network profiles</h2>$(New-ResultTable $Data.Firewall @("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction"))</section>
 <section id="services"><h2>Windows network services</h2>$(New-ResultTable $Data.Services @("Name","DisplayName","Status","StartType"))</section>
 <section id="events"><h2>Network event logs</h2>$(New-ResultTable $Data.Events @("TimeCreated","LogName","ProviderName","Id","LevelDisplayName","Message"))</section>
-<section id="subnet"><h2>Subnet discovery</h2>$(New-ResultTable $Data.SubnetDiscovery @("Address","Result"))</section>
+<section id="subnet"><h2>Subnet discovery</h2>$(New-ResultTable $Data.SubnetDiscovery @("Address","MacAddress","State","Source","Result"))</section>
 <section id="results"><h2>All findings and test results</h2>$(New-ResultTable $results @("Severity","Category","Test","Role","Target","InterfaceAlias","Result","Value","Details","Recommendation"))</section>
 <section id="raw"><h2>Raw data</h2>$rawHtml</section>
 "@
@@ -1459,7 +1490,7 @@ function New-HtmlReport {
       $topProblemHtml
     </div>
     <nav>
-      <a href="#system">System</a><a href="#adapters">Adapters</a><a href="#vpn">VPN</a><a href="#routes">Routing</a><a href="#targets">Targets</a><a href="#ping">Ping</a><a href="#tcp">TCP</a><a href="#dns">DNS</a><a href="#wlan">WLAN</a><a href="#smb">SMB</a><a href="#events">Events</a><a href="#results">All Results</a><a href="#raw">Raw</a>
+      <a href="#system">System</a><a href="#adapters">Adapters</a><a href="#vpn">VPN</a><a href="#vpnroutes">VPN Routes</a><a href="#routes">Routing</a><a href="#targets">Targets</a><a href="#ping">Ping</a><a href="#tcp">TCP</a><a href="#dns">DNS</a><a href="#wlan">WLAN</a><a href="#smb">SMB</a><a href="#events">Events</a><a href="#results">All Results</a><a href="#raw">Raw</a>
     </nav>
   </header>
   <main>
@@ -1481,6 +1512,7 @@ Write-Step "Collecting routes..."
 $routes = @(Get-RouteRows -AdapterRows $adapters)
 $primaryAlias = Get-PrimaryInterfaceAlias -RouteRows $routes
 $vpnRows = @(Get-VpnRows -AdapterRows $adapters -RouteRows $routes)
+$vpnRouteRows = @($routes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VpnProvider) })
 
 Write-Step "Building target matrix..."
 $targetMatrix = @(Build-TargetMatrix -AdapterRows $adapters -RouteRows $routes)
@@ -1497,16 +1529,25 @@ $tcpRows = @(Get-TcpRowsFromTargets -TargetMatrix $targetMatrix)
 Write-Step "Running DNS diagnostics..."
 $dnsRows = @(Get-DnsRows -TargetMatrix $targetMatrix)
 
-Write-Step "Collecting optional diagnostics..."
+Write-Step "Collecting traceroute diagnostics..."
 $traceRows = @(Get-TracerouteRows -TargetMatrix $targetMatrix)
+Write-Step "Collecting MTU diagnostics..."
 $mtuRows = @(Get-MtuRows -TargetMatrix $targetMatrix)
+Write-Step "Collecting WLAN diagnostics..."
 $wlanRows = @(Get-WlanRows)
+Write-Step "Collecting SMB diagnostics..."
 $smbRows = @(Test-SmbPath)
+Write-Step "Collecting iPerf3 diagnostics..."
 $iperfRows = @(Get-IperfRows)
+Write-Step "Collecting internet speed diagnostics..."
 $speedRows = @(Get-SpeedtestRows)
+Write-Step "Collecting firewall diagnostics..."
 $firewallRows = @(Get-FirewallRows)
+Write-Step "Collecting service diagnostics..."
 $serviceRows = @(Get-ServiceRows)
+Write-Step "Collecting network event logs..."
 $eventRows = @(Get-NetworkEventRows)
+Write-Step "Collecting subnet discovery..."
 $subnetRows = @(Get-SubnetDiscoveryRows -AdapterRows $adapters -PrimaryAlias $primaryAlias)
 
 if ($IncludeRawData) {
@@ -1519,6 +1560,7 @@ $data = @{
     SystemInfo = $systemInfo
     Adapters = $adapters
     Vpn = $vpnRows
+    VpnRoutes = $vpnRouteRows
     Routes = $routes
     TargetMatrix = $targetMatrix
     Ping = $pingRows

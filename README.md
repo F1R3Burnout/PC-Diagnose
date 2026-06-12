@@ -100,13 +100,13 @@ Start NetzwerkDiagnose directly:
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool netdiag
 ```
 
-Run NetzwerkDiagnose with optional tests:
+Run NetzwerkDiagnose with extra path tests:
 
 ```powershell
-& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool netdiag -IncludeEventLogs -IncludeTraceroute -IncludeMtuTest
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool netdiag -IncludeTraceroute -IncludeMtuTest
 ```
 
-Useful network parameters include `-NoInternetTest`, `-SmbTestPath`, `-LanSpeedTarget`, `-IncludeSpeedtest`, `-IncludeSubnetDiscovery`, `-LocalTargets`, and `-TcpTargets`.
+Network event logs, cautious subnet discovery, and internet speed test run by default. Useful parameters include `-NoInternetTest`, `-SmbTestPath`, `-LanSpeedTarget`, `-LocalTargets`, and `-TcpTargets`.
 
 ## Important Notes
 
@@ -133,8 +133,9 @@ Running remote PowerShell code requires trust in this repository.
 - TCP/UDP port exhaustion detection
 - Dedicated VPN overview for common providers such as Tailscale, OpenVPN, Surfshark, WireGuard, NordVPN, Proton VPN, Mullvad, Cloudflare WARP, ZeroTier, Cisco AnyConnect, Fortinet, GlobalProtect, and similar tools
 - VPN provider tags in adapter, route, target, ping, and TCP tables where Windows exposes the related interface
+- Dedicated VPN route table next to the complete routing table
 - WLAN details from Windows built-in diagnostics: active connection, signal, BSSID, band, channel, rates, security mode, driver data, nearby BSSIDs, saved profiles, and Windows WLAN report path when available
-- Optional tests show why they were skipped when no target or switch was provided
+- Network event logs, cautious subnet discovery, and internet speed test run by default
 - Gaming-related error interpretation for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, game paths, and Counter-Strike 2 (`cs2.exe`)
 - Windows Update, AppX, service, driver, and application hang checks
 - Minidump copies in the ZIP and optional local `!analyze -v` interpretation
