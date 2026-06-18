@@ -131,6 +131,7 @@ Running remote PowerShell code requires trust in this repository.
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
 - Main network report separates VPN-related adapters, routes, tests, and findings into a dedicated VPN section at the bottom
+- Network report sections open only when problems are detected; normal rows are collapsed by default and skipped optional tests are listed at the bottom
 - Dedicated VPN overview for common providers such as Tailscale, OpenVPN, Surfshark, WireGuard, NordVPN, Proton VPN, Mullvad, Cloudflare WARP, ZeroTier, Cisco AnyConnect, Fortinet, GlobalProtect, and similar tools
 - Collapsible network event logs directly above the VPN section
 - Sortable network report tables with colored result markers for reachability, DNS resolution, latency, packet loss, Wi-Fi signal, and speed values

@@ -247,29 +247,112 @@ function Get-FirstProperty {
     return $null
 }
 
+function Test-RowSkipped {
+    param([AllowNull()][object]$Row)
+
+    if ($null -eq $Row) { return $false }
+    foreach ($name in @("Result","Details","Recommendation")) {
+        if ($Row.PSObject.Properties.Name -contains $name) {
+            $value = [string]$Row.$name
+            if ($value -match '(?i)^\s*skipped\b|^\s*Skipped\.|Run with -Include|Provide -|not requested') {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Test-RowProblem {
+    param([AllowNull()][object]$Row)
+
+    if ($null -eq $Row) { return $false }
+    if ($Row.PSObject.Properties.Name -contains "Severity") {
+        if ([string]$Row.Severity -in @("Error","Warning")) { return $true }
+    }
+    foreach ($name in @("Result","TcpTestSucceeded","PingSucceeded","Status","State","IPv4Connectivity","IPv6Connectivity")) {
+        if ($Row.PSObject.Properties.Name -contains $name) {
+            $value = [string]$Row.$name
+            if ($value -match '(?i)^false$|not reachable|failed|error|down|disconnected|unreachable|timeout|degraded') {
+                return $true
+            }
+        }
+    }
+    if ($Row.PSObject.Properties.Name -contains "LossPercent") {
+        $loss = ConvertTo-Number ([string]$Row.LossPercent)
+        if ($null -ne $loss -and $loss -gt 0) { return $true }
+    }
+    if ($Row.PSObject.Properties.Name -contains "SignalPercent") {
+        $signal = ConvertTo-Number ([string]$Row.SignalPercent)
+        if ($null -ne $signal -and $signal -lt 45) { return $true }
+    }
+    return $false
+}
+
+function New-SectionTitle {
+    param(
+        [string]$Title,
+        [object[]]$Rows
+    )
+
+    $items = @($Rows)
+    $visible = @($items | Where-Object { -not (Test-RowSkipped $_) })
+    $skipped = @($items | Where-Object { Test-RowSkipped $_ })
+    $problems = @($visible | Where-Object { Test-RowProblem $_ })
+    $warnings = @($problems | Where-Object { $_.PSObject.Properties.Name -contains "Severity" -and [string]$_.Severity -eq "Warning" })
+    $errors = @($problems | Where-Object { $_.PSObject.Properties.Name -contains "Severity" -and [string]$_.Severity -eq "Error" })
+    $ok = @($visible | Where-Object { $_.PSObject.Properties.Name -contains "Severity" -and [string]$_.Severity -eq "OK" })
+    $info = @($visible | Where-Object { $_.PSObject.Properties.Name -contains "Severity" -and [string]$_.Severity -eq "Info" })
+
+    $parts = @()
+    if ($problems.Count -gt 0) { $parts += "Problems: $($problems.Count)" }
+    if ($errors.Count -gt 0) { $parts += "Errors: $($errors.Count)" }
+    if ($warnings.Count -gt 0) { $parts += "Warnings: $($warnings.Count)" }
+    if ($ok.Count -gt 0) { $parts += "OK: $($ok.Count)" }
+    if ($info.Count -gt 0) { $parts += "Info: $($info.Count)" }
+    if ($skipped.Count -gt 0) { $parts += "Skipped: $($skipped.Count)" }
+    if ($parts.Count -eq 0) { $parts += "Rows: $($visible.Count)" }
+
+    return "$Title - $($parts -join ', ')"
+}
+
 function New-ResultTable {
     param(
         [object[]]$Rows,
         [string[]]$Columns,
-        [string]$EmptyMessage = "No data collected."
+        [string]$EmptyMessage = "No data collected.",
+        [switch]$IncludeSkipped
     )
 
     $items = @($Rows)
+    if (-not $IncludeSkipped) {
+        $items = @($items | Where-Object { -not (Test-RowSkipped $_) })
+    }
     if ($items.Count -eq 0) {
+        return '<div class="empty">' + (Escape-Html $EmptyMessage) + '</div>'
+    }
+
+    $visibleColumns = @($Columns | Where-Object {
+        $col = $_
+        @($items | Where-Object {
+            ($_.PSObject.Properties.Name -contains $col) -and
+            (-not [string]::IsNullOrWhiteSpace([string]$_.$col))
+        }).Count -gt 0
+    })
+    if ($visibleColumns.Count -eq 0) {
         return '<div class="empty">' + (Escape-Html $EmptyMessage) + '</div>'
     }
 
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine('<div class="table-wrap"><table class="sortable">')
     [void]$sb.AppendLine('<thead><tr>')
-    foreach ($col in $Columns) {
+    foreach ($col in $visibleColumns) {
         [void]$sb.AppendLine(("<th data-sort-column=""{0}"">{0}<span class=""sort-indicator""></span></th>" -f (Escape-Html $col)))
     }
     [void]$sb.AppendLine('</tr></thead><tbody>')
 
     foreach ($row in $items) {
         [void]$sb.AppendLine('<tr>')
-        foreach ($col in $Columns) {
+        foreach ($col in $visibleColumns) {
             $value = ""
             if ($row.PSObject.Properties.Name -contains $col) {
                 $value = [string]$row.$col
@@ -290,6 +373,42 @@ function New-ResultTable {
 
     [void]$sb.AppendLine('</tbody></table></div>')
     return $sb.ToString()
+}
+
+function New-ReportSection {
+    param(
+        [string]$Id,
+        [string]$Title,
+        [string]$Kind = "utility",
+        [object[]]$Rows,
+        [string[]]$Columns,
+        [string]$EmptyMessage = "No data collected.",
+        [switch]$IncludeSkippedRows
+    )
+
+    $items = @($Rows)
+    $visible = if ($IncludeSkippedRows) { @($items) } else { @($items | Where-Object { -not (Test-RowSkipped $_) }) }
+    $problemRows = @($visible | Where-Object { Test-RowProblem $_ })
+    $standardRows = @($visible | Where-Object { -not (Test-RowProblem $_) })
+    $summary = Escape-Html (New-SectionTitle -Title $Title -Rows $items)
+    $openAttr = if ($problemRows.Count -gt 0) { " open" } else { "" }
+    $problemHtml = ""
+    if ($problemRows.Count -gt 0) {
+        $problemHtml = "<div class=""problem-block""><h3>Needs attention</h3>$(New-ResultTable $problemRows $Columns $EmptyMessage)</div>"
+    }
+
+    $standardHtml = ""
+    if ($standardRows.Count -gt 0) {
+        if ($problemRows.Count -gt 0) {
+            $standardHtml = "<details class=""inner-fold""><summary>Standard rows ($($standardRows.Count))</summary>$(New-ResultTable $standardRows $Columns $EmptyMessage -IncludeSkipped:$IncludeSkippedRows)</details>"
+        } else {
+            $standardHtml = New-ResultTable $standardRows $Columns $EmptyMessage -IncludeSkipped:$IncludeSkippedRows
+        }
+    } elseif ($problemRows.Count -eq 0) {
+        $standardHtml = New-ResultTable $visible $Columns $EmptyMessage -IncludeSkipped:$IncludeSkippedRows
+    }
+
+    return "<details id=""$Id"" class=""fold-section section-card $Kind""$openAttr><summary>$summary</summary><div class=""fold-body"">$problemHtml$standardHtml</div></details>"
 }
 
 function Get-HtmlCellClass {
@@ -1546,37 +1665,59 @@ function New-HtmlReport {
         $rawHtml = '<div class="empty">Raw data was not requested. Run with -IncludeRawData to include raw command output and JSON.</div>'
     }
 
-    $sectionsHtml = @"
-<section id="system" class="section-card utility"><h2>System information</h2>$(New-ResultTable $Data.SystemInfo @("ComputerName","UserName","DomainOrWorkgroup","PartOfDomain","Windows","BuildNumber","PowerShellVersion","UptimeDays","DateTime","TimeZone","IsAdmin"))</section>
-<section id="adapters" class="section-card network"><h2>Main network adapters</h2>$(New-ResultTable $Data.MainAdapters @("Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile") "No non-VPN network adapter was detected.")</section>
-<section id="routes" class="section-card network"><h2>Main IP configuration and routing</h2>$(New-ResultTable $Data.MainRoutes @("DestinationPrefix","NextHop","InterfaceAlias","RouteMetric","InterfaceMetric") "No non-VPN routes were detected.")</section>
-<section id="targets" class="section-card network"><h2>Main detected target matrix</h2>$(New-ResultTable $Data.MainTargetMatrix @("Role","Target","InterfaceAlias","Source","TargetType","TestPing","TestDns","TcpPorts"))</section>
-<section id="ping" class="section-card network"><h2>Main ping tests</h2>$(New-ResultTable $Data.MainPing @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","LossPercent","AvgMs","JitterMs","Result","Recommendation"))</section>
-<section id="tcp" class="section-card network"><h2>Main TCP port tests</h2>$(New-ResultTable $Data.MainTcp @("Severity","Role","Host","Port","TcpTestSucceeded","InterfaceAlias","LatencyMs","Result","Recommendation"))</section>
-<section id="dns" class="section-card network"><h2>DNS diagnostics</h2>$(New-ResultTable $Data.Dns @("Severity","Role","Name","Server","Addresses","DurationMs","Result","Error","Recommendation"))</section>
-<section id="trace" class="section-card network"><h2>Traceroute</h2>$(New-ResultTable $Data.Traceroute @("Severity","Target","PingSucceeded","TraceRoute","Details"))</section>
-<section id="mtu" class="section-card network"><h2>MTU test</h2>$(New-ResultTable $Data.Mtu @("Severity","Role","Target","BestPayload","EstimatedMtu","Result","Recommendation"))</section>
-<section id="wlan" class="section-card network"><h2>WLAN diagnostics</h2>$(New-ResultTable $Data.Wlan @("RowType","Severity","Name","SSID","BSSID","SignalPercent","RadioType","Band","Channel","ReceiveRate","TransmitRate","Authentication","Cipher","Profile","Details","Recommendation") "No WLAN interface was detected.")</section>
-<section id="smb" class="section-card utility"><h2>SMB / NAS test</h2>$(New-ResultTable $Data.Smb @("Severity","Path","Host","Tcp445","TestPath","WriteMBps","ReadMBps","Details"))</section>
-<section id="iperf" class="section-card utility"><h2>iPerf3 LAN speed test</h2>$(New-ResultTable $Data.Iperf @("Severity","Target","Mode","Mbps","Retransmits","Result","Details"))</section>
-<section id="speedtest" class="section-card utility"><h2>Internet speed test</h2>$(New-ResultTable $Data.Speedtest @("Severity","Tool","Server","DownloadMbps","UploadMbps","PingMs","Details"))</section>
-<section id="firewall" class="section-card utility"><h2>Main firewall and network profiles</h2>$(New-ResultTable $Data.MainFirewall @("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction"))</section>
-<section id="services" class="section-card utility"><h2>Windows network services</h2>$(New-ResultTable $Data.Services @("Name","DisplayName","Status","StartType"))</section>
-<section id="subnet" class="section-card network"><h2>Subnet discovery</h2>$(New-ResultTable $Data.SubnetDiscovery @("Address","MacAddress","State","Source","Result"))</section>
-<section id="results" class="section-card utility"><h2>Main findings and test results</h2>$(New-ResultTable $Data.MainResults @("Severity","Category","Test","Role","Target","Result","Value","Recommendation"))</section>
-<details id="raw" class="fold-section raw"><summary>Raw data</summary><div class="fold-body">$rawHtml</div></details>
-<details id="events" class="fold-section logs"><summary>Network event logs</summary><div class="fold-body">$(New-ResultTable $Data.Events @("TimeCreated","LogName","ProviderName","Id","LevelDisplayName","Message"))</div></details>
-<section id="vpn" class="section-card vpn"><h2>VPN context</h2>
-<h3>VPN overview</h3>$(New-ResultTable $Data.Vpn @("Provider","ItemType","Name","Status","InterfaceAlias","RouteCount","DefaultRoute","Details") "No VPN adapter, route, service, or process was detected.")
-<h3>VPN adapters and IP configuration</h3>$(New-ResultTable $Data.VpnAdapters @("Provider","Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile") "No VPN network adapter was detected.")
-<h3>VPN routes</h3>$(New-ResultTable $Data.VpnRoutes @("DestinationPrefix","NextHop","InterfaceAlias","VpnProvider","RouteMetric","InterfaceMetric") "No VPN routes were detected.")
-<h3>VPN target matrix</h3>$(New-ResultTable $Data.VpnTargetMatrix @("Role","Target","InterfaceAlias","VpnProvider","Source","TargetType","TestPing","TestDns","TcpPorts") "No VPN targets were detected.")
-<h3>VPN ping tests</h3>$(New-ResultTable $Data.VpnPing @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","VpnProvider","LossPercent","AvgMs","JitterMs","Result","Recommendation") "No VPN ping tests were collected.")
-<h3>VPN TCP port tests</h3>$(New-ResultTable $Data.VpnTcp @("Severity","Role","Host","Port","TcpTestSucceeded","InterfaceAlias","VpnProvider","LatencyMs","Result","Recommendation") "No VPN TCP tests were collected.")
-<h3>VPN firewall and profile rows</h3>$(New-ResultTable $Data.VpnFirewall @("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction") "No VPN firewall or profile rows were detected.")
-<h3>VPN findings and test results</h3>$(New-ResultTable $Data.VpnResults @("Severity","Category","Test","Role","Target","InterfaceAlias","Result","Value","Details","Recommendation") "No VPN-specific findings were detected.")
-</section>
-"@
+    $sectionSpecs = @(
+        @{ Id="system"; Title="System information"; Kind="utility"; Rows=$Data.SystemInfo; Columns=@("ComputerName","UserName","DomainOrWorkgroup","PartOfDomain","Windows","BuildNumber","PowerShellVersion","UptimeDays","DateTime","TimeZone","IsAdmin"); Empty="No system information was collected." },
+        @{ Id="adapters"; Title="Main network adapters"; Kind="network"; Rows=$Data.MainAdapters; Columns=@("Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile"); Empty="No non-VPN network adapter was detected." },
+        @{ Id="routes"; Title="Main IP configuration and routing"; Kind="network"; Rows=$Data.MainRoutes; Columns=@("DestinationPrefix","NextHop","InterfaceAlias","RouteMetric","InterfaceMetric"); Empty="No non-VPN routes were detected." },
+        @{ Id="targets"; Title="Main detected target matrix"; Kind="network"; Rows=$Data.MainTargetMatrix; Columns=@("Role","Target","InterfaceAlias","Source","TargetType","TestPing","TestDns","TcpPorts"); Empty="No targets were detected." },
+        @{ Id="ping"; Title="Main ping tests"; Kind="network"; Rows=$Data.MainPing; Columns=@("Severity","Role","Target","ResolvedAddress","InterfaceAlias","LossPercent","AvgMs","JitterMs","Result","Recommendation"); Empty="No ping tests were collected." },
+        @{ Id="tcp"; Title="Main TCP port tests"; Kind="network"; Rows=$Data.MainTcp; Columns=@("Severity","Role","Host","Port","TcpTestSucceeded","InterfaceAlias","LatencyMs","Result","Recommendation"); Empty="No TCP tests were collected." },
+        @{ Id="dns"; Title="DNS diagnostics"; Kind="network"; Rows=$Data.Dns; Columns=@("Severity","Role","Name","Server","Addresses","DurationMs","Result","Error","Recommendation"); Empty="No DNS diagnostics were collected." },
+        @{ Id="trace"; Title="Traceroute"; Kind="network"; Rows=$Data.Traceroute; Columns=@("Severity","Target","PingSucceeded","TraceRoute","Details"); Empty="No traceroute data was collected." },
+        @{ Id="mtu"; Title="MTU test"; Kind="network"; Rows=$Data.Mtu; Columns=@("Severity","Role","Target","BestPayload","EstimatedMtu","Result","Recommendation"); Empty="No MTU result was collected." },
+        @{ Id="wlan"; Title="WLAN diagnostics"; Kind="network"; Rows=$Data.Wlan; Columns=@("RowType","Severity","Name","SSID","BSSID","SignalPercent","RadioType","Band","Channel","ReceiveRate","TransmitRate","Authentication","Cipher","Profile","Details","Recommendation"); Empty="No WLAN interface was detected." },
+        @{ Id="smb"; Title="SMB / NAS test"; Kind="utility"; Rows=$Data.Smb; Columns=@("Severity","Path","Host","Tcp445","TestPath","WriteMBps","ReadMBps","Details"); Empty="No SMB/NAS test data was collected." },
+        @{ Id="iperf"; Title="iPerf3 LAN speed test"; Kind="utility"; Rows=$Data.Iperf; Columns=@("Severity","Target","Mode","Mbps","Retransmits","Result","Details"); Empty="No iPerf3 data was collected." },
+        @{ Id="speedtest"; Title="Internet speed test"; Kind="utility"; Rows=$Data.Speedtest; Columns=@("Severity","Tool","Server","DownloadMbps","UploadMbps","PingMs","Details"); Empty="No internet speed data was collected." },
+        @{ Id="firewall"; Title="Main firewall and network profiles"; Kind="utility"; Rows=$Data.MainFirewall; Columns=@("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction"); Empty="No firewall profile data was collected." },
+        @{ Id="services"; Title="Windows network services"; Kind="utility"; Rows=$Data.Services; Columns=@("Name","DisplayName","Status","StartType"); Empty="No network service data was collected." },
+        @{ Id="subnet"; Title="Subnet discovery"; Kind="network"; Rows=$Data.SubnetDiscovery; Columns=@("Address","MacAddress","State","Source","Result"); Empty="No subnet discovery data was collected." },
+        @{ Id="results"; Title="Main findings and test results"; Kind="utility"; Rows=$Data.MainResults; Columns=@("Severity","Category","Test","Role","Target","Result","Value","Recommendation"); Empty="No findings or test results were collected." }
+    )
+
+    $sectionsHtml = ($sectionSpecs | ForEach-Object {
+        New-ReportSection -Id $_.Id -Title $_.Title -Kind $_.Kind -Rows $_.Rows -Columns $_.Columns -EmptyMessage $_.Empty
+    }) -join "`n"
+
+    $skippedRows = New-Object System.Collections.Generic.List[object]
+    foreach ($spec in $sectionSpecs) {
+        foreach ($row in @($spec.Rows | Where-Object { Test-RowSkipped $_ })) {
+            [void]$skippedRows.Add([PSCustomObject]@{
+                Section = $spec.Title
+                Severity = if ($row.PSObject.Properties.Name -contains "Severity") { [string]$row.Severity } else { "Info" }
+                Test = if ($row.PSObject.Properties.Name -contains "Test") { [string]$row.Test } elseif ($row.PSObject.Properties.Name -contains "RowType") { [string]$row.RowType } else { "" }
+                Target = if ($row.PSObject.Properties.Name -contains "Target") { [string]$row.Target } elseif ($row.PSObject.Properties.Name -contains "Path") { [string]$row.Path } else { "" }
+                Result = if ($row.PSObject.Properties.Name -contains "Result") { [string]$row.Result } else { "" }
+                Details = if ($row.PSObject.Properties.Name -contains "Details") { [string]$row.Details } elseif ($row.PSObject.Properties.Name -contains "Recommendation") { [string]$row.Recommendation } else { "" }
+            })
+        }
+    }
+
+    $skippedHtml = New-ReportSection -Id "skipped" -Title "Skipped or optional tests" -Kind "utility" -Rows $skippedRows.ToArray() -Columns @("Section","Severity","Test","Target","Result","Details") -EmptyMessage "No skipped or optional test rows." -IncludeSkippedRows
+    $eventsHtml = New-ReportSection -Id "events" -Title "Network event logs" -Kind "logs" -Rows $Data.Events -Columns @("TimeCreated","LogName","ProviderName","Id","LevelDisplayName","Message") -EmptyMessage "No network event log rows were collected."
+    $vpnSections = @(
+        New-ReportSection -Id "vpn-overview" -Title "VPN overview" -Kind "vpn" -Rows $Data.Vpn -Columns @("Provider","ItemType","Name","Status","InterfaceAlias","RouteCount","DefaultRoute","Details") -EmptyMessage "No VPN adapter, route, service, or process was detected."
+        New-ReportSection -Id "vpn-adapters" -Title "VPN adapters and IP configuration" -Kind "vpn" -Rows $Data.VpnAdapters -Columns @("Provider","Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile") -EmptyMessage "No VPN network adapter was detected."
+        New-ReportSection -Id "vpn-routes" -Title "VPN routes" -Kind "vpn" -Rows $Data.VpnRoutes -Columns @("DestinationPrefix","NextHop","InterfaceAlias","VpnProvider","RouteMetric","InterfaceMetric") -EmptyMessage "No VPN routes were detected."
+        New-ReportSection -Id "vpn-targets" -Title "VPN target matrix" -Kind "vpn" -Rows $Data.VpnTargetMatrix -Columns @("Role","Target","InterfaceAlias","VpnProvider","Source","TargetType","TestPing","TestDns","TcpPorts") -EmptyMessage "No VPN targets were detected."
+        New-ReportSection -Id "vpn-ping" -Title "VPN ping tests" -Kind "vpn" -Rows $Data.VpnPing -Columns @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","VpnProvider","LossPercent","AvgMs","JitterMs","Result","Recommendation") -EmptyMessage "No VPN ping tests were collected."
+        New-ReportSection -Id "vpn-tcp" -Title "VPN TCP port tests" -Kind "vpn" -Rows $Data.VpnTcp -Columns @("Severity","Role","Host","Port","TcpTestSucceeded","InterfaceAlias","VpnProvider","LatencyMs","Result","Recommendation") -EmptyMessage "No VPN TCP tests were collected."
+        New-ReportSection -Id "vpn-firewall" -Title "VPN firewall and profile rows" -Kind "vpn" -Rows $Data.VpnFirewall -Columns @("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction") -EmptyMessage "No VPN firewall or profile rows were detected."
+        New-ReportSection -Id "vpn-results" -Title "VPN findings and test results" -Kind "vpn" -Rows $Data.VpnResults -Columns @("Severity","Category","Test","Role","Target","InterfaceAlias","Result","Value","Details","Recommendation") -EmptyMessage "No VPN-specific findings were detected."
+    ) -join "`n"
+    $vpnHtml = "<section id=""vpn"" class=""vpn-group""><h2>VPN context</h2>$vpnSections</section>"
+    $rawSectionHtml = "<details id=""raw"" class=""fold-section raw""><summary>Raw data</summary><div class=""fold-body"">$rawHtml</div></details>"
+    $sectionsHtml = @($sectionsHtml, $skippedHtml, $eventsHtml, $vpnHtml, $rawSectionHtml) -join "`n"
 
     $html = @"
 <!doctype html>
@@ -1605,11 +1746,12 @@ function New-HtmlReport {
     nav { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 6px; }
     nav a { color:#0f766e; text-decoration:none; border:1px solid #99f6e4; background:#f0fdfa; border-radius:999px; padding:5px 10px; font-size:12px; }
     section { margin-top:18px; }
-    .section-card { border:1px solid var(--line); border-left:6px solid var(--accent); border-radius:8px; padding:14px 16px; background:#fff; }
+    .section-card { border:1px solid var(--line); border-left:6px solid var(--accent); border-radius:8px; padding:0; background:#fff; }
     .section-card.network { background:#eff6ff; border-color:var(--net-border); border-left-color:var(--net-left); }
     .section-card.utility { background:#f8fafc; border-color:var(--line); border-left-color:var(--accent); }
     .section-card.logs { background:#fffbeb; border-color:var(--log-border); border-left-color:var(--log-left); }
     .section-card.vpn { background:var(--vpn-bg); border-color:var(--vpn-border); border-left-color:var(--vpn-left); }
+    .vpn-group { margin-top:18px; border:1px solid var(--vpn-border); border-left:6px solid var(--vpn-left); border-radius:8px; padding:14px 16px 6px; background:var(--vpn-bg); }
     .table-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fff; }
     table { width:max-content; min-width:100%; border-collapse:collapse; font-size:12px; }
     th, td { padding:6px 7px; border-bottom:1px solid var(--line); border-right:1px solid var(--line); vertical-align:top; text-align:left; white-space:normal; max-width:360px; overflow-wrap:anywhere; }
@@ -1635,6 +1777,13 @@ function New-HtmlReport {
     details.fold-section > summary { padding:14px 16px; list-style:none; }
     details.fold-section > summary::-webkit-details-marker { display:none; }
     details.fold-section .fold-body { padding:0 16px 16px; }
+    details.section-card > summary { list-style:none; padding:14px 16px; border-radius:8px 8px 0 0; }
+    details.section-card > summary::-webkit-details-marker { display:none; }
+    details.section-card[open] > summary { border-bottom:1px solid rgba(15,23,42,.08); }
+    .problem-block h3 { margin-top:14px; color:#7f1d1d; }
+    .inner-fold { background:rgba(255,255,255,.7); }
+    .inner-fold > summary { color:var(--muted); }
+    .inner-fold .table-wrap { border-radius:0 0 8px 8px; }
     details.logs { background:#fffbeb; border-color:var(--log-border); border-left-color:var(--log-left); }
     details.raw { background:#f8fafc; }
     pre { margin:0; padding:12px; overflow:auto; white-space:pre-wrap; background:#0f172a; color:#e5e7eb; border-radius:0 0 8px 8px; }
