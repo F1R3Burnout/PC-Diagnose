@@ -128,7 +128,6 @@ Running remote PowerShell code requires trust in this repository.
 - Disk event mapping to physical disk names and drive letters when Windows reports `\Device\Harddisk...`
 - Collapsed overview of explicitly changed local policy settings
 - Hardware migration and stale fixed-hardware driver context
-- Review-only cleanup commands for stale hardware traces
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
 - Main network report separates VPN-related adapters, routes, tests, and findings into a dedicated VPN section at the bottom
@@ -139,7 +138,7 @@ Running remote PowerShell code requires trust in this repository.
 - WLAN details from Windows built-in diagnostics: active connection, signal, BSSID, band, channel, rates, security mode, driver data, nearby BSSIDs, saved profiles, and Windows WLAN report path when available
 - Network event logs, cautious subnet discovery, and internet speed test run by default
 - Gaming-related error interpretation for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, game paths, and Counter-Strike 2 (`cs2.exe`)
-- Windows Update, AppX, service, driver, and application hang checks
+- More precise NVIDIA/AMD/ASUS vendor utility, graphics driver, service, Windows Update, AppX, and application hang checks
 - Minidump copies in the ZIP and optional local `!analyze -v` interpretation
 - Detailed network report for adapters, routes, gateway, DNS, TCP reachability, Wi-Fi, firewall profile, services, optional events, traceroute, MTU, SMB, iperf3, and speed tests
 - ZIP package for handoff

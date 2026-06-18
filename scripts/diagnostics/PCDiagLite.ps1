@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "1.4 Gaming Interpretation"
+$ToolVersion = "1.5 Precision Findings"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -494,6 +494,9 @@ function Convert-DumpAnalysisTextToRow {
     } elseif ($suspectText -match '(?i)nvlddmkm|amdkmdag|atikmdag|igdkmdn|dxgkrnl|graphics|display') {
         $suspectedArea = "Graphics driver / GPU"
         $recommendedAction = "Perform a clean GPU driver install, check GPU stability, disable unstable overlays/overclocking, and correlate with game or display-driver events."
+    } elseif ($suspectText -match '(?i)PciD3Cold|CorePowerRail|pci!PciD3|pci!.*Power') {
+        $suspectedArea = "PCIe / chipset / device power management"
+        $recommendedAction = "This points at a PCIe device power-state transition. Update BIOS/UEFI, chipset, GPU, storage, and dock/device firmware; then correlate with sleep/resume, Modern Standby, USB, GPU, and WHEA events."
     } elseif ($suspectText -match '(?i)stor|stornvme|storahci|iaStor|disk|ntfs|fltmgr|volmgr|partmgr') {
         $suspectedArea = "Storage / file system"
         $recommendedAction = "Back up important data, check SMART/vendor diagnostics, storage controller drivers, cabling/enclosure, and file-system health."
@@ -508,6 +511,9 @@ function Convert-DumpAnalysisTextToRow {
     if ($bugCheckText -match '^(9f|0x9f)$') {
         $suspectedArea = if ($suspectedArea -eq "Unknown") { "Power transition / driver timeout" } else { "$suspectedArea; power transition" }
         $recommendedAction = "BugCheck 9F usually means a driver did not complete a power transition. Check sleep/resume, USB, storage, Bluetooth, GPU, chipset, and power-management drivers."
+    } elseif ($bugCheckText -match '^(116|0x116)$') {
+        $suspectedArea = "Graphics driver / GPU timeout"
+        $recommendedAction = "BugCheck 116 is a video TDR crash. Clean-install the GPU driver, disable overlays and unstable overclocks for one test, review GPU temperatures/power, and correlate with nvlddmkm or game crash events."
     } elseif ($bugCheckText -match '^(7e|0x7e|3b|0x3b|50|0x50|1a|0x1a)$' -and $suspectedArea -eq "Unknown") {
         $suspectedArea = "Kernel crash / memory or driver"
         $recommendedAction = "Correlate the named module with drivers and recent software changes. If no driver is named, test RAM stability and review WHEA/storage events."
@@ -773,8 +779,8 @@ function New-EventDetailsText {
         } elseif ($_.ProviderName -match 'Application Error|Application Hang') {
             $appName = ""
             $moduleName = ""
-            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung):\s*([^,\r\n]+)') { $appName = $matches[1].Trim() }
-            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls):\s*([^,\r\n]+)') { $moduleName = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung|Fehlerhafter Anwendungsname):\s*([^,\r\n]+)') { $appName = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls|Fehlerhafter Modulname):\s*([^,\r\n]+)') { $moduleName = $matches[1].Trim() }
             if (-not [string]::IsNullOrWhiteSpace($appName) -and -not [string]::IsNullOrWhiteSpace($moduleName)) {
                 $subject = "$appName / $moduleName"
             } elseif (-not [string]::IsNullOrWhiteSpace($appName)) {
@@ -932,6 +938,52 @@ function New-ObjectDetailsText {
     }
 
     return $sb.ToString().TrimEnd()
+}
+
+function Get-AppCrashInfoFromMessage {
+    param([string]$Message)
+
+    $faultingApp = ""
+    $faultingModule = ""
+    $exceptionCode = ""
+    $appPath = ""
+    if ($Message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung|Fehlerhafter Anwendungsname):\s*([^,\r\n]+)') { $faultingApp = $matches[1].Trim() }
+    if ($Message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls|Fehlerhafter Modulname):\s*([^,\r\n]+)') { $faultingModule = $matches[1].Trim() }
+    if ($Message -match '(?im)(?:Exception code|Ausnahmecode):\s*(0x[0-9a-f]+)') { $exceptionCode = $matches[1].Trim() }
+    if ($Message -match '(?im)(?:Faulting application path|Pfad der fehlerhaften Anwendung|Fehlerhafter Anwendungspfad):\s*([^\r\n]+)') { $appPath = $matches[1].Trim() }
+
+    return [PSCustomObject]@{
+        FaultingApplication = $faultingApp
+        FaultingModule      = $faultingModule
+        ExceptionCode       = $exceptionCode
+        ApplicationPath     = $appPath
+    }
+}
+
+function Get-ServiceNameFromEventMessage {
+    param([string]$Message)
+
+    if ($Message -match '(?im)(?:The|Der)\s+(?:service|Dienst)\s+["'']?([^"''\r\n]+?)["'']?\s+(?:failed|wurde|terminated|entered|did not|could not|konnte|beendete|ist)') { return $matches[1].Trim() }
+    if ($Message -match '(?im)(?:service|Dienst)\s+["'']([^"''\r\n]+)["'']') { return $matches[1].Trim() }
+    if ($Message -match '(?ims)von\s+Dienst\s+(.+?)\s+erreicht') { return (($matches[1] -replace '\s+', ' ').Trim()) }
+    if ($Message -match '(?im)^["'']?([^"''\r\n]+?)["'']?\s+(?:service|Dienst)\s+(?:failed|terminated|entered|did not|could not)') { return $matches[1].Trim() }
+    return "unknown service"
+}
+
+function New-TopCountSummary {
+    param(
+        [object[]]$Rows,
+        [string]$PropertyName,
+        [int]$MaxItems = 8
+    )
+
+    $parts = @($Rows |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.PSObject.Properties[$PropertyName].Value) } |
+        Group-Object -Property $PropertyName |
+        Sort-Object Count -Descending |
+        Select-Object -First $MaxItems |
+        ForEach-Object { "$($_.Name)=$($_.Count)" })
+    return ($parts -join "; ")
 }
 
 function Get-MatchCount {
@@ -1453,10 +1505,13 @@ function Write-InitialFindingsReport {
     }
 
     $storageEvents = @($allEvents | Where-Object {
+        $provider = [string]$_.ProviderName
+        $message = [string]$_.Message
         (Test-EventLevelAtMost $_ 3) -and
+        ($provider -notmatch '(?i)nvlddmkm|NVIDIA|Display') -and
         (
-            ($_.ProviderName -match 'disk|Ntfs|storahci|stornvme|iaStor|volmgr') -or
-            ($_.Id -in @('51','55','98','129','153','154','157','161','162'))
+            ($provider -match '(?i)^disk$|Ntfs|storahci|stornvme|iaStor|volmgr|partmgr') -or
+            (($_.Id -in @('51','55','98','129','153','154','157','161','162')) -and ($message -match '(?i)\\Device\\Harddisk|Disk|Datenträger|Volume|volmgr|NTFS|storage|storport'))
         )
     })
     if ($storageEvents.Count -gt 0) {
@@ -1473,9 +1528,11 @@ function Write-InitialFindingsReport {
     }
 
     $usbStorageEvents = @($allEvents | Where-Object {
+        $provider = [string]$_.ProviderName
         (Test-EventLevelAtMost $_ 3) -and
+        ($provider -notmatch '(?i)nvlddmkm|NVIDIA|Display') -and
         (
-            ($_.ProviderName -match 'UASPStor|USBSTOR|disk|storahci|stornvme') -and
+            ($provider -match '(?i)UASPStor|USBSTOR|^disk$|storahci|stornvme') -and
             ($_.Id -in @('51','129','153','154','157'))
         )
     })
@@ -1490,6 +1547,18 @@ function Write-InitialFindingsReport {
             $usbDetails += [string]$usbDiskContext.DetailText
         }
         Add-Finding ([ref]$findings) "High" "Storage" "USB/UASP or disk I/O resets detected" $usbEvidence "If Windows, games, apps, or active data are on USB-attached storage, check the enclosure, cable, port, and power. Prefer an internal NVMe/SATA SSD for the Windows system drive on a desktop PC." -EventRows $usbStorageEvents -DetailText ($usbDetails -join "`r`n`r`n")
+    }
+
+    $graphicsDriverEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        (
+            ([string]$_.ProviderName -match '(?i)nvlddmkm|amdkmdag|atikmdag|Display|DisplayDriver') -or
+            ([string]$_.Message -match '(?i)nvlddmkm|amdkmdag|atikmdag|display driver|video driver|Grafiktreiber')
+        )
+    })
+    if ($graphicsDriverEvents.Count -gt 0) {
+        $providerSummary = (@($graphicsDriverEvents | Group-Object ProviderName | Sort-Object Count -Descending | Select-Object -First 5 | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+        Add-Finding ([ref]$findings) "High" "Drivers" "Graphics driver reset or crash events found" "$($graphicsDriverEvents.Count) graphics-driver event(s). Providers: $providerSummary." "Correlate these timestamps with game crashes and minidumps. Clean-install the GPU driver, update BIOS/chipset, check GPU temperature/power, and test once without overlays or unstable GPU/RAM tuning." -EventRows $graphicsDriverEvents
     }
 
     $networkEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NDIS|NetBT|Netwtw|e1|e2f|e2fnexpress' })
@@ -1536,16 +1605,29 @@ function Write-InitialFindingsReport {
     })
     if ($dnsClientConfigEvents.Count -gt 0) {
         $dnsConfigDetails = @((New-EventDetailsText -Rows $dnsClientConfigEvents))
+        $dnsIdSummary = (@($dnsClientConfigEvents | Group-Object Id | Sort-Object Count -Descending | ForEach-Object { "ID $($_.Name)=$($_.Count)" }) -join "; ")
+        $dnsEvidence = "$($dnsClientConfigEvents.Count) DNS client event(s) with ID 1012 or 1023."
+        if (-not [string]::IsNullOrWhiteSpace($dnsIdSummary)) {
+            $dnsEvidence += " Breakdown: $dnsIdSummary."
+        }
         if ($hostsCheckRows.Count -gt 0) {
             $dnsConfigDetails += (New-ObjectDetailsText -Rows $hostsCheckRows -Title "Hosts file check")
+            $hc = $hostsCheckRows[0]
+            $dnsEvidence += " Hosts now readable=$($hc.Readable), active entries=$($hc.ActiveEntryCount), invalid lines=$($hc.InvalidLineCount)."
         }
         if ($hostsEntryRows.Count -gt 0) {
             $dnsConfigDetails += (New-ObjectDetailsText -Rows $hostsEntryRows -Title "Active hosts file entries")
         }
         if ($nrptRows.Count -gt 0) {
             $dnsConfigDetails += (New-ObjectDetailsText -Rows $nrptRows -Title "DNS Client NRPT rules")
+            $nrptServers = (@($nrptRows | ForEach-Object { [string]$_.NameServers } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique) -join ", ")
+            if (-not [string]::IsNullOrWhiteSpace($nrptServers)) {
+                $dnsEvidence += " NRPT rules=$($nrptRows.Count), name servers=$nrptServers."
+            } else {
+                $dnsEvidence += " NRPT rules=$($nrptRows.Count)."
+            }
         }
-        Add-Finding ([ref]$findings) "High" "Network" "DNS client hosts or NRPT configuration errors found" "$($dnsClientConfigEvents.Count) DNS client event(s) with ID 1012 or 1023." "Check C:\Windows\System32\drivers\etc\hosts permissions/content and review 04_Network\\DnsClientNrptRule.csv. VPN, DNS filtering, and remote-access tools can create NRPT rules, so inspect before deleting anything." -EventRows $dnsClientConfigEvents -DetailText ($dnsConfigDetails -join "`r`n`r`n")
+        Add-Finding ([ref]$findings) "High" "Network" "DNS client hosts or NRPT configuration errors found" $dnsEvidence "If hosts is readable now, treat older 1012 events as a timestamped clue and focus on what changed around them. For 1023 events, review NRPT rules, VPN DNS settings, and DNS filtering tools before deleting anything." -EventRows $dnsClientConfigEvents -DetailText ($dnsConfigDetails -join "`r`n`r`n")
     }
 
     $dnsTimeEvents = @($allEvents | Where-Object {
@@ -1639,7 +1721,29 @@ function Write-InitialFindingsReport {
         $_.Id -in @('7000','7001','7009','7011','7022','7023','7024','7031','7032','7034')
     })
     if ($serviceEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Medium" "Services" "Service errors or crashes found" "$($serviceEvents.Count) Service Control Manager event(s)." "Open the top events and check whether a specific service repeatedly hangs, crashes, or blocks startup." -EventRows $serviceEvents
+        $serviceRows = @($serviceEvents | ForEach-Object {
+            [PSCustomObject]@{
+                TimeCreated = $_.TimeCreated
+                EventId = $_.Id
+                Service = Get-ServiceNameFromEventMessage -Message ([string]$_.Message)
+                Signal = if ([string]$_.Id -eq '7011') { "Service timeout" } elseif ([string]$_.Id -in @('7031','7034')) { "Service crash/terminated" } elseif ([string]$_.Id -in @('7000','7001','7009')) { "Service start failure" } else { "Service control event" }
+            }
+        })
+        $serviceSummary = New-TopCountSummary -Rows $serviceRows -PropertyName "Service" -MaxItems 8
+        $signalSummary = New-TopCountSummary -Rows $serviceRows -PropertyName "Signal" -MaxItems 5
+        $serviceEvidence = "$($serviceEvents.Count) Service Control Manager event(s). Top services: $serviceSummary. Signals: $signalSummary."
+        $serviceRecommendation = "Start with the repeated service summary. Repair/update the named application or driver package, then disable or uninstall it only if the timestamps match real symptoms."
+        if ($serviceSummary -match '(?i)Armoury|ASUS|AURA|ROG') {
+            $serviceRecommendation = "ASUS/Armoury-related services are prominent. Update or repair Armoury Crate/MyASUS/Aura components, then retest. If they still time out or crash, remove unused ASUS utilities deliberately rather than chasing every single service event."
+        } elseif ($serviceSummary -match '(?i)Steam') {
+            $serviceRecommendation = "Steam service failures are prominent. Repair or reinstall the Steam Client Service, verify Steam starts cleanly, and correlate with gaming/runtime events."
+        } elseif ($serviceSummary -match '(?i)WireGuard|Tailscale|OpenVPN|Surfshark') {
+            $serviceRecommendation = "VPN service failures are prominent. Update or repair the VPN client and check whether network symptoms match these timestamps."
+        }
+        $serviceDetails = @()
+        $serviceDetails += (New-ObjectDetailsText -Rows $serviceRows -Title "Service event summary rows")
+        $serviceDetails += (New-EventDetailsText -Rows $serviceEvents)
+        Add-Finding ([ref]$findings) "Medium" "Services" "Service errors or crashes found" $serviceEvidence $serviceRecommendation -EventRows $serviceEvents -DetailText ($serviceDetails -join "`r`n`r`n")
     }
 
     $lowLevelDriverEvents = @($allEvents | Where-Object {
@@ -1650,6 +1754,45 @@ function Write-InitialFindingsReport {
         $lowLevelErrorEvents = @($lowLevelDriverEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -or $_.Id -in @('7000','7001','7009','7011','7022','7023','7024','7026','7031','7032','7034') })
         $driverSeverity = if ($lowLevelErrorEvents.Count -gt 0) { "Medium" } else { "Info" }
         Add-Finding ([ref]$findings) $driverSeverity "Drivers" "Low-level hardware access driver issue detected" "$($lowLevelDriverEvents.Count) event(s) mention inpout, WinRing0, or similar low-level drivers; $($lowLevelErrorEvents.Count) look like start/failure events." "Identify the related monitoring, RGB, fan-control, benchmark, or overclocking tool. Update or remove it if the service repeatedly fails or if instability correlates with these timestamps." -EventRows $lowLevelDriverEvents
+    }
+
+    $driverUtilityPattern = '(?i)\bnvcontainer\.exe\b|NvBackend64\.dll|NvUI\.dll|NVIDIA Corporation|NVIDIA App|GeForce Experience|NVIDIA Share|\bAMDADLXServ\.exe\b|amdadlx|RadeonSoftware|AMDRSServ|ArmouryCrate|Armoury Crate|ASUSSystemAnalysis|AURA|AcPowerNotification|ROGLiveService|ROG Live Service|GlideX|MyASUS'
+    $driverUtilityEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        (
+            ([string]$_.ProviderName -match 'Application Error|Application Hang') -or
+            ([string]$_.Id -in @('1000','1002'))
+        ) -and
+        ([string]$_.Message -match $driverUtilityPattern)
+    })
+    if ($driverUtilityEvents.Count -gt 0) {
+        $driverUtilityRows = @($driverUtilityEvents | ForEach-Object {
+            $crashInfo = Get-AppCrashInfoFromMessage -Message ([string]$_.Message)
+            $vendor = "Driver utility"
+            $signal = "Application crash/hang"
+            if ([string]$_.Message -match '(?i)NVIDIA|nvcontainer|NvBackend|NvUI|GeForce') { $vendor = "NVIDIA" }
+            elseif ([string]$_.Message -match '(?i)AMD|Radeon|amdadlx|AMDRS') { $vendor = "AMD" }
+            elseif ([string]$_.Message -match '(?i)ASUS|Armoury|AURA|ROG|GlideX|MyASUS|AcPowerNotification') { $vendor = "ASUS" }
+            if ([string]$_.ProviderName -match 'Application Hang' -or [string]$_.Id -eq '1002') { $signal = "Application hang" }
+            [PSCustomObject]@{
+                TimeCreated = $_.TimeCreated
+                Source = $_.ProviderName
+                EventId = $_.Id
+                Vendor = $vendor
+                Signal = $signal
+                FaultingApplication = $crashInfo.FaultingApplication
+                FaultingModule = $crashInfo.FaultingModule
+                ExceptionCode = $crashInfo.ExceptionCode
+                ApplicationPath = $crashInfo.ApplicationPath
+            }
+        })
+        $vendorSummary = New-TopCountSummary -Rows $driverUtilityRows -PropertyName "Vendor" -MaxItems 5
+        $appSummary = New-TopCountSummary -Rows $driverUtilityRows -PropertyName "FaultingApplication" -MaxItems 8
+        $moduleSummary = New-TopCountSummary -Rows $driverUtilityRows -PropertyName "FaultingModule" -MaxItems 8
+        $driverDetails = @()
+        $driverDetails += (New-ObjectDetailsText -Rows $driverUtilityRows -Title "Driver utility crash summary rows")
+        $driverDetails += (New-EventDetailsText -Rows $driverUtilityEvents)
+        Add-Finding ([ref]$findings) "Medium" "Drivers" "GPU or vendor utility crashes found" "$($driverUtilityEvents.Count) driver/vendor utility crash or hang event(s). Vendors: $vendorSummary. Apps: $appSummary. Modules: $moduleSummary." "Update or repair the affected GPU/vendor utility stack. For repeated NVIDIA crashes, clean-install the NVIDIA driver/App and test without overlays. For ASUS/Armoury crashes, update or repair Armoury Crate/MyASUS/Aura components or remove unused utilities." -EventRows $driverUtilityEvents -DetailText ($driverDetails -join "`r`n`r`n")
     }
 
     $cs2Events = @($allEvents | Where-Object {
@@ -1668,11 +1811,11 @@ function Write-InitialFindingsReport {
             $exceptionCode = ""
             $faultOffset = ""
             $appPath = ""
-            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung):\s*([^,\r\n]+)') { $faultingApp = $matches[1].Trim() }
-            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls):\s*([^,\r\n]+)') { $faultingModule = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung|Fehlerhafter Anwendungsname):\s*([^,\r\n]+)') { $faultingApp = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls|Fehlerhafter Modulname):\s*([^,\r\n]+)') { $faultingModule = $matches[1].Trim() }
             if ($message -match '(?im)(?:Exception code|Ausnahmecode):\s*(0x[0-9a-f]+)') { $exceptionCode = $matches[1].Trim() }
             if ($message -match '(?im)(?:Fault offset|Fehleroffset):\s*(0x[0-9a-f]+)') { $faultOffset = $matches[1].Trim() }
-            if ($message -match '(?im)(?:Faulting application path|Pfad der fehlerhaften Anwendung):\s*([^\r\n]+)') { $appPath = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting application path|Pfad der fehlerhaften Anwendung|Fehlerhafter Anwendungspfad):\s*([^\r\n]+)') { $appPath = $matches[1].Trim() }
             [PSCustomObject]@{
                 TimeCreated = $_.TimeCreated
                 Source = $_.ProviderName
@@ -1719,6 +1862,7 @@ CS2 interpretation:
         ) -and
         ([string]$_.Message -match $gamingPattern) -and
         ([string]$_.Message -notmatch $nonGamingAppPattern) -and
+        ([string]$_.Message -notmatch $driverUtilityPattern) -and
         ([string]$_.Message -notmatch '(?i)\bcs2\.exe\b|Counter-Strike')
     })
     if ($gamingRelatedEvents.Count -gt 0) {
@@ -1728,10 +1872,10 @@ CS2 interpretation:
             $faultingModule = ""
             $exceptionCode = ""
             $appPath = ""
-            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung):\s*([^,\r\n]+)') { $faultingApp = $matches[1].Trim() }
-            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls):\s*([^,\r\n]+)') { $faultingModule = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung|Fehlerhafter Anwendungsname):\s*([^,\r\n]+)') { $faultingApp = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls|Fehlerhafter Modulname):\s*([^,\r\n]+)') { $faultingModule = $matches[1].Trim() }
             if ($message -match '(?im)(?:Exception code|Ausnahmecode):\s*(0x[0-9a-f]+)') { $exceptionCode = $matches[1].Trim() }
-            if ($message -match '(?im)(?:Faulting application path|Pfad der fehlerhaften Anwendung):\s*([^\r\n]+)') { $appPath = $matches[1].Trim() }
+            if ($message -match '(?im)(?:Faulting application path|Pfad der fehlerhaften Anwendung|Fehlerhafter Anwendungspfad):\s*([^\r\n]+)') { $appPath = $matches[1].Trim() }
 
             $component = "Gaming component"
             $componentType = "Gaming platform"
@@ -1766,8 +1910,8 @@ CS2 interpretation:
             $detail = ""
             if ($message -match '(?i)PresenceServer|PresenceWriter') { $detail = "Presence writer did not register with DCOM in time." }
             elseif ($message -match '(?i)timeout|Zeitüberschreitung|did not register with DCOM') { $detail = "Startup/COM registration timeout." }
-            elseif ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung):\s*([^,\r\n]+)') { $detail = "Faulting application: $($matches[1].Trim())" }
-            elseif ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls):\s*([^,\r\n]+)') { $detail = "Faulting module: $($matches[1].Trim())" }
+            elseif ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung|Fehlerhafter Anwendungsname):\s*([^,\r\n]+)') { $detail = "Faulting application: $($matches[1].Trim())" }
+            elseif ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls|Fehlerhafter Modulname):\s*([^,\r\n]+)') { $detail = "Faulting module: $($matches[1].Trim())" }
             if (-not [string]::IsNullOrWhiteSpace($exceptionCode)) {
                 if (-not [string]::IsNullOrWhiteSpace($detail)) { $detail += " " }
                 $detail += "Exception: $exceptionCode."
@@ -1879,10 +2023,37 @@ DCOM 10016 interpretation:
             ($_.Id -in @('20','1002','1008','1023','5973','1000','10010'))
         ) -and
         ($_.Message -notmatch $gamingPattern) -and
+        ($_.Message -notmatch $driverUtilityPattern) -and
         -not (($_.ProviderName -match 'DistributedCOM') -and ([string]$_.Id -eq '10016'))
     })
     if ($windowsStackEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "Medium" "Windows Stack" "Windows update, app, or performance counter issues found" "$($windowsStackEvents.Count) matching WindowsUpdateClient, Perflib, Application Hang/Error, Store/AppX, or BITS event(s)." "After freeing disk space, run DISM /Online /Cleanup-Image /RestoreHealth and sfc /scannow, then review update and Store health again." -EventRows $windowsStackEvents
+        $windowsStackRows = @($windowsStackEvents | ForEach-Object {
+            $message = [string]$_.Message
+            $crashInfo = Get-AppCrashInfoFromMessage -Message $message
+            $subject = ""
+            if (-not [string]::IsNullOrWhiteSpace([string]$crashInfo.FaultingApplication)) {
+                $subject = $crashInfo.FaultingApplication
+            } elseif ($message -match '(?i)(?:0x[0-9a-f]{8})') {
+                $subject = $matches[0]
+            } else {
+                $subject = [string]$_.ProviderName
+            }
+            [PSCustomObject]@{
+                TimeCreated = $_.TimeCreated
+                Provider = $_.ProviderName
+                EventId = $_.Id
+                Subject = $subject
+                FaultingApplication = $crashInfo.FaultingApplication
+                FaultingModule = $crashInfo.FaultingModule
+                ExceptionCode = $crashInfo.ExceptionCode
+            }
+        })
+        $providerSummary = New-TopCountSummary -Rows $windowsStackRows -PropertyName "Provider" -MaxItems 6
+        $subjectSummary = New-TopCountSummary -Rows $windowsStackRows -PropertyName "Subject" -MaxItems 8
+        $windowsDetails = @()
+        $windowsDetails += (New-ObjectDetailsText -Rows $windowsStackRows -Title "Windows stack summary rows")
+        $windowsDetails += (New-EventDetailsText -Rows $windowsStackEvents)
+        Add-Finding ([ref]$findings) "Medium" "Windows Stack" "Windows update, app, or performance counter issues found" "$($windowsStackEvents.Count) matching WindowsUpdateClient, Perflib, Application Hang/Error, Store/AppX, or BITS event(s). Providers: $providerSummary. Top subjects: $subjectSummary." "Focus on the repeated subjects above. After freeing disk space, run DISM /Online /Cleanup-Image /RestoreHealth and sfc /scannow, then repair the specific app/update component that still repeats." -EventRows $windowsStackEvents -DetailText ($windowsDetails -join "`r`n`r`n")
     }
 
     $disks = Read-CsvSafe (Join-Path $Dirs.Storage "Disks.csv")
@@ -2200,16 +2371,46 @@ Typical command meanings:
             $evidence += " $($completedAnalysisRows.Count) dump analysis file(s) created."
             $detailParts += (New-ObjectDetailsText -Rows $dumpAnalysisRows -Title "Local dump analysis summary")
             if ($suspectRows.Count -gt 0) {
-                $topSuspect = $suspectRows[0]
-                $suspectText = @($topSuspect.ProbablyCausedBy, $topSuspect.ImageName, $topSuspect.ModuleName) |
-                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
-                    Select-Object -First 1
-                $recommendedFromDump = [string]$topSuspect.RecommendedAction
-                if (-not [string]::IsNullOrWhiteSpace([string]$suspectText)) {
-                    $recommendation = "Review suspected dump module '$suspectText' together with BugCheck $($topSuspect.BugCheck). $recommendedFromDump Open the listed DumpAnalysis_*.txt file for the full !analyze -v output."
-                } else {
-                    $recommendation = "$recommendedFromDump Open the listed DumpAnalysis_*.txt file for the full !analyze -v output."
+                $dumpTimesByFile = @{}
+                foreach ($dump in $copiedDumps) {
+                    $dumpTimesByFile[[string](Split-Path -Leaf ([string]$dump.Path))] = [string]$dump.LastWriteTime
                 }
+                $dumpSummaryRows = @($suspectRows | ForEach-Object {
+                    $module = @($_.ImageName, $_.ModuleName, $_.ProbablyCausedBy, $_.FailureBucket) |
+                        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                        Select-Object -First 1
+                    [PSCustomObject]@{
+                        DumpFile = $_.DumpFile
+                        LastWriteTime = $dumpTimesByFile[[string]$_.DumpFile]
+                        BugCheck = $_.BugCheck
+                        SuspectedModule = $module
+                        SuspectedArea = $_.SuspectedArea
+                    }
+                })
+                $summaryText = (@($dumpSummaryRows | Select-Object -First 5 | ForEach-Object {
+                    "$($_.DumpFile): BugCheck $($_.BugCheck), $($_.SuspectedModule), $($_.SuspectedArea)"
+                }) -join "; ")
+                if (-not [string]::IsNullOrWhiteSpace($summaryText)) {
+                    $evidence += " Dump summary: $summaryText."
+                }
+
+                $hasGpuDump = @($suspectRows | Where-Object { ([string]$_.BugCheck -match '^(116|0x116)$') -or (@($_.ImageName,$_.ModuleName,$_.ProbablyCausedBy,$_.FailureBucket) -join ' ') -match '(?i)nvlddmkm|amdkmdag|atikmdag|dxgkrnl' })
+                $hasPciePowerDump = @($suspectRows | Where-Object { (@($_.ImageName,$_.ModuleName,$_.SymbolName,$_.FailureBucket,$_.SuspectedArea) -join ' ') -match '(?i)PciD3Cold|CorePowerRail|PCIe / chipset|pci!PciD3' })
+                $hasUsbPowerDump = @($suspectRows | Where-Object { ([string]$_.BugCheck -match '^(9f|0x9f)$') -or (@($_.ImageName,$_.ModuleName,$_.ProbablyCausedBy,$_.SuspectedArea) -join ' ') -match '(?i)UsbHub|USB / external' })
+                $recommendationParts = @()
+                if ($hasGpuDump.Count -gt 0) {
+                    $recommendationParts += "At least one dump points to a GPU/video TDR path. Clean-install the GPU driver, check GPU thermals/power, disable overlays for one test, and correlate with game or nvlddmkm events."
+                }
+                if ($hasPciePowerDump.Count -gt 0) {
+                    $recommendationParts += "At least one dump points to PCIe/D3Cold device power management. Update BIOS/UEFI, chipset, GPU/storage/device firmware and compare with sleep/resume or power-state timestamps."
+                }
+                if ($hasUsbPowerDump.Count -gt 0) {
+                    $recommendationParts += "At least one dump points to USB or driver power-transition timeout. Test without docks/hubs/non-essential USB devices and update chipset/USB controller drivers."
+                }
+                if ($recommendationParts.Count -eq 0) {
+                    $recommendationParts += "Review the suspected modules and BugCheck codes together with recent driver, firmware, BIOS, Windows update, and hardware changes."
+                }
+                $recommendation = "$($recommendationParts -join ' ') Open the listed DumpAnalysis_*.txt file for the full !analyze -v output."
             } else {
                 $recommendation = "Open 06_Minidumps\\DumpAnalysis.csv and any DumpAnalysis_*.txt files. If analysis was skipped, install Windows Debugging Tools with cdb.exe and rerun the tool."
             }
@@ -2218,7 +2419,7 @@ Typical command meanings:
             $recommendation = "Review the Minidump analysis status below. If cdb.exe was installed during this run, rerun PCDiagLite once so the debugger can be discovered cleanly and the dump can be analyzed."
         } else {
             $evidence += " No local dump analysis status was recorded."
-            $recommendation = "Rerun PCDiagLite v22 or newer. The report should include Minidump analysis status, even when cdb.exe is missing or installation fails."
+            $recommendation = "Rerun the current PCDiagLite version. The report should include Minidump analysis status, even when cdb.exe is missing or installation fails."
         }
 
         Add-Finding ([ref]$findings) "High" "Crash" "Minidumps are included in the package" $evidence $recommendation -TimeContext $dumpTimeInfo.TimeContext -FirstSeen $dumpTimeInfo.FirstSeen -LastSeen $dumpTimeInfo.LastSeen -DetailText ($detailParts -join "`r`n`r`n")
