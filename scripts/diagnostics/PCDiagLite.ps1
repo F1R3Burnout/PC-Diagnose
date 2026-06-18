@@ -1709,7 +1709,8 @@ CS2 interpretation:
         Add-Finding ([ref]$findings) "Medium" "Games" "Counter-Strike 2 crashes detected" "$($cs2Events.Count) CS2 Application Error/Hang event(s). Modules: $moduleSummary. Exception codes: $exceptionSummary." $recommendation -EventRows $cs2Events -DetailText ($detailParts -join "`r`n`r`n")
     }
 
-    $gamingPattern = '(?i)GameBar|Gaming\.GameBar|Xbox|XboxGame|XboxGames|GamingServices|GamingServicesNet|GameInput|GameDVR|GameOverlay|Steam|steam\.exe|steamapps\\common|EpicGamesLauncher|Epic Games|Battle\.net|RiotClient|Riot Games|EasyAntiCheat|EAC|BattlEye|EA app|EADesktop|EA Games|Ubisoft|Ubisoft Game Launcher|GOG Galaxy|DiscordHook|RTSS|RivaTuner|Overwolf|NVIDIA Share|nvcontainer|AMDRSServ|RadeonSoftware|Counter-Strike|cs2\.exe|FortniteClient|League of Legends|VALORANT|RocketLeague|Minecraft|Roblox|EscapeFromTarkov|Cyberpunk2077|GTA5|cod\.exe|ModernWarfare|Warzone'
+    $gamingPattern = '(?i)GameBar|Gaming\.GameBar|Xbox|XboxGame|XboxGames|GamingServices|GamingServicesNet|GameInput|GameDVR|GameOverlay|\bSteam\b|steam\.exe|steamapps\\common|EpicGamesLauncher|Epic Games|Battle\.net|RiotClient|Riot Games|EasyAntiCheat|EAC|BattlEye|EA app|EADesktop|EA Games|Ubisoft|Ubisoft Game Launcher|GOG Galaxy|DiscordHook|RTSS|RivaTuner|Overwolf|NVIDIA Share|nvcontainer|AMDRSServ|RadeonSoftware|Counter-Strike|cs2\.exe|FortniteClient|League of Legends|VALORANT|RocketLeague|Minecraft|Roblox|EscapeFromTarkov|Cyberpunk2077|GTA5|cod\.exe|ModernWarfare|Warzone'
+    $nonGamingAppPattern = '(?i)\bMSTeams\b|MSTeams_|Microsoft Teams|\bTeams\.exe\b|MicrosoftTeams|Teams_'
     $gamingRelatedEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         (
@@ -1717,6 +1718,7 @@ CS2 interpretation:
             ([string]$_.Id -in @('1000','1001','1002','10010','5973','7000','7001','7009','7011','7022','7023','7024','7031','7032','7034'))
         ) -and
         ([string]$_.Message -match $gamingPattern) -and
+        ([string]$_.Message -notmatch $nonGamingAppPattern) -and
         ([string]$_.Message -notmatch '(?i)\bcs2\.exe\b|Counter-Strike')
     })
     if ($gamingRelatedEvents.Count -gt 0) {
@@ -1823,13 +1825,61 @@ Gaming interpretation:
         Add-Finding ([ref]$findings) $gamingSeverity "Games" "Gaming-related errors, crashes, or runtime events found" "$($gamingRelatedEvents.Count) gaming-related event(s). Components: $componentSummary. Signals: $signalSummary." $recommendation -EventRows $gamingRelatedEvents -DetailText ($detailParts -join "`r`n`r`n")
     }
 
+    $dcomPermissionEvents = @($allEvents | Where-Object {
+        (Test-EventLevelAtMost $_ 3) -and
+        ([string]$_.ProviderName -match 'DistributedCOM') -and
+        ([string]$_.Id -eq '10016') -and
+        ([string]$_.Message -match '(?i)Local Activation|Lokal Aktivierung|application-specific|Anwendungsspezifisch|APPID|CLSID')
+    })
+    if ($dcomPermissionEvents.Count -gt 0) {
+        $dcomRows = @($dcomPermissionEvents | ForEach-Object {
+            $message = [string]$_.Message
+            $appContainer = ""
+            $user = ""
+            $clsid = ""
+            $appid = ""
+            if ($message -match '(?im)(?:Benutzer|user)\s+["'']?([^"''\r\n]+?)["'']?\s+\(SID') { $user = $matches[1].Trim() }
+            if ($message -match '(?im)CLSID\s*\r?\n?\s*\{([^}]+)\}') { $clsid = "{{{0}}}" -f $matches[1].Trim() }
+            if ($message -match '(?im)APPID\s*\r?\n?\s*\{([^}]+)\}') { $appid = "{{{0}}}" -f $matches[1].Trim() }
+            if ($message -match '(?im)(?:Anwendungscontainer|application container)\s+["'']([^"''\r\n]+)["'']') { $appContainer = $matches[1].Trim() }
+            $appName = if ($appContainer -match '(?i)MSTeams|Teams') { "Microsoft Teams" } elseif (-not [string]::IsNullOrWhiteSpace($appContainer)) { $appContainer } else { "COM app" }
+            [PSCustomObject]@{
+                TimeCreated = $_.TimeCreated
+                Source = $_.ProviderName
+                EventId = $_.Id
+                App = $appName
+                AppContainer = $appContainer
+                User = $user
+                CLSID = $clsid
+                APPID = $appid
+                Meaning = "A Windows app tried to locally activate a COM component but Windows logged a DCOM permission warning."
+            }
+        })
+        $appSummary = (@($dcomRows | Group-Object App | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+        $dcomSeverity = if ($dcomPermissionEvents.Count -gt 3) { "Medium" } else { "Info" }
+        $dcomInterpretation = @"
+DCOM 10016 interpretation:
+
+- DistributedCOM 10016 means Windows blocked or logged a local COM activation permission for an app/container.
+- For Microsoft Teams and many Microsoft Store/AppX apps this is often noisy and not automatically a root cause.
+- Treat it as relevant mainly if it repeats heavily or the timestamp matches an app crash, login issue, Store/AppX failure, or the exact app not starting.
+- Do not change Component Services permissions just because of a single 10016 entry; that can create more problems than it solves.
+"@
+        $detailParts = @()
+        $detailParts += (New-EventDetailsText -Rows $dcomPermissionEvents)
+        $detailParts += (New-ObjectDetailsText -Rows $dcomRows -Title "DCOM 10016 summary rows")
+        $detailParts += $dcomInterpretation.Trim()
+        Add-Finding ([ref]$findings) $dcomSeverity "Windows Stack" "Windows app DCOM permission warnings found" "$($dcomPermissionEvents.Count) DistributedCOM 10016 event(s). Apps: $appSummary." "Usually no action is required for isolated DCOM 10016 entries. If the same app repeats often or symptoms match the timestamp, repair/reset the affected app from Windows Settings or Microsoft Store before changing Component Services permissions." -EventRows $dcomPermissionEvents -DetailText ($detailParts -join "`r`n`r`n")
+    }
+
     $windowsStackEvents = @($allEvents | Where-Object {
         (Test-EventLevelAtMost $_ 3) -and
         (
             ($_.ProviderName -match 'WindowsUpdateClient|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment|Store|Bits-Client|DistributedCOM') -or
             ($_.Id -in @('20','1002','1008','1023','5973','1000','10010'))
         ) -and
-        ($_.Message -notmatch $gamingPattern)
+        ($_.Message -notmatch $gamingPattern) -and
+        -not (($_.ProviderName -match 'DistributedCOM') -and ([string]$_.Id -eq '10016'))
     })
     if ($windowsStackEvents.Count -gt 0) {
         Add-Finding ([ref]$findings) "Medium" "Windows Stack" "Windows update, app, or performance counter issues found" "$($windowsStackEvents.Count) matching WindowsUpdateClient, Perflib, Application Hang/Error, Store/AppX, or BITS event(s)." "After freeing disk space, run DISM /Online /Cleanup-Image /RestoreHealth and sfc /scannow, then review update and Store health again." -EventRows $windowsStackEvents
