@@ -131,7 +131,7 @@ param(
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 $ToolName = "NetzwerkDiagnose"
-$ToolVersion = "1.0"
+$ToolVersion = "1.1 Focused Sections"
 $Started = Get-Date
 $ComputerSafe = ($env:COMPUTERNAME -replace '[\\/:*?"<>| ]', '_')
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -288,6 +288,19 @@ function Test-RowProblem {
     return $false
 }
 
+function Test-RowPromotedStandard {
+    param([AllowNull()][object]$Row)
+
+    if ($null -eq $Row) { return $false }
+    if ($Row.PSObject.Properties.Name -contains "Status") {
+        if ([string]$Row.Status -match '(?i)^up$|connected|online') { return $true }
+    }
+    if ($Row.PSObject.Properties.Name -contains "Result") {
+        if ([string]$Row.Result -match '(?i)measured') { return $true }
+    }
+    return $false
+}
+
 function New-SectionTitle {
     param(
         [string]$Title,
@@ -383,23 +396,35 @@ function New-ReportSection {
         [object[]]$Rows,
         [string[]]$Columns,
         [string]$EmptyMessage = "No data collected.",
-        [switch]$IncludeSkippedRows
+        [switch]$IncludeSkippedRows,
+        [switch]$AlwaysOpen,
+        [switch]$PromoteStandardRows
     )
 
     $items = @($Rows)
+    $nonSkipped = @($items | Where-Object { -not (Test-RowSkipped $_) })
+    if (-not $IncludeSkippedRows -and $items.Count -gt 0 -and $nonSkipped.Count -eq 0) {
+        return ""
+    }
     $visible = if ($IncludeSkippedRows) { @($items) } else { @($items | Where-Object { -not (Test-RowSkipped $_) }) }
     $problemRows = @($visible | Where-Object { Test-RowProblem $_ })
-    $standardRows = @($visible | Where-Object { -not (Test-RowProblem $_) })
+    $promotedRows = if ($PromoteStandardRows) { @($visible | Where-Object { -not (Test-RowProblem $_) -and (Test-RowPromotedStandard $_) }) } else { @() }
+    $standardRows = @($visible | Where-Object { -not (Test-RowProblem $_) -and -not (($PromoteStandardRows) -and (Test-RowPromotedStandard $_)) })
     $summary = Escape-Html (New-SectionTitle -Title $Title -Rows $items)
-    $openAttr = if ($problemRows.Count -gt 0) { " open" } else { "" }
+    $openAttr = if ($AlwaysOpen -or $problemRows.Count -gt 0 -or $promotedRows.Count -gt 0) { " open" } else { "" }
     $problemHtml = ""
     if ($problemRows.Count -gt 0) {
         $problemHtml = "<div class=""problem-block""><h3>Needs attention</h3>$(New-ResultTable $problemRows $Columns $EmptyMessage)</div>"
     }
 
+    $promotedHtml = ""
+    if ($promotedRows.Count -gt 0) {
+        $promotedHtml = "<div class=""standard-block""><h3>Active / measured rows</h3>$(New-ResultTable $promotedRows $Columns $EmptyMessage)</div>"
+    }
+
     $standardHtml = ""
     if ($standardRows.Count -gt 0) {
-        if ($problemRows.Count -gt 0) {
+        if ($problemRows.Count -gt 0 -or $promotedRows.Count -gt 0) {
             $standardHtml = "<details class=""inner-fold""><summary>Standard rows ($($standardRows.Count))</summary>$(New-ResultTable $standardRows $Columns $EmptyMessage -IncludeSkipped:$IncludeSkippedRows)</details>"
         } else {
             $standardHtml = New-ResultTable $standardRows $Columns $EmptyMessage -IncludeSkipped:$IncludeSkippedRows
@@ -408,7 +433,7 @@ function New-ReportSection {
         $standardHtml = New-ResultTable $visible $Columns $EmptyMessage -IncludeSkipped:$IncludeSkippedRows
     }
 
-    return "<details id=""$Id"" class=""fold-section section-card $Kind""$openAttr><summary>$summary</summary><div class=""fold-body"">$problemHtml$standardHtml</div></details>"
+    return "<details id=""$Id"" class=""fold-section section-card $Kind""$openAttr><summary>$summary</summary><div class=""fold-body"">$problemHtml$promotedHtml$standardHtml</div></details>"
 }
 
 function Get-HtmlCellClass {
@@ -1667,7 +1692,7 @@ function New-HtmlReport {
 
     $sectionSpecs = @(
         @{ Id="system"; Title="System information"; Kind="utility"; Rows=$Data.SystemInfo; Columns=@("ComputerName","UserName","DomainOrWorkgroup","PartOfDomain","Windows","BuildNumber","PowerShellVersion","UptimeDays","DateTime","TimeZone","IsAdmin"); Empty="No system information was collected." },
-        @{ Id="adapters"; Title="Main network adapters"; Kind="network"; Rows=$Data.MainAdapters; Columns=@("Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile"); Empty="No non-VPN network adapter was detected." },
+        @{ Id="adapters"; Title="Main network adapters"; Kind="network"; Rows=$Data.MainAdapters; Columns=@("Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile"); Empty="No non-VPN network adapter was detected."; PromoteStandard=$true },
         @{ Id="routes"; Title="Main IP configuration and routing"; Kind="network"; Rows=$Data.MainRoutes; Columns=@("DestinationPrefix","NextHop","InterfaceAlias","RouteMetric","InterfaceMetric"); Empty="No non-VPN routes were detected." },
         @{ Id="targets"; Title="Main detected target matrix"; Kind="network"; Rows=$Data.MainTargetMatrix; Columns=@("Role","Target","InterfaceAlias","Source","TargetType","TestPing","TestDns","TcpPorts"); Empty="No targets were detected." },
         @{ Id="ping"; Title="Main ping tests"; Kind="network"; Rows=$Data.MainPing; Columns=@("Severity","Role","Target","ResolvedAddress","InterfaceAlias","LossPercent","AvgMs","JitterMs","Result","Recommendation"); Empty="No ping tests were collected." },
@@ -1678,7 +1703,7 @@ function New-HtmlReport {
         @{ Id="wlan"; Title="WLAN diagnostics"; Kind="network"; Rows=$Data.Wlan; Columns=@("RowType","Severity","Name","SSID","BSSID","SignalPercent","RadioType","Band","Channel","ReceiveRate","TransmitRate","Authentication","Cipher","Profile","Details","Recommendation"); Empty="No WLAN interface was detected." },
         @{ Id="smb"; Title="SMB / NAS test"; Kind="utility"; Rows=$Data.Smb; Columns=@("Severity","Path","Host","Tcp445","TestPath","WriteMBps","ReadMBps","Details"); Empty="No SMB/NAS test data was collected." },
         @{ Id="iperf"; Title="iPerf3 LAN speed test"; Kind="utility"; Rows=$Data.Iperf; Columns=@("Severity","Target","Mode","Mbps","Retransmits","Result","Details"); Empty="No iPerf3 data was collected." },
-        @{ Id="speedtest"; Title="Internet speed test"; Kind="utility"; Rows=$Data.Speedtest; Columns=@("Severity","Tool","Server","DownloadMbps","UploadMbps","PingMs","Details"); Empty="No internet speed data was collected." },
+        @{ Id="speedtest"; Title="Internet speed test"; Kind="utility"; Rows=$Data.Speedtest; Columns=@("Severity","Tool","Server","DownloadMbps","UploadMbps","PingMs","Details"); Empty="No internet speed data was collected."; AlwaysOpen=$true; PromoteStandard=$true },
         @{ Id="firewall"; Title="Main firewall and network profiles"; Kind="utility"; Rows=$Data.MainFirewall; Columns=@("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction"); Empty="No firewall profile data was collected." },
         @{ Id="services"; Title="Windows network services"; Kind="utility"; Rows=$Data.Services; Columns=@("Name","DisplayName","Status","StartType"); Empty="No network service data was collected." },
         @{ Id="subnet"; Title="Subnet discovery"; Kind="network"; Rows=$Data.SubnetDiscovery; Columns=@("Address","MacAddress","State","Source","Result"); Empty="No subnet discovery data was collected." },
@@ -1686,7 +1711,7 @@ function New-HtmlReport {
     )
 
     $sectionsHtml = ($sectionSpecs | ForEach-Object {
-        New-ReportSection -Id $_.Id -Title $_.Title -Kind $_.Kind -Rows $_.Rows -Columns $_.Columns -EmptyMessage $_.Empty
+        New-ReportSection -Id $_.Id -Title $_.Title -Kind $_.Kind -Rows $_.Rows -Columns $_.Columns -EmptyMessage $_.Empty -AlwaysOpen:([bool]$_.AlwaysOpen) -PromoteStandardRows:([bool]$_.PromoteStandard)
     }) -join "`n"
 
     $skippedRows = New-Object System.Collections.Generic.List[object]
@@ -1781,6 +1806,7 @@ function New-HtmlReport {
     details.section-card > summary::-webkit-details-marker { display:none; }
     details.section-card[open] > summary { border-bottom:1px solid rgba(15,23,42,.08); }
     .problem-block h3 { margin-top:14px; color:#7f1d1d; }
+    .standard-block h3 { margin-top:14px; color:#14532d; }
     .inner-fold { background:rgba(255,255,255,.7); }
     .inner-fold > summary { color:var(--muted); }
     .inner-fold .table-wrap { border-radius:0 0 8px 8px; }
