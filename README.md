@@ -139,6 +139,7 @@ Running remote PowerShell code requires trust in this repository.
 - WLAN details from Windows built-in diagnostics: active connection, signal, BSSID, band, channel, rates, security mode, driver data, nearby BSSIDs, saved profiles, and Windows WLAN report path when available
 - Network event logs, cautious subnet discovery, and internet speed test run by default
 - Gaming-related error interpretation for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, game paths, and Counter-Strike 2 (`cs2.exe`)
+- Windows Error Reporting appcrash collection for deeper game and application crash context
 - More precise NVIDIA/AMD/ASUS vendor utility, graphics driver, service, Windows Update, AppX, and application hang checks
 - Minidump copies in the ZIP and optional local `!analyze -v` interpretation
 - Detailed network report for adapters, routes, gateway, DNS, TCP reachability, Wi-Fi, firewall profile, services, optional events, traceroute, MTU, SMB, iperf3, and speed tests

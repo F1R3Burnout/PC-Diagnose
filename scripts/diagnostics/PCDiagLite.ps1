@@ -84,6 +84,7 @@ $Dirs = @{
     Power     = Join-Path $Out "05_Power"
     Dumps     = Join-Path $Out "06_Minidumps"
     Policies  = Join-Path $Out "07_Policies"
+    WER       = Join-Path $Out "08_WER"
     Runtime   = Join-Path $Out "99_Runtime"
 }
 
@@ -946,18 +947,63 @@ function Get-AppCrashInfoFromMessage {
     $faultingApp = ""
     $faultingModule = ""
     $exceptionCode = ""
+    $faultOffset = ""
     $appPath = ""
+    $modulePath = ""
+    $reportId = ""
     if ($Message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung|Fehlerhafter Anwendungsname):\s*([^,\r\n]+)') { $faultingApp = $matches[1].Trim() }
     if ($Message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls|Fehlerhafter Modulname):\s*([^,\r\n]+)') { $faultingModule = $matches[1].Trim() }
     if ($Message -match '(?im)(?:Exception code|Ausnahmecode):\s*(0x[0-9a-f]+)') { $exceptionCode = $matches[1].Trim() }
+    if ($Message -match '(?im)(?:Fault offset|Fehleroffset):\s*(0x[0-9a-f]+)') { $faultOffset = $matches[1].Trim() }
     if ($Message -match '(?im)(?:Faulting application path|Pfad der fehlerhaften Anwendung|Fehlerhafter Anwendungspfad):\s*([^\r\n]+)') { $appPath = $matches[1].Trim() }
+    if ($Message -match '(?im)(?:Faulting module path|Pfad des fehlerhaften Moduls|Fehlerhafter Modulpfad):\s*([^\r\n]+)') { $modulePath = $matches[1].Trim() }
+    if ($Message -match '(?im)(?:Report Id|Berichtskennung|Berichts-ID):\s*([^\r\n]+)') { $reportId = $matches[1].Trim() }
 
     return [PSCustomObject]@{
         FaultingApplication = $faultingApp
         FaultingModule      = $faultingModule
         ExceptionCode       = $exceptionCode
+        FaultOffset         = $faultOffset
         ApplicationPath     = $appPath
+        FaultingModulePath  = $modulePath
+        ReportId            = $reportId
     }
+}
+
+function Get-WerFieldValue {
+    param(
+        [hashtable]$Fields,
+        [string[]]$Names
+    )
+
+    foreach ($name in @($Names)) {
+        if ($Fields.ContainsKey($name) -and -not [string]::IsNullOrWhiteSpace([string]$Fields[$name])) {
+            return [string]$Fields[$name]
+        }
+    }
+
+    return ""
+}
+
+function Get-WerSignatureValue {
+    param(
+        [hashtable]$Fields,
+        [string]$SignatureNamePattern
+    )
+
+    $sigIndexes = @($Fields.Keys |
+        Where-Object { $_ -match '^Sig\[(\d+)\]\.Name$' -and [string]$Fields[$_] -match $SignatureNamePattern } |
+        ForEach-Object { [int]([regex]::Match($_, '\d+').Value) } |
+        Sort-Object)
+
+    foreach ($index in $sigIndexes) {
+        $valueKey = "Sig[$index].Value"
+        if ($Fields.ContainsKey($valueKey) -and -not [string]::IsNullOrWhiteSpace([string]$Fields[$valueKey])) {
+            return [string]$Fields[$valueKey]
+        }
+    }
+
+    return ""
 }
 
 function Get-ServiceNameFromEventMessage {
@@ -1481,6 +1527,11 @@ function Write-InitialFindingsReport {
     $allEvents = @($targeted + $systemEvents + $applicationEvents) |
         Group-Object { "$($_.TimeCreated)|$($_.LogName)|$($_.ProviderName)|$($_.Id)" } |
         ForEach-Object { $_.Group[0] }
+    $werReports = Read-CsvSafe (Join-Path $Dirs.WER "WindowsErrorReporting_RecentReports.csv")
+    $relevantDriverRows = Read-CsvSafe (Join-Path $Dirs.System "Relevant_Drivers_Network_Storage_System.csv")
+    $basicDisplayRows = @($relevantDriverRows | Where-Object {
+        "$($_.DeviceName) $($_.Manufacturer) $($_.DriverProviderName) $($_.ClassName)" -match '(?i)Microsoft Basic Display Driver|Standard display types'
+    })
 
     $bugCheckEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and ($_.ProviderName -match 'BugCheck' -or $_.Id -eq '1001') })
     if ($bugCheckEvents.Count -gt 0) {
@@ -1502,6 +1553,10 @@ function Write-InitialFindingsReport {
         $wheaSeverity = if ($wheaEvents.Count -eq 1 -and [string]$wheaEvents[0].Id -eq '17') { "Medium" } else { "High" }
         $wheaTitle = if ($wheaSeverity -eq "Medium") { "Single corrected WHEA / PCIe hardware error" } else { "WHEA hardware error events found" }
         Add-Finding ([ref]$findings) $wheaSeverity "Hardware" $wheaTitle "$($wheaEvents.Count) WHEA-Logger event(s)." "Identify the affected device from the Event Viewer details. Update BIOS/UEFI, chipset, storage, GPU, and device drivers; reduce unstable overclocking or XMP/EXPO if the events repeat." -EventRows $wheaEvents
+    }
+
+    if ($basicDisplayRows.Count -gt 0) {
+        Add-Finding ([ref]$findings) "High" "Drivers" "Microsoft Basic Display Driver appears to be active" "$($basicDisplayRows.Count) display driver row(s) show Microsoft Basic Display Driver or standard display types." "Install the correct NVIDIA, AMD, Intel, or OEM graphics driver for this PC before chasing game crashes or rendering problems. Games such as Counter-Strike 2 should not be tested on the Microsoft Basic Display Driver." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $basicDisplayRows -Title "Display driver rows")
     }
 
     $storageEvents = @($allEvents | Where-Object {
@@ -1806,34 +1861,79 @@ function Write-InitialFindingsReport {
     if ($cs2Events.Count -gt 0) {
         $cs2Rows = @($cs2Events | ForEach-Object {
             $message = [string]$_.Message
-            $faultingApp = ""
-            $faultingModule = ""
-            $exceptionCode = ""
-            $faultOffset = ""
-            $appPath = ""
-            if ($message -match '(?im)(?:Faulting application name|Name der fehlerhaften Anwendung|Fehlerhafter Anwendungsname):\s*([^,\r\n]+)') { $faultingApp = $matches[1].Trim() }
-            if ($message -match '(?im)(?:Faulting module name|Name des fehlerhaften Moduls|Fehlerhafter Modulname):\s*([^,\r\n]+)') { $faultingModule = $matches[1].Trim() }
-            if ($message -match '(?im)(?:Exception code|Ausnahmecode):\s*(0x[0-9a-f]+)') { $exceptionCode = $matches[1].Trim() }
-            if ($message -match '(?im)(?:Fault offset|Fehleroffset):\s*(0x[0-9a-f]+)') { $faultOffset = $matches[1].Trim() }
-            if ($message -match '(?im)(?:Faulting application path|Pfad der fehlerhaften Anwendung|Fehlerhafter Anwendungspfad):\s*([^\r\n]+)') { $appPath = $matches[1].Trim() }
+            $crashInfo = Get-AppCrashInfoFromMessage -Message $message
+            $meaning = "Windows captured a CS2 crash."
+            if ([string]$crashInfo.ExceptionCode -match '0xc0000005') {
+                $meaning = "Access violation: CS2 tried to read or execute invalid memory. Common game causes are GPU driver issues, overlays/injectors, corrupted game/cache files, unstable RAM/GPU settings, or a game-side bug."
+            }
+            if ([string]$crashInfo.FaultingModule -match '^(unknown)?$' -or [string]::IsNullOrWhiteSpace([string]$crashInfo.FaultingModule)) {
+                $meaning += " Event Viewer could not identify the faulting module, so WER/local dumps are needed for a deeper culprit."
+            } elseif ([string]$crashInfo.FaultingModule -match 'scenesystem\.dll') {
+                $meaning += " scenesystem.dll is part of the CS2 rendering/scene stack."
+            }
             [PSCustomObject]@{
-                TimeCreated = $_.TimeCreated
-                Source = $_.ProviderName
-                EventId = $_.Id
-                FaultingApplication = $faultingApp
-                FaultingModule = $faultingModule
-                ExceptionCode = $exceptionCode
-                FaultOffset = $faultOffset
-                ApplicationPath = $appPath
+                TimeCreated          = $_.TimeCreated
+                Source               = $_.ProviderName
+                EventId              = $_.Id
+                FaultingApplication  = $crashInfo.FaultingApplication
+                FaultingModule       = $crashInfo.FaultingModule
+                FaultingModulePath   = $crashInfo.FaultingModulePath
+                ExceptionCode        = $crashInfo.ExceptionCode
+                FaultOffset          = $crashInfo.FaultOffset
+                ReportId             = $crashInfo.ReportId
+                ApplicationPath      = $crashInfo.ApplicationPath
+                Interpretation       = $meaning
             }
         })
         $moduleSummary = (@($cs2Rows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.FaultingModule) } | Group-Object FaultingModule | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
         $exceptionSummary = (@($cs2Rows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.ExceptionCode) } | Group-Object ExceptionCode | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+        $offsetSummary = (@($cs2Rows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.FaultOffset) } | Group-Object FaultOffset | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
         if ([string]::IsNullOrWhiteSpace($moduleSummary)) { $moduleSummary = "not captured" }
         if ([string]::IsNullOrWhiteSpace($exceptionSummary)) { $exceptionSummary = "not captured" }
+        if ([string]::IsNullOrWhiteSpace($offsetSummary)) { $offsetSummary = "not captured" }
         $hasSceneSystem = $cs2Rows | Where-Object { [string]$_.FaultingModule -match 'scenesystem\.dll' } | Select-Object -First 1
         $hasAccessViolation = $cs2Rows | Where-Object { [string]$_.ExceptionCode -match '0xc0000005' } | Select-Object -First 1
+        $hasUnknownModule = $cs2Rows | Where-Object { [string]$_.FaultingModule -match '^(unknown)?$' -or [string]::IsNullOrWhiteSpace([string]$_.FaultingModule) } | Select-Object -First 1
+        $cs2WerRows = @($werReports | Where-Object {
+            "$($_.AppName) $($_.ApplicationPath) $($_.ReportPath) $($_.FaultModule)" -match '(?i)\bcs2\.exe\b|Counter-Strike'
+        })
+        $steamCrashEvents = @($allEvents | Where-Object {
+            (Test-EventLevelAtMost $_ 3) -and
+            ([string]$_.ProviderName -match 'Application Error|Application Hang') -and
+            ([string]$_.Message -match '(?i)steamwebhelper\.exe|steam\.exe|Steam')
+        })
+        $nearbyEvents = @()
+        foreach ($cs2Event in $cs2Events) {
+            $cs2Time = ConvertTo-DateTimeSafe ([string]$cs2Event.TimeCreated)
+            if ($null -eq $cs2Time) { continue }
+            $nearbyEvents += @($allEvents | Where-Object {
+                $eventTime = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+                $null -ne $eventTime -and
+                [math]::Abs(($eventTime - $cs2Time).TotalMinutes) -le 10 -and
+                -not (
+                    [string]$_.ProviderName -eq [string]$cs2Event.ProviderName -and
+                    [string]$_.Id -eq [string]$cs2Event.Id -and
+                    [string]$_.TimeCreated -eq [string]$cs2Event.TimeCreated
+                )
+            })
+        }
+        $nearbyEvents = @($nearbyEvents |
+            Group-Object { "$($_.TimeCreated)|$($_.ProviderName)|$($_.Id)|$($_.Message)" } |
+            ForEach-Object { $_.Group[0] } |
+            Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) }; Descending = $true } |
+            Select-Object -First 30)
+
+        $evidenceParts = @("$($cs2Events.Count) CS2 Application Error/Hang event(s)", "Modules: $moduleSummary", "Exception codes: $exceptionSummary", "Fault offsets: $offsetSummary")
+        if ($cs2WerRows.Count -gt 0) { $evidenceParts += "$($cs2WerRows.Count) matching Windows Error Reporting row(s)" }
+        if ($basicDisplayRows.Count -gt 0) { $evidenceParts += "Microsoft Basic Display Driver is present" }
+        if ($steamCrashEvents.Count -gt 0) { $evidenceParts += "$($steamCrashEvents.Count) Steam crash/hang event(s) also captured" }
+
         $recommendation = "In Steam, verify Counter-Strike 2 game files. Then test once with launch options, autoexec/custom config, overlays, capture tools, and third-party injectors disabled. Update or clean-install the GPU driver and retest with GPU/RAM overclocking or XMP/EXPO disabled if the crashes repeat."
+        if ($basicDisplayRows.Count -gt 0) {
+            $recommendation = "Install the correct GPU driver first. This report shows Microsoft Basic Display Driver, which is not a usable gaming driver for CS2. After installing the NVIDIA/AMD/Intel/OEM driver, reboot, verify Steam game files, and retest without overlays or launch options."
+        } elseif ($hasUnknownModule -and $hasAccessViolation) {
+            $recommendation = "CS2 crashed with 0xc0000005, but Event Viewer reports the faulting module as unknown. Verify game files, disable overlays/injectors and launch options for one test, clean-install the GPU driver, and use the WER details or a LocalDumps capture if it repeats because Event Viewer alone cannot name the culprit."
+        }
         if ($hasSceneSystem -and $hasAccessViolation) {
             $recommendation = "CS2 is crashing in scenesystem.dll with 0xc0000005, an access violation. Verify game files in Steam, remove launch options/autoexec/custom configs for one test, disable overlays/capture tools, update or clean-install the GPU driver, clear shader cache, and test without GPU/RAM overclocking or XMP/EXPO if it repeats."
         }
@@ -1843,13 +1943,40 @@ CS2 interpretation:
 - cs2.exe is the Counter-Strike 2 game process.
 - scenesystem.dll is part of the game/client rendering and scene stack.
 - 0xc0000005 means access violation. For games this is often caused by corrupted game files, overlays/injectors, graphics driver issues, shader/cache problems, unstable RAM/GPU settings, or a game-side bug.
+- Faulting module "unknown" means Event Viewer did not receive a precise module name. WER reports or LocalDumps are the next useful source for this kind of user-mode crash.
 - If the timestamps line up with driver resets, WHEA, disk errors, or high storage temperature in this report, prioritize those system findings too.
 "@
         $detailParts = @()
         $detailParts += (New-EventDetailsText -Rows $cs2Events)
         $detailParts += (New-ObjectDetailsText -Rows $cs2Rows -Title "CS2 crash summary rows")
+        if ($cs2WerRows.Count -gt 0) {
+            $detailParts += (New-ObjectDetailsText -Rows $cs2WerRows -Title "Windows Error Reporting rows for CS2")
+        } else {
+            $detailParts += "Windows Error Reporting rows for CS2: 0`r`nNo matching Report.wer file was collected. If the crash repeats, enable Windows Error Reporting LocalDumps for cs2.exe or preserve the WER report before cleanup."
+        }
+        if ($basicDisplayRows.Count -gt 0) {
+            $detailParts += (New-ObjectDetailsText -Rows $basicDisplayRows -Title "Display driver rows connected to this finding")
+        }
+        if ($steamCrashEvents.Count -gt 0) {
+            $steamCrashRows = @($steamCrashEvents | Select-Object -First 12 | ForEach-Object {
+                $steamInfo = Get-AppCrashInfoFromMessage -Message ([string]$_.Message)
+                [PSCustomObject]@{
+                    TimeCreated = $_.TimeCreated
+                    Source = $_.ProviderName
+                    EventId = $_.Id
+                    FaultingApplication = $steamInfo.FaultingApplication
+                    FaultingModule = $steamInfo.FaultingModule
+                    ExceptionCode = $steamInfo.ExceptionCode
+                    ApplicationPath = $steamInfo.ApplicationPath
+                }
+            })
+            $detailParts += (New-ObjectDetailsText -Rows $steamCrashRows -Title "Steam crash or hang context rows")
+        }
+        if ($nearbyEvents.Count -gt 0) {
+            $detailParts += (New-EventDetailsText -Rows $nearbyEvents)
+        }
         $detailParts += $cs2Interpretation.Trim()
-        Add-Finding ([ref]$findings) "Medium" "Games" "Counter-Strike 2 crashes detected" "$($cs2Events.Count) CS2 Application Error/Hang event(s). Modules: $moduleSummary. Exception codes: $exceptionSummary." $recommendation -EventRows $cs2Events -DetailText ($detailParts -join "`r`n`r`n")
+        Add-Finding ([ref]$findings) "Medium" "Games" "Counter-Strike 2 crashes detected" (($evidenceParts -join ". ") + ".") $recommendation -EventRows $cs2Events -DetailText ($detailParts -join "`r`n`r`n")
     }
 
     $gamingPattern = '(?i)GameBar|Gaming\.GameBar|Xbox|XboxGame|XboxGames|GamingServices|GamingServicesNet|GameInput|GameDVR|GameOverlay|\bSteam\b|steam\.exe|steamapps\\common|EpicGamesLauncher|Epic Games|Battle\.net|RiotClient|Riot Games|EasyAntiCheat|EAC|BattlEye|EA app|EADesktop|EA Games|Ubisoft|Ubisoft Game Launcher|GOG Galaxy|DiscordHook|RTSS|RivaTuner|Overwolf|NVIDIA Share|nvcontainer|AMDRSServ|RadeonSoftware|Counter-Strike|cs2\.exe|FortniteClient|League of Legends|VALORANT|RocketLeague|Minecraft|Roblox|EscapeFromTarkov|Cyberpunk2077|GTA5|cod\.exe|ModernWarfare|Warzone'
@@ -3935,7 +4062,108 @@ if (`$UseStartTime) {
 Invoke-ChildPowerShellWithTimeout -Name "Event log analysis System Application Targeted" -ScriptContent $EventScript -TimeoutSeconds $EventTimeoutSeconds | Out-Null
 
 # ==================================================================================================
-# Section 10: Minidumps, but no huge MEMORY.DMP
+# Section 10: Windows Error Reporting app crash reports
+# ==================================================================================================
+# Why:
+# User-mode crashes such as games usually do not create C:\Windows\Minidump files.
+# WER Report.wer files often contain the app, module, exception, and report ID that tie back to Event Viewer.
+
+Invoke-Step "Collect Windows Error Reporting app crash reports" {
+    $werRoots = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        $werRoots += (Join-Path $env:ProgramData "Microsoft\Windows\WER\ReportArchive")
+        $werRoots += (Join-Path $env:ProgramData "Microsoft\Windows\WER\ReportQueue")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $werRoots += (Join-Path $env:LOCALAPPDATA "Microsoft\Windows\WER\ReportArchive")
+        $werRoots += (Join-Path $env:LOCALAPPDATA "Microsoft\Windows\WER\ReportQueue")
+    }
+    $werRoots = @($werRoots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
+    $startTime = if ($DaysBack -gt 0) { (Get-Date).AddDays(-$DaysBack) } else { $null }
+    $werFiles = @()
+    foreach ($root in $werRoots) {
+        if (Test-Path -LiteralPath $root) {
+            $werFiles += @(Get-ChildItem -LiteralPath $root -Recurse -Filter "Report.wer" -File -ErrorAction SilentlyContinue)
+        }
+    }
+
+    if ($null -ne $startTime) {
+        $werFiles = @($werFiles | Where-Object { $_.LastWriteTime -ge $startTime })
+    }
+
+    $werFiles = @($werFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 120)
+    $werRows = @()
+    $copyIndex = 1
+
+    foreach ($file in $werFiles) {
+        try {
+            $lines = @(Get-Content -LiteralPath $file.FullName -ErrorAction Stop)
+            $fields = @{}
+            foreach ($line in $lines) {
+                if ($line -match '^([^=]+)=(.*)$') {
+                    $fields[$matches[1]] = $matches[2]
+                }
+            }
+
+            $appName = Get-WerFieldValue $fields @("AppName","AppPath","TargetAppId")
+            $eventType = Get-WerFieldValue $fields @("EventType")
+            $friendlyName = Get-WerFieldValue $fields @("FriendlyEventName","ConsentKey")
+            $faultModule = Get-WerSignatureValue $fields '(?i)fault.*module|problem.*module|module'
+            $exceptionCode = Get-WerSignatureValue $fields '(?i)exception|code'
+            $appPath = Get-WerSignatureValue $fields '(?i)application path|app path'
+            if ([string]::IsNullOrWhiteSpace($appPath)) {
+                $appPath = Get-WerFieldValue $fields @("AppPath")
+            }
+            if ([string]::IsNullOrWhiteSpace($appName) -and -not [string]::IsNullOrWhiteSpace($appPath)) {
+                $appName = Split-Path -Leaf $appPath
+            }
+
+            $combined = "$($file.DirectoryName) $appName $eventType $friendlyName $faultModule $exceptionCode $appPath"
+            $isCrashReport = $combined -match '(?i)APPCRASH|BEX|Stopped working|Nicht mehr funktionsfähig|crash|hang|cs2|steam|game|counter-strike|xbox|gaming'
+            $copiedReport = ""
+            if ($isCrashReport -and $copyIndex -le 30) {
+                $safeApp = if ([string]::IsNullOrWhiteSpace($appName)) { "app" } else { $appName }
+                $safeApp = ($safeApp -replace '[\\/:*?"<>|\s]+', '_').Trim('_')
+                if ([string]::IsNullOrWhiteSpace($safeApp)) { $safeApp = "app" }
+                $copiedName = "WER_Report_{0:000}_{1}.wer.txt" -f $copyIndex, $safeApp
+                $copiedPath = Join-Path $Dirs.WER $copiedName
+                Copy-Item -LiteralPath $file.FullName -Destination $copiedPath -Force -ErrorAction SilentlyContinue
+                $copiedReport = "08_WER\$copiedName"
+                $copyIndex++
+            }
+
+            $werRows += [PSCustomObject]@{
+                LastWriteTime     = $file.LastWriteTime
+                AppName           = $appName
+                EventType         = $eventType
+                FriendlyEventName = $friendlyName
+                FaultModule       = $faultModule
+                ExceptionCode     = $exceptionCode
+                ApplicationPath   = $appPath
+                ReportPath        = $file.FullName
+                PackagePath       = $copiedReport
+            }
+        } catch {
+            $werRows += [PSCustomObject]@{
+                LastWriteTime     = $file.LastWriteTime
+                AppName           = ""
+                EventType         = "ReadError"
+                FriendlyEventName = $_.Exception.Message
+                FaultModule       = ""
+                ExceptionCode     = ""
+                ApplicationPath   = ""
+                ReportPath        = $file.FullName
+                PackagePath       = ""
+            }
+        }
+    }
+
+    $werRows | Export-Csv (Join-Path $Dirs.WER "WindowsErrorReporting_RecentReports.csv") -NoTypeInformation -Encoding UTF8
+}
+
+# ==================================================================================================
+# Section 11: Minidumps, but no huge MEMORY.DMP
 # ==================================================================================================
 # Why:
 # Small minidumps are very useful for blue screens.
