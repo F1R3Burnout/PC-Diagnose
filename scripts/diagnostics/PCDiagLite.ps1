@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "1.6 WER Crash Context"
+$ToolVersion = "1.7 Source Tracing"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -409,13 +409,57 @@ $Body
 "@
 }
 
+function ConvertTo-PackageRelativePath {
+    param([AllowNull()][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath([string]$Path)
+        $rootPath = [System.IO.Path]::GetFullPath([string]$Dirs.Root).TrimEnd('\')
+        if ($fullPath.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $fullPath.Substring($rootPath.Length).TrimStart('\')
+        }
+        return $fullPath
+    } catch {
+        return [string]$Path
+    }
+}
+
+function Add-SourceInfoToRows {
+    param(
+        [object[]]$Rows,
+        [string]$SourceFile,
+        [int]$FirstEntryNumber = 1,
+        [string]$EntryPrefix = "row"
+    )
+
+    $items = @($Rows)
+    $sourceText = ConvertTo-PackageRelativePath $SourceFile
+    $entryNumber = $FirstEntryNumber
+    foreach ($row in $items) {
+        try {
+            if ($null -eq $row.PSObject.Properties["SourceFile"]) {
+                $row | Add-Member -NotePropertyName "SourceFile" -NotePropertyValue $sourceText -Force
+            }
+            if ($null -eq $row.PSObject.Properties["SourceEntry"]) {
+                $row | Add-Member -NotePropertyName "SourceEntry" -NotePropertyValue "$EntryPrefix $entryNumber" -Force
+            }
+        } catch {}
+        $entryNumber++
+    }
+
+    return $items
+}
+
 function Read-CsvSafe {
     param([Parameter(Mandatory=$true)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) { return @() }
 
     try {
-        return @(Import-Csv -LiteralPath $Path -ErrorAction Stop)
+        $rows = @(Import-Csv -LiteralPath $Path -ErrorAction Stop)
+        return @(Add-SourceInfoToRows -Rows $rows -SourceFile $Path -FirstEntryNumber 2 -EntryPrefix "CSV row")
     } catch {
         return @()
     }
@@ -673,7 +717,10 @@ function Add-Finding {
                 LogName          = [string]$eventRow.LogName
                 ProviderName     = [string]$eventRow.ProviderName
                 EventId          = [string]$eventRow.Id
+                RecordId         = [string]$eventRow.RecordId
                 LevelDisplayName = [string]$eventRow.LevelDisplayName
+                SourceFile       = [string]$eventRow.SourceFile
+                SourceEntry      = [string]$eventRow.SourceEntry
                 Message          = $message
                 EventDetails     = New-EventDetailsText -Rows @($eventRow)
             }
@@ -764,6 +811,10 @@ function New-EventDetailsText {
 
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine("Matching captured Event Viewer records: $($items.Count)")
+    $sourceFiles = @($items | ForEach-Object { [string]$_.SourceFile } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+    if ($sourceFiles.Count -gt 0) {
+        [void]$sb.AppendLine("Captured from file(s): $($sourceFiles -join '; ')")
+    }
     [void]$sb.AppendLine("")
 
     $summaryRows = @($items | ForEach-Object {
@@ -837,9 +888,18 @@ function New-EventDetailsText {
         }
 
         [void]$sb.AppendLine("===== Event $index of $($items.Count) =====")
+        if (-not [string]::IsNullOrWhiteSpace([string]$row.SourceFile)) {
+            [void]$sb.AppendLine("Captured file:  $($row.SourceFile)")
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$row.SourceEntry)) {
+            [void]$sb.AppendLine("Captured entry: $($row.SourceEntry)")
+        }
         [void]$sb.AppendLine("Log Name:      $($row.LogName)")
         [void]$sb.AppendLine("Source:        $($row.ProviderName)")
         [void]$sb.AppendLine("Event ID:      $($row.Id)")
+        if (-not [string]::IsNullOrWhiteSpace([string]$row.RecordId)) {
+            [void]$sb.AppendLine("Record ID:     $($row.RecordId)")
+        }
         [void]$sb.AppendLine("Level:         $levelText")
         [void]$sb.AppendLine("Date and Time: $timeText")
         [void]$sb.AppendLine("")
@@ -931,7 +991,14 @@ function New-ObjectDetailsText {
     $index = 1
     foreach ($row in $items) {
         [void]$sb.AppendLine("===== Row $index of $($items.Count) =====")
+        if (-not [string]::IsNullOrWhiteSpace([string]$row.SourceFile)) {
+            [void]$sb.AppendLine("SourceFile: $($row.SourceFile)")
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$row.SourceEntry)) {
+            [void]$sb.AppendLine("SourceEntry: $($row.SourceEntry)")
+        }
         foreach ($prop in $row.PSObject.Properties) {
+            if ($prop.Name -in @("SourceFile","SourceEntry")) { continue }
             [void]$sb.AppendLine("$($prop.Name): $($prop.Value)")
         }
         [void]$sb.AppendLine("")
@@ -1496,6 +1563,13 @@ function New-TimelineHtml {
         $source = [string]$item.ProviderName
         $eventId = [string]$item.EventId
         $sourceText = if ([string]::IsNullOrWhiteSpace($eventId)) { $source } else { "$source $eventId" }
+        $sourceBits = @()
+        if (-not [string]::IsNullOrWhiteSpace([string]$item.RecordId)) { $sourceBits += "Record $($item.RecordId)" }
+        if (-not [string]::IsNullOrWhiteSpace([string]$item.SourceFile)) { $sourceBits += [string]$item.SourceFile }
+        if (-not [string]::IsNullOrWhiteSpace([string]$item.SourceEntry)) { $sourceBits += [string]$item.SourceEntry }
+        if ($sourceBits.Count -gt 0) {
+            $sourceText = "$sourceText | $($sourceBits -join ' | ')"
+        }
         $eventDetails = [string]$item.EventDetails
         if ([string]::IsNullOrWhiteSpace($eventDetails)) {
             $eventDetails = "No Event Viewer event details are available for this timeline entry."
@@ -4016,6 +4090,7 @@ function Select-EventForCsv {
         [PSCustomObject]@{
             TimeCreated = `$Event.TimeCreated
             LogName = `$Event.LogName
+            RecordId = `$Event.RecordId
             Level = `$Event.Level
             LevelDisplayName = Get-EventLevelName `$Event
             ProviderName = `$Event.ProviderName

@@ -123,6 +123,7 @@ Running remote PowerShell code requires trust in this repository.
 - Findings grouped by primary area
 - Newest-first event timeline
 - Clickable Event Viewer details
+- Source tracing for captured files, CSV rows, and Event Viewer record IDs
 - SMART and storage reliability checks
 - Disk, volume, free-space, and file-system checks
 - Disk event mapping to physical disk names and drive letters when Windows reports `\Device\Harddisk...`
