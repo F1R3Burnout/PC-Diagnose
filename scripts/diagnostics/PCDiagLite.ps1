@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "1.5 Precision Findings"
+$ToolVersion = "1.6 WER Crash Context"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1006,6 +1006,24 @@ function Get-WerSignatureValue {
     return ""
 }
 
+function Get-WerLoadedModuleHints {
+    param([hashtable]$Fields)
+
+    $modules = @($Fields.Keys |
+        Where-Object { $_ -match '^LoadedModule\[\d+\]$' } |
+        Sort-Object { [int]([regex]::Match($_, '\d+').Value) } |
+        ForEach-Object { [string]$Fields[$_] } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
+    $hints = @()
+    if ($modules | Where-Object { $_ -match '(?i)gameoverlayrenderer64\.dll' } | Select-Object -First 1) { $hints += "Steam overlay loaded" }
+    if ($modules | Where-Object { $_ -match '(?i)nvapi64\.dll|nvldumdx\.dll|nvgpucomp64\.dll|nvppex\.dll|nvwgf2umx\.dll' } | Select-Object -First 1) { $hints += "NVIDIA user-mode graphics modules loaded" }
+    if ($modules | Where-Object { $_ -match '(?i)amd_ags_x64\.dll' } | Select-Object -First 1) { $hints += "AMD AGS helper loaded by game" }
+    if ($modules | Where-Object { $_ -match '(?i)rendersystemdx11\.dll|scenesystem\.dll|materialsystem2\.dll|worldrenderer\.dll' } | Select-Object -First 1) { $hints += "CS2 render/scene modules loaded" }
+
+    return ($hints | Select-Object -Unique) -join "; "
+}
+
 function Get-ServiceNameFromEventMessage {
     param([string]$Message)
 
@@ -1897,6 +1915,14 @@ function Write-InitialFindingsReport {
         $cs2WerRows = @($werReports | Where-Object {
             "$($_.AppName) $($_.ApplicationPath) $($_.ReportPath) $($_.FaultModule)" -match '(?i)\bcs2\.exe\b|Counter-Strike'
         })
+        $werEventTypeSummary = New-TopCountSummary -Rows $cs2WerRows -PropertyName "EventType" -MaxItems 5
+        $werFaultModuleSummary = New-TopCountSummary -Rows $cs2WerRows -PropertyName "FaultModule" -MaxItems 5
+        $werExceptionSummary = New-TopCountSummary -Rows $cs2WerRows -PropertyName "ExceptionCode" -MaxItems 5
+        $werOffsetSummary = New-TopCountSummary -Rows $cs2WerRows -PropertyName "ExceptionOffset" -MaxItems 5
+        $werLoadedHintsSummary = New-TopCountSummary -Rows $cs2WerRows -PropertyName "LoadedModuleHints" -MaxItems 5
+        $hasWerBexStackHash = $cs2WerRows | Where-Object {
+            [string]$_.EventType -match '(?i)^BEX' -or [string]$_.FaultModule -match '(?i)^StackHash'
+        } | Select-Object -First 1
         $steamCrashEvents = @($allEvents | Where-Object {
             (Test-EventLevelAtMost $_ 3) -and
             ([string]$_.ProviderName -match 'Application Error|Application Hang') -and
@@ -1924,13 +1950,22 @@ function Write-InitialFindingsReport {
             Select-Object -First 30)
 
         $evidenceParts = @("$($cs2Events.Count) CS2 Application Error/Hang event(s)", "Modules: $moduleSummary", "Exception codes: $exceptionSummary", "Fault offsets: $offsetSummary")
-        if ($cs2WerRows.Count -gt 0) { $evidenceParts += "$($cs2WerRows.Count) matching Windows Error Reporting row(s)" }
+        if ($cs2WerRows.Count -gt 0) {
+            $evidenceParts += "$($cs2WerRows.Count) matching Windows Error Reporting row(s)"
+            if (-not [string]::IsNullOrWhiteSpace($werEventTypeSummary)) { $evidenceParts += "WER event types: $werEventTypeSummary" }
+            if (-not [string]::IsNullOrWhiteSpace($werFaultModuleSummary)) { $evidenceParts += "WER fault modules: $werFaultModuleSummary" }
+            if (-not [string]::IsNullOrWhiteSpace($werExceptionSummary)) { $evidenceParts += "WER exception codes: $werExceptionSummary" }
+            if (-not [string]::IsNullOrWhiteSpace($werOffsetSummary)) { $evidenceParts += "WER exception offsets: $werOffsetSummary" }
+            if (-not [string]::IsNullOrWhiteSpace($werLoadedHintsSummary)) { $evidenceParts += "WER loaded module hints: $werLoadedHintsSummary" }
+        }
         if ($basicDisplayRows.Count -gt 0) { $evidenceParts += "Microsoft Basic Display Driver is present" }
         if ($steamCrashEvents.Count -gt 0) { $evidenceParts += "$($steamCrashEvents.Count) Steam crash/hang event(s) also captured" }
 
         $recommendation = "In Steam, verify Counter-Strike 2 game files. Then test once with launch options, autoexec/custom config, overlays, capture tools, and third-party injectors disabled. Update or clean-install the GPU driver and retest with GPU/RAM overclocking or XMP/EXPO disabled if the crashes repeat."
         if ($basicDisplayRows.Count -gt 0) {
             $recommendation = "Install the correct GPU driver first. This report shows Microsoft Basic Display Driver, which is not a usable gaming driver for CS2. After installing the NVIDIA/AMD/Intel/OEM driver, reboot, verify Steam game files, and retest without overlays or launch options."
+        } elseif ($hasWerBexStackHash -and $hasAccessViolation) {
+            $recommendation = "WER classifies the CS2 crash as BEX/StackHash with access violation. This does not prove one CS2 DLL; it usually needs a dump for the exact stack. Start with a clean GPU driver install, verify CS2 files, disable Steam overlay and other injectors for one test, clear shader cache, and capture a LocalDump if it repeats."
         } elseif ($hasUnknownModule -and $hasAccessViolation) {
             $recommendation = "CS2 crashed with 0xc0000005, but Event Viewer reports the faulting module as unknown. Verify game files, disable overlays/injectors and launch options for one test, clean-install the GPU driver, and use the WER details or a LocalDumps capture if it repeats because Event Viewer alone cannot name the culprit."
         }
@@ -1944,6 +1979,7 @@ CS2 interpretation:
 - scenesystem.dll is part of the game/client rendering and scene stack.
 - 0xc0000005 means access violation. For games this is often caused by corrupted game files, overlays/injectors, graphics driver issues, shader/cache problems, unstable RAM/GPU settings, or a game-side bug.
 - Faulting module "unknown" means Event Viewer did not receive a precise module name. WER reports or LocalDumps are the next useful source for this kind of user-mode crash.
+- WER BEX64/StackHash points to a crash classification and stack hash, not a trustworthy single culprit DLL.
 - If the timestamps line up with driver resets, WHEA, disk errors, or high storage temperature in this report, prioritize those system findings too.
 "@
         $detailParts = @()
@@ -4109,17 +4145,21 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
             $appName = Get-WerFieldValue $fields @("AppName","AppPath","TargetAppId")
             $eventType = Get-WerFieldValue $fields @("EventType")
             $friendlyName = Get-WerFieldValue $fields @("FriendlyEventName","ConsentKey")
-            $faultModule = Get-WerSignatureValue $fields '(?i)fault.*module|problem.*module|module'
-            $exceptionCode = Get-WerSignatureValue $fields '(?i)exception|code'
+            $reportIdentifier = Get-WerFieldValue $fields @("ReportIdentifier")
+            $integratorReportIdentifier = Get-WerFieldValue $fields @("IntegratorReportIdentifier")
+            $faultModule = Get-WerSignatureValue $fields '(?i)^Fault Module Name$|^Problem Module Name$'
+            $exceptionCode = Get-WerSignatureValue $fields '(?i)^Exception Code$'
+            $exceptionOffset = Get-WerSignatureValue $fields '(?i)^Exception Offset$'
             $appPath = Get-WerSignatureValue $fields '(?i)application path|app path'
             if ([string]::IsNullOrWhiteSpace($appPath)) {
-                $appPath = Get-WerFieldValue $fields @("AppPath")
+                $appPath = Get-WerFieldValue $fields @("AppPath","UI[2]")
             }
             if ([string]::IsNullOrWhiteSpace($appName) -and -not [string]::IsNullOrWhiteSpace($appPath)) {
                 $appName = Split-Path -Leaf $appPath
             }
+            $loadedModuleHints = Get-WerLoadedModuleHints $fields
 
-            $combined = "$($file.DirectoryName) $appName $eventType $friendlyName $faultModule $exceptionCode $appPath"
+            $combined = "$($file.DirectoryName) $appName $eventType $friendlyName $faultModule $exceptionCode $exceptionOffset $appPath"
             $isCrashReport = $combined -match '(?i)APPCRASH|BEX|Stopped working|Nicht mehr funktionsfähig|crash|hang|cs2|steam|game|counter-strike|xbox|gaming'
             $copiedReport = ""
             if ($isCrashReport -and $copyIndex -le 30) {
@@ -4140,6 +4180,10 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
                 FriendlyEventName = $friendlyName
                 FaultModule       = $faultModule
                 ExceptionCode     = $exceptionCode
+                ExceptionOffset   = $exceptionOffset
+                ReportIdentifier  = $reportIdentifier
+                EventReportId     = $integratorReportIdentifier
+                LoadedModuleHints = $loadedModuleHints
                 ApplicationPath   = $appPath
                 ReportPath        = $file.FullName
                 PackagePath       = $copiedReport
@@ -4152,6 +4196,10 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
                 FriendlyEventName = $_.Exception.Message
                 FaultModule       = ""
                 ExceptionCode     = ""
+                ExceptionOffset   = ""
+                ReportIdentifier  = ""
+                EventReportId     = ""
+                LoadedModuleHints = ""
                 ApplicationPath   = ""
                 ReportPath        = $file.FullName
                 PackagePath       = ""
