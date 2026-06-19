@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "1.7 Source Tracing"
+$ToolVersion = "1.8 CS2 WER Correlation"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -1951,28 +1951,127 @@ function Write-InitialFindingsReport {
         ($_.Message -match '(?i)\bcs2\.exe\b|Counter-Strike')
     })
     if ($cs2Events.Count -gt 0) {
+        $cs2WerRows = @($werReports | Where-Object {
+            "$($_.AppName) $($_.ApplicationPath) $($_.ReportPath) $($_.FaultModule)" -match '(?i)\bcs2\.exe\b|Counter-Strike'
+        })
         $cs2Rows = @($cs2Events | ForEach-Object {
-            $message = [string]$_.Message
+            $cs2EventRow = $_
+            $message = [string]$cs2EventRow.Message
             $crashInfo = Get-AppCrashInfoFromMessage -Message $message
-            $meaning = "Windows captured a CS2 crash."
-            if ([string]$crashInfo.ExceptionCode -match '0xc0000005') {
-                $meaning = "Access violation: CS2 tried to read or execute invalid memory. Common game causes are GPU driver issues, overlays/injectors, corrupted game/cache files, unstable RAM/GPU settings, or a game-side bug."
+            $matchingWer = $null
+            if (-not [string]::IsNullOrWhiteSpace([string]$crashInfo.ReportId)) {
+                $matchingWer = $cs2WerRows |
+                    Where-Object {
+                        [string]$_.EventReportId -eq [string]$crashInfo.ReportId -or
+                        [string]$_.ReportIdentifier -eq [string]$crashInfo.ReportId
+                    } |
+                    Select-Object -First 1
+            }
+            if ($null -eq $matchingWer) {
+                $eventTimeForWer = ConvertTo-DateTimeSafe ([string]$cs2EventRow.TimeCreated)
+                if ($null -ne $eventTimeForWer) {
+                    $matchingWer = $cs2WerRows |
+                        Where-Object {
+                            $werTime = ConvertTo-DateTimeSafe ([string]$_.LastWriteTime)
+                            $null -ne $werTime -and [math]::Abs(($werTime - $eventTimeForWer).TotalDays) -le 2
+                        } |
+                        Select-Object -First 1
+                }
+            }
+
+            $eventException = [string]$crashInfo.ExceptionCode
+            $werException = [string]$matchingWer.ExceptionCode
+            $isAccessViolation = ($eventException -match '(?i)0x?c0000005') -or ($werException -match '(?i)0x?c0000005')
+            $hasWerStackHash = [string]$matchingWer.FaultModule -match '(?i)^StackHash'
+            $hasWerNtdllOffset = [string]$matchingWer.ExceptionOffset -match '(?i)ntdll'
+
+            $eventTime = ConvertTo-DateTimeSafe ([string]$cs2EventRow.TimeCreated)
+            $directSignalText = "No direct GPU reset, WHEA, disk I/O, BugCheck, or hard-reset event within +/-60 seconds."
+            $nearbySignalText = "No GPU reset, WHEA, disk I/O, BugCheck, or hard-reset event within +/-10 minutes."
+            if ($null -ne $eventTime) {
+                $signalEvents = @($allEvents | Where-Object {
+                    $signalTime = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+                    $null -ne $signalTime -and
+                    -not (
+                        [string]$_.ProviderName -eq [string]$cs2EventRow.ProviderName -and
+                        [string]$_.Id -eq [string]$cs2EventRow.Id -and
+                        [string]$_.TimeCreated -eq [string]$cs2EventRow.TimeCreated
+                    ) -and
+                    (
+                        [string]$_.ProviderName -match '(?i)WHEA|Display|nvlddmkm|amdkmdag|amdwddmg|disk|ntfs|stornvme|storahci|BugCheck|Kernel-Power|EventLog' -or
+                        [string]$_.Id -in @('41','51','55','98','129','153','4101','6008')
+                    )
+                })
+                $directSignals = @($signalEvents | Where-Object {
+                    $signalTime = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+                    $null -ne $signalTime -and [math]::Abs(($signalTime - $eventTime).TotalSeconds) -le 60
+                })
+                $nearbySignals = @($signalEvents | Where-Object {
+                    $signalTime = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+                    $null -ne $signalTime -and [math]::Abs(($signalTime - $eventTime).TotalMinutes) -le 10
+                })
+                if ($directSignals.Count -gt 0) {
+                    $directSignalText = (@($directSignals |
+                        Group-Object { "$($_.ProviderName) $($_.Id)" } |
+                        Sort-Object Count -Descending |
+                        Select-Object -First 6 |
+                        ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+                }
+                if ($nearbySignals.Count -gt 0) {
+                    $nearbySignalText = "Within +/-10 minutes: " + (@($nearbySignals |
+                        Group-Object { "$($_.ProviderName) $($_.Id)" } |
+                        Sort-Object Count -Descending |
+                        Select-Object -First 8 |
+                        ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "; ")
+                    if ($nearbySignalText -match '(?i)Kernel-Power|EventLog 6008') {
+                        $nearbySignalText += ". A later hard reset is a separate stability signal unless it has the same timestamp as the CS2 crash."
+                    }
+                }
+            }
+
+            $meaning = "Windows captured a user-mode CS2 crash."
+            if ($isAccessViolation) {
+                $meaning = "User-mode access violation: CS2 tried to read or execute invalid memory. This is not a blue screen by itself. Common game causes are overlay/hook conflicts, graphics user-mode driver issues, corrupted game/cache files, unstable RAM/GPU settings, or a game-side bug."
             }
             if ([string]$crashInfo.FaultingModule -match '^(unknown)?$' -or [string]::IsNullOrWhiteSpace([string]$crashInfo.FaultingModule)) {
                 $meaning += " Event Viewer could not identify the faulting module, so WER/local dumps are needed for a deeper culprit."
             } elseif ([string]$crashInfo.FaultingModule -match 'scenesystem\.dll') {
                 $meaning += " scenesystem.dll is part of the CS2 rendering/scene stack."
             }
+            if ($null -ne $matchingWer) {
+                $meaning += " WER was matched to this Event Viewer crash by Report ID or timestamp."
+                if ([string]$matchingWer.EventType -match '(?i)^BEX' -or $hasWerStackHash -or $hasWerNtdllOffset) {
+                    $meaning += " BEX64/StackHash/ntdll is a crash classification or final Windows runtime location, not proof that StackHash or ntdll caused the crash."
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$matchingWer.LoadedModuleHints)) {
+                    $meaning += " Loaded context: $($matchingWer.LoadedModuleHints)."
+                }
+            }
+
+            $werReportFile = ""
+            if ($null -ne $matchingWer) {
+                $werReportFile = if (-not [string]::IsNullOrWhiteSpace([string]$matchingWer.PackagePath)) { [string]$matchingWer.PackagePath } else { [string]$matchingWer.ReportPath }
+            }
             [PSCustomObject]@{
-                TimeCreated          = $_.TimeCreated
-                Source               = $_.ProviderName
-                EventId              = $_.Id
+                TimeCreated          = $cs2EventRow.TimeCreated
+                Source               = $cs2EventRow.ProviderName
+                EventId              = $cs2EventRow.Id
+                CrashType            = if ($isAccessViolation) { "User-mode access violation" } else { "User-mode application crash" }
                 FaultingApplication  = $crashInfo.FaultingApplication
                 FaultingModule       = $crashInfo.FaultingModule
                 FaultingModulePath   = $crashInfo.FaultingModulePath
                 ExceptionCode        = $crashInfo.ExceptionCode
                 FaultOffset          = $crashInfo.FaultOffset
                 ReportId             = $crashInfo.ReportId
+                MatchedWerReport     = if ($null -ne $matchingWer) { "Yes" } else { "No" }
+                WerEventType         = [string]$matchingWer.EventType
+                WerFaultModule       = [string]$matchingWer.FaultModule
+                WerExceptionCode     = [string]$matchingWer.ExceptionCode
+                WerExceptionOffset   = [string]$matchingWer.ExceptionOffset
+                WerLoadedHints       = [string]$matchingWer.LoadedModuleHints
+                WerReportFile        = $werReportFile
+                DirectSystemSignals  = $directSignalText
+                NearbySystemSignals  = $nearbySignalText
                 ApplicationPath      = $crashInfo.ApplicationPath
                 Interpretation       = $meaning
             }
@@ -1984,11 +2083,8 @@ function Write-InitialFindingsReport {
         if ([string]::IsNullOrWhiteSpace($exceptionSummary)) { $exceptionSummary = "not captured" }
         if ([string]::IsNullOrWhiteSpace($offsetSummary)) { $offsetSummary = "not captured" }
         $hasSceneSystem = $cs2Rows | Where-Object { [string]$_.FaultingModule -match 'scenesystem\.dll' } | Select-Object -First 1
-        $hasAccessViolation = $cs2Rows | Where-Object { [string]$_.ExceptionCode -match '0xc0000005' } | Select-Object -First 1
+        $hasAccessViolation = $cs2Rows | Where-Object { [string]$_.ExceptionCode -match '(?i)0x?c0000005' -or [string]$_.WerExceptionCode -match '(?i)0x?c0000005' } | Select-Object -First 1
         $hasUnknownModule = $cs2Rows | Where-Object { [string]$_.FaultingModule -match '^(unknown)?$' -or [string]::IsNullOrWhiteSpace([string]$_.FaultingModule) } | Select-Object -First 1
-        $cs2WerRows = @($werReports | Where-Object {
-            "$($_.AppName) $($_.ApplicationPath) $($_.ReportPath) $($_.FaultModule)" -match '(?i)\bcs2\.exe\b|Counter-Strike'
-        })
         $werEventTypeSummary = New-TopCountSummary -Rows $cs2WerRows -PropertyName "EventType" -MaxItems 5
         $werFaultModuleSummary = New-TopCountSummary -Rows $cs2WerRows -PropertyName "FaultModule" -MaxItems 5
         $werExceptionSummary = New-TopCountSummary -Rows $cs2WerRows -PropertyName "ExceptionCode" -MaxItems 5
@@ -2039,7 +2135,7 @@ function Write-InitialFindingsReport {
         if ($basicDisplayRows.Count -gt 0) {
             $recommendation = "Install the correct GPU driver first. This report shows Microsoft Basic Display Driver, which is not a usable gaming driver for CS2. After installing the NVIDIA/AMD/Intel/OEM driver, reboot, verify Steam game files, and retest without overlays or launch options."
         } elseif ($hasWerBexStackHash -and $hasAccessViolation) {
-            $recommendation = "WER classifies the CS2 crash as BEX/StackHash with access violation. This does not prove one CS2 DLL; it usually needs a dump for the exact stack. Start with a clean GPU driver install, verify CS2 files, disable Steam overlay and other injectors for one test, clear shader cache, and capture a LocalDump if it repeats."
+            $recommendation = "WER classifies the CS2 crash as BEX/StackHash with access violation. This does not prove one CS2 DLL. First test once with Steam, Xbox Game Bar, Discord, NVIDIA, RTSS/MSI Afterburner, and other overlays/hooks disabled, with no launch options or custom config. Then verify CS2 files, clear shader cache, clean-install the GPU driver if it repeats, and capture a LocalDump for the exact stack."
         } elseif ($hasUnknownModule -and $hasAccessViolation) {
             $recommendation = "CS2 crashed with 0xc0000005, but Event Viewer reports the faulting module as unknown. Verify game files, disable overlays/injectors and launch options for one test, clean-install the GPU driver, and use the WER details or a LocalDumps capture if it repeats because Event Viewer alone cannot name the culprit."
         }
@@ -2053,7 +2149,9 @@ CS2 interpretation:
 - scenesystem.dll is part of the game/client rendering and scene stack.
 - 0xc0000005 means access violation. For games this is often caused by corrupted game files, overlays/injectors, graphics driver issues, shader/cache problems, unstable RAM/GPU settings, or a game-side bug.
 - Faulting module "unknown" means Event Viewer did not receive a precise module name. WER reports or LocalDumps are the next useful source for this kind of user-mode crash.
-- WER BEX64/StackHash points to a crash classification and stack hash, not a trustworthy single culprit DLL.
+- WER BEX64/StackHash/ntdll points to a crash classification or final Windows runtime location, not a trustworthy single culprit DLL.
+- Loaded module hints such as Steam overlay, NVIDIA user-mode graphics modules, AMD AGS, or CS2 render modules are context for testing; they do not prove that one of those modules caused the crash.
+- Direct system-signal rows show whether a GPU reset, WHEA, disk I/O, BugCheck, or hard-reset event was captured at the same time. A later Kernel-Power/EventLog 6008 entry should be treated as a separate stability clue unless it shares the same timestamp.
 - If the timestamps line up with driver resets, WHEA, disk errors, or high storage temperature in this report, prioritize those system findings too.
 "@
         $detailParts = @()
@@ -2064,6 +2162,16 @@ CS2 interpretation:
         } else {
             $detailParts += "Windows Error Reporting rows for CS2: 0`r`nNo matching Report.wer file was collected. If the crash repeats, enable Windows Error Reporting LocalDumps for cs2.exe or preserve the WER report before cleanup."
         }
+        $detailParts += @"
+Optional CS2 LocalDump setup commands (not run by PCDiagLite):
+
+mkdir C:\Dumps
+reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\cs2.exe" /v DumpFolder /t REG_EXPAND_SZ /d "C:\Dumps" /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\cs2.exe" /v DumpCount /t REG_DWORD /d 5 /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\cs2.exe" /v DumpType /t REG_DWORD /d 2 /f
+
+After the next crash, collect the new .dmp from C:\Dumps. Full user-mode dumps can be large, so PCDiagLite does not enable this automatically.
+"@.Trim()
         if ($basicDisplayRows.Count -gt 0) {
             $detailParts += (New-ObjectDetailsText -Rows $basicDisplayRows -Title "Display driver rows connected to this finding")
         }
