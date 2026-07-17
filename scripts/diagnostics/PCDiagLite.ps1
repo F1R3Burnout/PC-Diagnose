@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "1.8 CS2 WER Correlation"
+$ToolVersion = "1.9 Timeout Hardening"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -298,19 +298,29 @@ function Invoke-ChildPowerShellWithTimeout {
 
     $safe = ($Name -replace '[\\/:*?""<>| ]','_')
     $child = Join-Path $Dirs.Runtime "${safe}.ps1"
+    $launcher = Join-Path $Dirs.Runtime "${safe}.cmd"
     $stdout = Join-Path $Dirs.Runtime "${safe}_stdout.txt"
     $stderr = Join-Path $Dirs.Runtime "${safe}_stderr.txt"
 
     [System.IO.File]::WriteAllText($child, $ScriptContent, [System.Text.UTF8Encoding]::new($true))
+    $psExe = ""
+    try { $psExe = (Get-Command "powershell.exe" -ErrorAction Stop).Source } catch {}
+    if ([string]::IsNullOrWhiteSpace($psExe)) {
+        $psExe = Join-Path $PSHOME "powershell.exe"
+    }
+    $launcherLines = @(
+        "@echo off",
+        ('"{0}" -NoProfile -ExecutionPolicy Bypass -File "{1}" 1> "{2}" 2> "{3}"' -f $psExe, $child, $stdout, $stderr),
+        "exit /b %ERRORLEVEL%"
+    )
+    [System.IO.File]::WriteAllLines($launcher, $launcherLines, [System.Text.Encoding]::ASCII)
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Write-ProgressLine "START: $Name (Timeout ${TimeoutSeconds}s)" "Cyan"
 
     try {
-        $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$child`""
-        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $argLine `
-            -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-            -PassThru -WindowStyle Hidden
+        $argLine = "/d /c `"$launcher`""
+        $p = Start-Process -FilePath "cmd.exe" -ArgumentList $argLine -PassThru -WindowStyle Hidden
 
         $lastInfo = 0
         while (-not $p.HasExited) {
@@ -333,10 +343,7 @@ function Invoke-ChildPowerShellWithTimeout {
         }
 
         $sw.Stop()
-        try {
-            $p.WaitForExit()
-            $p.Refresh()
-        } catch {}
+        try { $p.Refresh() } catch {}
 
         $exitCode = $null
         try { $exitCode = $p.ExitCode } catch {}

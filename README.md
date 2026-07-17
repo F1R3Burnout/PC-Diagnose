@@ -120,6 +120,7 @@ Running remote PowerShell code requires trust in this repository.
 
 - Menu-based tool selection from one short command
 - Local HTML result view
+- Timeout-protected collection steps with hardened child process handling
 - Findings grouped by primary area
 - Newest-first event timeline
 - Clickable Event Viewer details
