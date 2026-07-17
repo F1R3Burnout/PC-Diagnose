@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "1.9 Timeout Hardening"
+$ToolVersion = "2.0 Shutdown Correlation"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -909,6 +909,9 @@ function New-EventDetailsText {
         }
         [void]$sb.AppendLine("Level:         $levelText")
         [void]$sb.AppendLine("Date and Time: $timeText")
+        if (-not [string]::IsNullOrWhiteSpace([string]$row.EventData)) {
+            [void]$sb.AppendLine("Event Data:    $($row.EventData)")
+        }
         [void]$sb.AppendLine("")
         [void]$sb.AppendLine("Message:")
         if ([string]::IsNullOrWhiteSpace([string]$row.Message)) {
@@ -1144,6 +1147,192 @@ function Test-EventLevelAtMost {
     } catch {
         return $false
     }
+}
+
+function Get-UnexpectedShutdownReportedTime {
+    param([AllowNull()][string]$Message)
+
+    $text = [string]$Message
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    $text = $text -replace '[\u200e\u200f]', ''
+
+    $deMatch = [regex]::Match($text, '(?i)am\s+(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})\s+um\s+(\d{1,2}):(\d{2}):(\d{2})')
+    if ($deMatch.Success) {
+        try {
+            return [datetime]::new(
+                [int]$deMatch.Groups[3].Value,
+                [int]$deMatch.Groups[2].Value,
+                [int]$deMatch.Groups[1].Value,
+                [int]$deMatch.Groups[4].Value,
+                [int]$deMatch.Groups[5].Value,
+                [int]$deMatch.Groups[6].Value
+            )
+        } catch {}
+    }
+
+    $enMatch = [regex]::Match($text, '(?i)previous system shutdown at\s+(\d{1,2}):(\d{2}):(\d{2})\s+(?:AM|PM)?\s+on\s+([^\.]+?)\s+was unexpected')
+    if ($enMatch.Success) {
+        $candidate = "$($enMatch.Groups[4].Value) $($enMatch.Groups[1].Value):$($enMatch.Groups[2].Value):$($enMatch.Groups[3].Value)"
+        $parsed = [datetime]::MinValue
+        if ([datetime]::TryParse($candidate, [ref]$parsed)) { return $parsed }
+    }
+
+    return $null
+}
+
+function Get-EventBriefText {
+    param($Event)
+
+    if ($null -eq $Event) { return "" }
+    $time = ConvertTo-DateTimeSafe ([string]$Event.TimeCreated)
+    $timeText = if ($null -ne $time) { Format-FindingDate $time } else { [string]$Event.TimeCreated }
+    $provider = [string]$Event.ProviderName
+    $id = [string]$Event.Id
+    $message = ([string]$Event.Message -replace '\s+', ' ').Trim()
+    if ($message.Length -gt 180) { $message = $message.Substring(0,180) + "..." }
+    return "$timeText | $provider $id | $message"
+}
+
+function Get-EventDataValue {
+    param(
+        [AllowNull()][string]$EventData,
+        [Parameter(Mandatory=$true)][string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($EventData)) { return "" }
+    $match = [regex]::Match([string]$EventData, "(^|;\s*)$([regex]::Escape($Name))=([^;]*)")
+    if ($match.Success) { return $match.Groups[2].Value.Trim() }
+    return ""
+}
+
+function New-KernelPowerSummaryRows {
+    param([object[]]$Rows)
+
+    return @($Rows | ForEach-Object {
+        $eventTime = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+        $eventData = [string]$_.EventData
+        $bugcheckCode = Get-EventDataValue -EventData $eventData -Name "BugcheckCode"
+        $sleepInProgress = Get-EventDataValue -EventData $eventData -Name "SleepInProgress"
+        $powerButtonTimestamp = Get-EventDataValue -EventData $eventData -Name "PowerButtonTimestamp"
+        $longPowerButton = Get-EventDataValue -EventData $eventData -Name "LongPowerButtonPressDetected"
+        $wheaBootCount = Get-EventDataValue -EventData $eventData -Name "WHEABootErrorCount"
+        $connectedStandby = Get-EventDataValue -EventData $eventData -Name "ConnectedStandbyInProgress"
+
+        $interpretation = "Kernel-Power 41 means Windows detected that the previous session did not shut down cleanly."
+        if ($bugcheckCode -eq "0" -or [string]::IsNullOrWhiteSpace($bugcheckCode)) {
+            $interpretation += " BugcheckCode is 0 or not available, so this event does not prove a blue screen."
+        } else {
+            $interpretation += " BugcheckCode $bugcheckCode was reported, so inspect minidumps and BugCheck events."
+        }
+        if ($powerButtonTimestamp -eq "0" -or [string]::IsNullOrWhiteSpace($powerButtonTimestamp)) {
+            $interpretation += " No power-button timestamp was reported."
+        }
+        if ($sleepInProgress -eq "1" -or $connectedStandby -eq "true") {
+            $interpretation += " A sleep or standby transition may be involved."
+        }
+        if ($wheaBootCount -match '^[1-9]') {
+            $interpretation += " WHEA boot errors were reported; prioritize hardware/firmware stability."
+        }
+
+        [PSCustomObject]@{
+            TimeCreated                    = if ($null -ne $eventTime) { Format-FindingDate $eventTime } else { [string]$_.TimeCreated }
+            RecordId                       = [string]$_.RecordId
+            BugcheckCode                   = $bugcheckCode
+            SleepInProgress                = $sleepInProgress
+            ConnectedStandbyInProgress     = $connectedStandby
+            PowerButtonTimestamp           = $powerButtonTimestamp
+            LongPowerButtonPressDetected   = $longPowerButton
+            WHEABootErrorCount             = $wheaBootCount
+            Interpretation                 = $interpretation
+            SourceFile                     = [string]$_.SourceFile
+            SourceEntry                    = [string]$_.SourceEntry
+        }
+    })
+}
+
+function Get-ShutdownSignalSummary {
+    param(
+        [object[]]$Rows,
+        [datetime]$Center,
+        [int]$WindowMinutes = 10
+    )
+
+    $signals = @($Rows | Where-Object {
+        $eventTime = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+        $null -ne $eventTime -and
+        [math]::Abs(($eventTime - $Center).TotalMinutes) -le $WindowMinutes -and
+        (
+            [string]$_.ProviderName -match '(?i)Kernel-Power|BugCheck|WHEA|disk|Ntfs|volmgr|storahci|stornvme|iaStor|Display|nvlddmkm|amdkmdag|EventLog|Service Control Manager|User32' -or
+            [string]$_.Id -in @('41','51','55','98','1074','6005','6006','6008','1001','4101','7043')
+        )
+    } | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } })
+
+    if ($signals.Count -eq 0) {
+        return "No relevant System events found within +/-$WindowMinutes minutes."
+    }
+
+    return (@($signals | Select-Object -First 12 | ForEach-Object { Get-EventBriefText $_ }) -join "`r`n")
+}
+
+function New-ShutdownCorrelationRows {
+    param(
+        [object[]]$UnexpectedShutdownEvents,
+        [object[]]$KernelPowerEvents,
+        [object[]]$AllEvents
+    )
+
+    $rows = @()
+    foreach ($event in @($UnexpectedShutdownEvents)) {
+        $loggedAt = ConvertTo-DateTimeSafe ([string]$event.TimeCreated)
+        $reportedAt = Get-UnexpectedShutdownReportedTime -Message ([string]$event.Message)
+
+        $kernelNearLog = @($KernelPowerEvents | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and $null -ne $loggedAt -and [math]::Abs(($time - $loggedAt).TotalMinutes) -le 2
+        } | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } } | Select-Object -First 1)
+
+        $lastPlannedRestart = $null
+        $lastCleanStop = $null
+        if ($null -ne $reportedAt) {
+            $lastPlannedRestart = @($AllEvents | Where-Object {
+                $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+                $null -ne $time -and $time -le $reportedAt -and [string]$_.Id -eq '1074'
+            } | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) }; Descending = $true } | Select-Object -First 1)
+            $lastCleanStop = @($AllEvents | Where-Object {
+                $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+                $null -ne $time -and $time -le $reportedAt -and [string]$_.Id -eq '6006'
+            } | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) }; Descending = $true } | Select-Object -First 1)
+        }
+
+        $gapText = ""
+        if ($null -ne $reportedAt -and $null -ne $loggedAt) {
+            $gap = New-TimeSpan -Start $reportedAt -End $loggedAt
+            $gapText = "{0:n1} hours" -f $gap.TotalHours
+        }
+
+        $directSignals = if ($null -ne $reportedAt) { Get-ShutdownSignalSummary -Rows $AllEvents -Center $reportedAt -WindowMinutes 10 } else { "Could not parse the shutdown time from EventLog 6008." }
+
+        $assessment = "Windows logged this at the next boot, not necessarily when the shutdown happened."
+        if ($null -ne $reportedAt -and $directSignals -match 'No relevant System events') {
+            $assessment += " No direct WHEA, disk, GPU reset, BugCheck, or Kernel-Power event was found near the reported shutdown timestamp."
+        }
+        if ($null -ne $lastPlannedRestart) {
+            $assessment += " A planned Windows restart was seen earlier, but it had clean shutdown/start records."
+        }
+
+        $rows += [PSCustomObject]@{
+            EventLogRecordTime       = if ($null -ne $loggedAt) { Format-FindingDate $loggedAt } else { [string]$event.TimeCreated }
+            ReportedShutdownTime     = if ($null -ne $reportedAt) { Format-FindingDate $reportedAt } else { "Not parsed" }
+            TimeUntilLogged          = $gapText
+            KernelPower41NearBoot    = if ($kernelNearLog.Count -gt 0) { Get-EventBriefText $kernelNearLog[0] } else { "No Kernel-Power 41 within +/-2 minutes of this 6008 record." }
+            LastPlannedRestartBefore = if ($null -ne $lastPlannedRestart) { Get-EventBriefText $lastPlannedRestart } else { "None found before reported shutdown time." }
+            LastCleanEventLogStop    = if ($null -ne $lastCleanStop) { Get-EventBriefText $lastCleanStop } else { "None found before reported shutdown time." }
+            NearbyReportedTimeEvents = $directSignals
+            Assessment               = $assessment
+        }
+    }
+
+    return $rows
 }
 
 function Get-FindingSeverityRank {
@@ -1639,12 +1828,31 @@ function Write-InitialFindingsReport {
 
     $kernelPowerEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Kernel-Power' -and $_.Id -eq '41' })
     if ($kernelPowerEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Stability" "Unexpected restart or power loss" "$($kernelPowerEvents.Count) Kernel-Power 41 event(s)." "Check power delivery, thermals, BIOS/UEFI, RAM/CPU stability, and the events immediately before the restart." -EventRows $kernelPowerEvents
+        $kernelPowerSummaryRows = @(New-KernelPowerSummaryRows -Rows $kernelPowerEvents)
+        $bugcheckSummary = New-TopCountSummary -Rows $kernelPowerSummaryRows -PropertyName "BugcheckCode" -MaxItems 5
+        $wheaBootSummary = New-TopCountSummary -Rows $kernelPowerSummaryRows -PropertyName "WHEABootErrorCount" -MaxItems 5
+        $kernelPowerEvidence = "$($kernelPowerEvents.Count) Kernel-Power 41 event(s)."
+        if (-not [string]::IsNullOrWhiteSpace($bugcheckSummary)) { $kernelPowerEvidence += " BugcheckCode summary: $bugcheckSummary." }
+        if (-not [string]::IsNullOrWhiteSpace($wheaBootSummary)) { $kernelPowerEvidence += " WHEA boot error count summary: $wheaBootSummary." }
+        $kernelPowerDetails = @()
+        $kernelPowerDetails += (New-ObjectDetailsText -Rows $kernelPowerSummaryRows -Title "Kernel-Power 41 interpretation rows")
+        $kernelPowerDetails += (New-EventDetailsText -Rows $kernelPowerEvents)
+        Add-Finding ([ref]$findings) "High" "Stability" "Unexpected restart or power loss" $kernelPowerEvidence "If BugcheckCode is 0 and no WHEA/disk/GPU reset is nearby, treat this as an unclean power loss or hard freeze clue rather than a proven blue screen. Check power delivery, thermals, BIOS/UEFI, RAM/CPU stability, sleep/standby behavior, and events immediately before the restart." -EventRows $kernelPowerEvents -DetailText ($kernelPowerDetails -join "`r`n`r`n")
     }
 
     $unexpectedShutdownEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and ($_.Id -eq '6008' -or ($_.ProviderName -match 'EventLog' -and $_.Id -eq '6008')) })
     if ($unexpectedShutdownEvents.Count -gt 0) {
-        Add-Finding ([ref]$findings) "High" "Stability" "Windows reports an unexpected shutdown" "$($unexpectedShutdownEvents.Count) event(s) with ID 6008." "Correlate these timestamps with Kernel-Power, BugCheck, WHEA, Disk/Ntfs, and service errors." -EventRows $unexpectedShutdownEvents
+        $shutdownCorrelationRows = @(New-ShutdownCorrelationRows -UnexpectedShutdownEvents $unexpectedShutdownEvents -KernelPowerEvents $kernelPowerEvents -AllEvents $allEvents)
+        $parsedShutdowns = @($shutdownCorrelationRows | Where-Object { [string]$_.ReportedShutdownTime -ne "Not parsed" })
+        $latestReported = @($parsedShutdowns | Sort-Object ReportedShutdownTime -Descending | Select-Object -First 1)
+        $shutdownEvidence = "$($unexpectedShutdownEvents.Count) EventLog 6008 event(s)."
+        if ($latestReported.Count -gt 0) {
+            $shutdownEvidence += " Latest reported previous shutdown: $($latestReported[0].ReportedShutdownTime), logged at next boot: $($latestReported[0].EventLogRecordTime)."
+        }
+        $shutdownDetails = @()
+        $shutdownDetails += (New-ObjectDetailsText -Rows $shutdownCorrelationRows -Title "Unexpected shutdown correlation")
+        $shutdownDetails += (New-EventDetailsText -Rows $unexpectedShutdownEvents)
+        Add-Finding ([ref]$findings) "High" "Stability" "Windows reports an unexpected shutdown" $shutdownEvidence "Treat EventLog 6008 as a next-boot report. Review the correlation table first: if no direct BugCheck, WHEA, disk, GPU reset, or clean shutdown record exists near the reported shutdown time, investigate power loss, hard freeze, PSU/UPS, BIOS/UEFI, RAM/CPU stability, and thermals." -EventRows $unexpectedShutdownEvents -DetailText ($shutdownDetails -join "`r`n`r`n")
     }
 
     $wheaEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'WHEA-Logger' })
@@ -4199,6 +4407,31 @@ function Get-EventLevelName {
     }
 }
 
+function Get-EventDataSummary {
+    param([Parameter(Mandatory=`$true)]`$Event)
+
+    try {
+        [xml]`$xml = `$Event.ToXml()
+        `$index = 0
+        `$parts = @()
+        foreach (`$data in @(`$xml.Event.EventData.Data)) {
+            `$name = [string]`$data.Name
+            `$value = [string]`$data.'#text'
+            if ([string]::IsNullOrWhiteSpace(`$value)) { `$value = [string]`$data.InnerText }
+            if ([string]::IsNullOrWhiteSpace(`$name)) { `$name = "Data`$index" }
+            if (`$value.Length -gt 160) { `$value = `$value.Substring(0,160) + "..." }
+            if (-not [string]::IsNullOrWhiteSpace(`$value)) {
+                `$parts += "`$name=`$value"
+            }
+            `$index++
+            if (`$parts.Count -ge 30) { break }
+        }
+        return (`$parts -join "; ")
+    } catch {
+        return ""
+    }
+}
+
 function Select-EventForCsv {
     param([Parameter(ValueFromPipeline=`$true)]`$Event)
     process {
@@ -4210,6 +4443,7 @@ function Select-EventForCsv {
             LevelDisplayName = Get-EventLevelName `$Event
             ProviderName = `$Event.ProviderName
             Id = `$Event.Id
+            EventData = Get-EventDataSummary `$Event
             Message = try { `$Event.Message } catch { "" }
         }
     }

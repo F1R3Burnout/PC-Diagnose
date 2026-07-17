@@ -125,6 +125,7 @@ Running remote PowerShell code requires trust in this repository.
 - Newest-first event timeline
 - Clickable Event Viewer details
 - Source tracing for captured files, CSV rows, and Event Viewer record IDs
+- Unexpected shutdown correlation for EventLog 6008, Kernel-Power 41, planned restarts, and nearby hardware signals
 - SMART and storage reliability checks
 - Disk, volume, free-space, and file-system checks
 - Disk event mapping to physical disk names and drive letters when Windows reports `\Device\Harddisk...`
