@@ -17,6 +17,7 @@ irm https://kiwus-it.de/r|iex
 ```text
 1 = PCDiagLite
 2 = NetzwerkDiagnose
+3 = NTLiteChecker
 ```
 
 4. Accept the UAC prompt only when the selected tool asks for it.
@@ -62,6 +63,24 @@ The result view shows the most important findings first. The ZIP contains the fu
 C:\Temp\NetzwerkDiagnose
 ```
 
+`NTLiteChecker` asks for a ZIP and writes its HTML and CSV results to:
+
+```text
+C:\Temp\NTLiteChecker
+```
+
+## NTLite Verification ZIP
+
+Put these XML files in one ZIP. Subfolders are supported:
+
+1. The final auto-saved NTLite session preset created after the last Apply operation. This is the most important file.
+2. The exact `autounattend.xml` or `unattend.xml` used for Windows Setup.
+3. Every manually loaded NTLite `[Preset].xml` file, for history and conflict detection.
+
+Also include the matching `NTLite.log` when available. Post-setup scripts, REG files, and a per-command execution log are required to prove that custom commands succeeded; preset XML alone proves only that a command was intended.
+
+Remove product keys, passwords, Wi-Fi secrets, and tokens before sharing the ZIP. The checker does not display unattended passwords or product keys.
+
 ## Optional Commands
 
 Start PCDiagLite directly:
@@ -100,6 +119,18 @@ Start NetzwerkDiagnose directly:
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool netdiag
 ```
 
+Start NTLiteChecker directly and select the ZIP in the file dialog:
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool ntlitecheck
+```
+
+Provide the ZIP directly:
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool ntlitecheck -NTLiteInputZip 'C:\Temp\NTLite-Verification.zip'
+```
+
 Run NetzwerkDiagnose with extra path tests:
 
 ```powershell
@@ -119,6 +150,7 @@ Running remote PowerShell code requires trust in this repository.
 ## Features
 
 - Menu-based tool selection from one short command
+- Read-only NTLite verification against preset and unattended XML files, with source tracing and explicit `Matched`, `Mismatch`, `Conflict`, and `Not verifiable` states
 - Local HTML result view
 - Timeout-protected collection steps with hardened child process handling
 - Findings grouped by primary area

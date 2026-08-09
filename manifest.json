@@ -58,6 +58,30 @@
           "description": "Open the HTML report after completion."
         }
       ]
+    },
+    {
+      "id": "ntlitecheck",
+      "name": "NTLiteChecker",
+      "category": "pc-test",
+      "description": "Compares NTLite preset and Windows unattended XML files from a ZIP with the current Windows installation.",
+      "path": "scripts/diagnostics/NTLiteChecker.ps1",
+      "kind": "powershell",
+      "requiresAdmin": true,
+      "safeMode": "collect-only",
+      "parameters": [
+        {
+          "name": "InputZip",
+          "type": "string",
+          "default": "",
+          "description": "ZIP containing NTLite presets, unattended XML files, and optional supporting logs. A file picker opens when omitted."
+        },
+        {
+          "name": "OutputRoot",
+          "type": "string",
+          "default": "C:\\Temp\\NTLiteChecker",
+          "description": "Output folder for the verification report."
+        }
+      ]
     }
   ]
 }
