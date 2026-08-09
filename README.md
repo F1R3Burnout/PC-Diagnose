@@ -130,7 +130,7 @@ Running remote PowerShell code requires trust in this repository.
 - Disk, volume, free-space, and file-system checks
 - Disk event mapping to physical disk names and drive letters when Windows reports `\Device\Harddisk...`
 - Collapsed overview of explicitly changed local policy settings
-- Dedicated Deployment / Image Audit for NTLite, SetupComplete, unattend, first-logon evidence, setup logs, script hashes, and effective Widgets/Sticky Keys state
+- Plain-English Deployment / Image Audit for NTLite, SetupComplete, unattend, first-logon evidence, effective Widgets/Sticky Keys state, and repeated setup errors grouped by cause; complete technical evidence stays collapsed below
 - Hardware migration and stale fixed-hardware driver context
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
