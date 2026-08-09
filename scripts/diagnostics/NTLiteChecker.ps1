@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ToolName = "NTLiteChecker"
-$ToolVersion = "1.0"
+$ToolVersion = "1.1"
 
 function Test-IsAdmin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -215,9 +215,9 @@ try {
     $imageVersions = @($imageRows.Version | Sort-Object -Unique)
     $imageSessions = @($imageRows.Guid | Sort-Object -Unique)
     if ($imageVersions.Count -gt 1) {
-        Add-Result "Conflict" "Input" "Presets reference different Windows image versions" `
+        Add-Result "Not verifiable" "Input" "Presets were created against different Windows image versions" `
             "One final image version and session" (($imageRows | ForEach-Object { "$($_.Source): $($_.Version), $($_.Guid)" }) -join " | ") `
-            "The files may come from different NTLite stages. Supply the final auto-saved preset and the exact application order before treating all settings as one final configuration." `
+            "This can be valid in a staged image workflow, but the separate files do not prove the final state. Include the final auto-saved preset and application order." `
             (($imageRows.Source) -join "; ")
     } elseif ($imageRows.Count -gt 0) {
         Add-Result "Info" "Input" "NTLite image reference" $imageRows[0].Version $imageRows[0].Guid `
@@ -248,7 +248,7 @@ try {
         "BitLocker\PreventDeviceEncryption" = @{ Path="HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker"; Value="PreventDeviceEncryption"; Scope="Machine" }
         "GraphicsDrivers\HwSchMode" = @{ Path="HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"; Value="HwSchMode"; Scope="Machine" }
         "WindowsAI\DisableAIDataAnalysis" = @{ Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI"; Value="DisableAIDataAnalysis"; Scope="Machine policy" }
-        "WindowsCopilot\TurnOffWindowsCopilot" = @{ Path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot"; Value="TurnOffWindowsCopilot"; Scope="Current user" }
+        "WindowsCopilot\TurnOffWindowsCopilot" = @{ Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot"; Value="TurnOffWindowsCopilot"; Scope="Machine policy" }
         "PushNotifications\ToastEnabled" = @{ Path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications"; Value="ToastEnabled"; Scope="Current user" }
         "Mouse\MouseSpeed" = @{ Path="HKCU:\Control Panel\Mouse"; Value="MouseSpeed"; Scope="Current user" }
         "Advanced\LaunchTo" = @{ Path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"; Value="LaunchTo"; Scope="Current user" }
@@ -345,7 +345,14 @@ try {
                 $baseName = $leaf -replace '(?i)\.(appx|msix|appxbundle|msixbundle)$', ''
                 $candidate = ($baseName -split '_')[0]
                 if ($baseName -match '(?i)^PowerShell-') { $candidate = "Microsoft.PowerShell" }
-                $match = @($appxNames | Where-Object { $_ -like "$candidate*" }) | Select-Object -First 1
+                $candidateAliases = @($candidate)
+                if ($candidate -ieq "Microsoft.WSL") {
+                    $candidateAliases += "MicrosoftCorporationII.WindowsSubsystemForLinux"
+                }
+                $match = @($appxNames | Where-Object {
+                    $installedName = $_
+                    @($candidateAliases | Where-Object { $installedName -like "$_*" }).Count -gt 0
+                }) | Select-Object -First 1
                 if ($match) {
                     Add-Result "Matched" "Updates and apps" $candidate "Installed or provisioned" $match `
                         "A matching AppX/MSIX package is installed or provisioned." $doc.Relative
