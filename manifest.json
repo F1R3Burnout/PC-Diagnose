@@ -63,7 +63,7 @@
       "id": "ntlitecheck",
       "name": "NTLiteChecker",
       "category": "pc-test",
-      "description": "Compares NTLite preset and Windows unattended XML files from a ZIP with the current Windows installation.",
+      "description": "Read-only verification of NTLite presets, unattended XML, build logs, post-setup source files, and retained Windows Setup evidence.",
       "path": "scripts/diagnostics/NTLiteChecker.ps1",
       "kind": "powershell",
       "requiresAdmin": true,
@@ -73,7 +73,7 @@
           "name": "InputZip",
           "type": "string",
           "default": "",
-          "description": "ZIP containing NTLite presets, unattended XML files, and optional supporting logs. A file picker opens when omitted."
+          "description": "ZIP containing NTLite presets, unattended XML, NTLite logs, and optional post-setup source files. A file picker opens when omitted."
         },
         {
           "name": "OutputRoot",

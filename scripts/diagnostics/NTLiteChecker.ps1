@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ToolName = "NTLiteChecker"
-$ToolVersion = "1.1"
+$ToolVersion = "1.2"
 
 function Test-IsAdmin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -29,6 +29,39 @@ function ConvertTo-HtmlText {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value) { return "" }
     return [System.Net.WebUtility]::HtmlEncode([string]$Value)
+}
+
+function Protect-SensitiveText {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return "" }
+    $text = [string]$Value
+    $text = [regex]::Replace($text, '(?i)\b(ProductKey|Password|Passphrase|Token|Secret|ApiKey)\b\s*[:=]\s*("[^"]*"|''[^'']*''|\S+)', '$1=<redacted>')
+    $text = [regex]::Replace($text, '(?i)\b([A-Z0-9]{5}-){4}[A-Z0-9]{5}\b', '<redacted-product-key>')
+    return $text
+}
+
+function ConvertTo-RegistryProviderPath {
+    param([AllowNull()][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    $normalized = $Path.Trim().Trim('"').Trim("'") -replace '/', '\'
+    $prefixes = @{
+        'HKEY_LOCAL_MACHINE' = 'HKLM:'
+        'HKLM' = 'HKLM:'
+        'HKEY_CURRENT_USER' = 'HKCU:'
+        'HKCU' = 'HKCU:'
+        'HKEY_CLASSES_ROOT' = 'HKCR:'
+        'HKCR' = 'HKCR:'
+        'HKEY_USERS' = 'HKU:'
+        'HKU' = 'HKU:'
+    }
+    foreach ($prefix in $prefixes.Keys) {
+        if ($normalized -ieq $prefix) { return $prefixes[$prefix] + '\' }
+        if ($normalized.StartsWith($prefix + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            return $prefixes[$prefix] + $normalized.Substring($prefix.Length)
+        }
+    }
+    if ($normalized -match '^(HKLM|HKCU|HKCR|HKU):\\') { return $normalized }
+    return $null
 }
 
 function Select-InputZip {
@@ -120,6 +153,7 @@ Write-Host ""
 
 $results = New-Object System.Collections.Generic.List[object]
 $sources = New-Object System.Collections.Generic.List[object]
+$localSetupEvidence = New-Object System.Collections.Generic.List[object]
 
 function Add-Result {
     param(
@@ -142,6 +176,84 @@ function Add-Result {
     })
 }
 
+function Add-RegistryAssertionResult {
+    param(
+        [Parameter(Mandatory=$true)][string]$RegistryPath,
+        [Parameter(Mandatory=$true)][string]$ValueName,
+        [AllowNull()][string]$Expected,
+        [bool]$ExpectAbsent = $false,
+        [Parameter(Mandatory=$true)][string]$Source
+    )
+    $providerPath = ConvertTo-RegistryProviderPath $RegistryPath
+    if (-not $providerPath) {
+        Add-Result "Not verifiable" "Script assertions" "$RegistryPath\$ValueName" $Expected "Unsupported registry hive" `
+            "The source contains a registry instruction, but its hive cannot be inspected safely by this checker." $Source
+        return
+    }
+    $actual = Get-RegistryValueSafe -Path $providerPath -Name $ValueName
+    if ($ExpectAbsent) {
+        $status = if ($null -eq $actual) { "Matched" } else { "Mismatch" }
+        $actualText = if ($null -eq $actual) { "Value is absent" } else { [string]$actual }
+        Add-Result $status "Script assertions" "$providerPath\$ValueName" "Value is absent" $actualText `
+            "Compared with a literal registry deletion instruction found in the supplied source file. The source file was not executed." $Source
+        return
+    }
+    if ($null -eq $actual) {
+        Add-Result "Mismatch" "Script assertions" "$providerPath\$ValueName" $Expected "Value is missing" `
+            "Compared with a literal registry instruction found in the supplied source file. The source file was not executed." $Source
+    } elseif (Test-ExpectedValue -Actual $actual -Expected $Expected) {
+        Add-Result "Matched" "Script assertions" "$providerPath\$ValueName" $Expected ([string]$actual) `
+            "The current registry value matches the literal instruction found in the supplied source file. This verifies the resulting state, not the historical execution." $Source
+    } else {
+        Add-Result "Mismatch" "Script assertions" "$providerPath\$ValueName" $Expected ([string]$actual) `
+            "The current registry value differs from the literal instruction found in the supplied source file." $Source
+    }
+}
+
+function Get-LiteralRegistryAssertions {
+    param(
+        [Parameter(Mandatory=$true)][IO.FileInfo]$File,
+        [Parameter(Mandatory=$true)][string]$RelativePath
+    )
+    $assertions = New-Object System.Collections.Generic.List[object]
+    $lines = @(Get-Content -LiteralPath $File.FullName -ErrorAction Stop)
+    if ($File.Extension -ieq ".reg") {
+        $currentKey = $null
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            $line = $lines[$index].Trim()
+            if ($line -match '^\[(?<key>HKEY_[^\]]+)\]$') {
+                $currentKey = $matches.key
+                continue
+            }
+            if (-not $currentKey) { continue }
+            if ($line -match '^(?<name>@|"(?:[^"\\]|\\.)*")=(?<data>.*)$') {
+                $name = if ($matches.name -eq '@') { '(Default)' } else { $matches.name.Trim('"') }
+                $raw = $matches.data.Trim()
+                $expectAbsent = ($raw -eq '-')
+                $value = $raw
+                if ($raw -match '(?i)^dword:(?<hex>[0-9a-f]{8})$') { $value = [convert]::ToInt64($matches.hex, 16).ToString() }
+                elseif ($raw -match '^"(?<text>.*)"$') { $value = $matches.text -replace '\\"', '"' -replace '\\\\', '\' }
+                elseif ($raw -match '(?i)^hex(?:\([0-9a-f]+\))?:') { continue }
+                $assertions.Add([pscustomobject]@{ Path=$currentKey; Name=$name; Expected=$value; Absent=$expectAbsent; Source="$RelativePath | line $($index + 1)" })
+            }
+        }
+        return $assertions
+    }
+
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($line -match '(?i)\breg(?:\.exe)?\s+add\s+["'']?(?<path>(?:HKLM|HKCU|HKCR|HKU|HKEY_[A-Z_]+)\\[^"'']+?)["'']?\s+/v\s+["'']?(?<name>[^\s"'']+)["'']?.*?\s/d\s+["'']?(?<value>[^\s"'']+)["'']?') {
+            $assertions.Add([pscustomobject]@{ Path=$matches.path.Trim(); Name=$matches.name; Expected=$matches.value; Absent=$false; Source="$RelativePath | line $($index + 1)" })
+            continue
+        }
+        if ($line -match '(?i)\b(?:Set|New)-ItemProperty\b.*?-Path\s+["''](?<path>[^"'']+)["''].*?-Name\s+["''](?<name>[^"'']+)["''].*?-Value\s+(?:["''](?<quoted>[^"'']*)["'']|(?<plain>[^\s;]+))') {
+            $value = if ($matches.quoted -ne $null -and $matches.quoted -ne '') { $matches.quoted } else { $matches.plain }
+            $assertions.Add([pscustomobject]@{ Path=$matches.path; Name=$matches.name; Expected=$value; Absent=$false; Source="$RelativePath | line $($index + 1)" })
+        }
+    }
+    return $assertions
+}
+
 try {
     Expand-SafeZip -Path $InputZip -Destination $extractFolder
     $files = @(Get-ChildItem -LiteralPath $extractFolder -Recurse -File)
@@ -154,7 +266,16 @@ try {
         $relative = $file.FullName.Substring($extractFolder.Length).TrimStart('\')
         $kind = "Supporting file"
         $parseState = "Not parsed"
-        if ($file.Extension -ieq ".xml") {
+        if ($file.Name -match '(?i)^NTLite(?:_dism)?\.log$') {
+            $kind = if ($file.Name -match '(?i)_dism') { "NTLite DISM log" } else { "NTLite processing log" }
+            $parseState = "Queued for error and warning scan"
+        } elseif ($file.Extension -in @(".ps1", ".cmd", ".bat")) {
+            $kind = "Post-setup script"
+            $parseState = "Queued for safe static inspection; never executed"
+        } elseif ($file.Extension -ieq ".reg") {
+            $kind = "Registry file"
+            $parseState = "Queued for safe state comparison; never imported"
+        } elseif ($file.Extension -ieq ".xml") {
             try {
                 $xml = New-Object System.Xml.XmlDocument
                 $xml.PreserveWhitespace = $false
@@ -263,8 +384,15 @@ try {
         "System\EnableCdp" = @{ Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"; Value="EnableCdp"; Scope="Machine policy" }
         "System\DisableAutomaticRestartSignOn" = @{ Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"; Value="DisableAutomaticRestartSignOn"; Scope="Machine" }
         "Explorer\DisableSearchBoxSuggestions" = @{ Path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Value="DisableSearchBoxSuggestions"; Scope="Current user" }
+        "Explorer\HideRecentlyAddedApps" = @{ Path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Value="HideRecentlyAddedApps"; Scope="Current user policy" }
+        "Explorer\NoPinningStoreToTaskbar" = @{ Path="HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Value="NoPinningStoreToTaskbar"; Scope="Current user policy" }
+        "Explorer\NoReadingPane" = @{ Path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Value="NoReadingPane"; Scope="Current user policy" }
+        "Explorer\NoRecentDocsHistory" = @{ Path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"; Value="NoRecentDocsHistory"; Scope="Current user policy" }
+        "Explorer\ShowOrHideMostUsedApps" = @{ Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"; Value="ShowOrHideMostUsedApps"; Scope="Machine policy" }
         "Explorer\ShowFrequent" = @{ Path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer"; Value="ShowFrequent"; Scope="Current user" }
         "Explorer\ShowRecent" = @{ Path="HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer"; Value="ShowRecent"; Scope="Current user" }
+        "DeliveryOptimization\DODownloadMode" = @{ Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"; Value="DODownloadMode"; Scope="Machine policy" }
+        "Windows Search\AllowCloudSearch" = @{ Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"; Value="AllowCloudSearch"; Scope="Machine policy" }
     }
 
     $tweakRows = New-Object System.Collections.Generic.List[object]
@@ -380,8 +508,8 @@ try {
             if ($paramsNode -and -not [string]::IsNullOrWhiteSpace($paramsNode.InnerText)) { $expectedCommand += " " + $paramsNode.InnerText }
             Add-Result "Not verifiable" "Post-setup" ([IO.Path]::GetFileName($commandPath)) `
                 "Run successfully at order $($indexNode.InnerText)" "Referenced by preset; exit code unavailable" `
-                "A preset proves intent, not execution. Include a central per-command log with start time, end time, command hash, context, exit code, stdout, and stderr." `
-                "$($doc.Relative) | $expectedCommand"
+                "A preset proves intent, not execution. The checker verifies durable effects when a safe current-state assertion is available and searches local Panther logs for invocation evidence." `
+                (Protect-SensitiveText "$($doc.Relative) | $expectedCommand")
         }
     }
 
@@ -455,10 +583,134 @@ try {
             ([IO.Path]::GetFileName($InputZip))
     }
 
+    # NTLite build logs prove image-processing activity, but not the effective state after Windows Setup.
+    foreach ($logFile in @($files | Where-Object { $_.Name -match '(?i)^NTLite(?:_dism)?\.log$' })) {
+        $relative = $logFile.FullName.Substring($extractFolder.Length).TrimStart('\')
+        $lines = @(Get-Content -LiteralPath $logFile.FullName -ErrorAction SilentlyContinue)
+        $failures = New-Object System.Collections.Generic.List[object]
+        $warnings = New-Object System.Collections.Generic.List[object]
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            $line = [string]$lines[$index]
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if ($line -match '(?i)(?:\b(?:failed|failure|aborted|exception)\b|(?:^|\s)error(?:\s+\d+)?\s*:)' -and $line -notmatch '(?i)\berrors?\s*[:=]\s*0\b') {
+                $failures.Add([pscustomobject]@{ Line=$index + 1; Text=(Protect-SensitiveText $line.Trim()) })
+            } elseif ($line -match '(?i)(?:^|\s)warn(?:ing)?\s*:') {
+                $warnings.Add([pscustomobject]@{ Line=$index + 1; Text=(Protect-SensitiveText $line.Trim()) })
+            }
+        }
+        if ($failures.Count -eq 0) {
+            Add-Result "Matched" "Image processing" $logFile.Name "No failure markers" "No failure markers found in $($lines.Count) line(s)" `
+                "The supplied NTLite build log contains no obvious Error, Failed, Aborted, or Exception marker. This does not replace final-state checks." $relative
+        } else {
+            $examples = @($failures | Select-Object -First 8 | ForEach-Object { "line $($_.Line): $($_.Text)" }) -join " | "
+            $sourceLines = @($failures | Select-Object -First 25 | ForEach-Object { "$relative line $($_.Line)" }) -join "; "
+            Add-Result "Mismatch" "Image processing" $logFile.Name "No NTLite processing failures" "$($failures.Count) failure marker(s)" `
+                "Review the build operation before trusting the image. First entries: $examples" $sourceLines
+        }
+        if ($warnings.Count -gt 0) {
+            $warningExamples = @($warnings | Select-Object -First 5 | ForEach-Object { "line $($_.Line): $($_.Text)" }) -join " | "
+            Add-Result "Info" "Image processing" "$($logFile.Name) warnings" "Review warnings" "$($warnings.Count) warning marker(s)" `
+                "Warnings do not always indicate a failed build. First entries: $warningExamples" $relative
+        }
+    }
+
+    # Parse only literal registry instructions. Supplied files are never executed or imported.
+    $scriptFiles = @($files | Where-Object { $_.Extension -in @('.reg', '.ps1', '.cmd', '.bat') })
+    $scriptAssertions = New-Object System.Collections.Generic.List[object]
+    foreach ($scriptFile in $scriptFiles) {
+        $relative = $scriptFile.FullName.Substring($extractFolder.Length).TrimStart('\')
+        try {
+            $assertions = @(Get-LiteralRegistryAssertions -File $scriptFile -RelativePath $relative)
+            if ($assertions.Count -eq 0) {
+                Add-Result "Not verifiable" "Post-setup source" $relative "Script effect is present on this PC" "No safe literal registry assertion found" `
+                    "The file is inventoried and hashed, but the checker will not execute it or guess the effects of variables, functions, installers, or external programs." $relative
+                continue
+            }
+            Add-Result "Info" "Post-setup source" $relative "$($assertions.Count) literal registry instruction(s)" "Compared with current registry" `
+                "Only directly readable REG entries and literal reg.exe/Set-ItemProperty/New-ItemProperty commands are evaluated." $relative
+            foreach ($assertion in $assertions) {
+                $scriptAssertions.Add($assertion)
+            }
+        } catch {
+            Add-Result "Not verifiable" "Post-setup source" $relative "Static source inspection" "Parser could not inspect this file" `
+                (Protect-SensitiveText $_.Exception.Message) $relative
+        }
+    }
+    foreach ($assertionGroup in @($scriptAssertions | Group-Object { "$(ConvertTo-RegistryProviderPath $_.Path)|$($_.Name)|$($_.Expected)|$($_.Absent)" })) {
+        $assertion = $assertionGroup.Group[0]
+        $assertionSources = @($assertionGroup.Group.Source | Sort-Object -Unique) -join "; "
+        Add-RegistryAssertionResult -RegistryPath $assertion.Path -ValueName $assertion.Name `
+            -Expected ([string]$assertion.Expected) -ExpectAbsent ([bool]$assertion.Absent) -Source $assertionSources
+    }
+
+    # Inspect durable Windows Setup evidence already present on the installed PC.
+    $setupLogPaths = @(
+        "$env:WINDIR\Panther\setuperr.log",
+        "$env:WINDIR\Panther\setupact.log",
+        "$env:WINDIR\Panther\UnattendGC\setuperr.log",
+        "$env:WINDIR\Panther\UnattendGC\setupact.log"
+    )
+    foreach ($setupPath in $setupLogPaths) {
+        if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) { continue }
+        $item = Get-Item -LiteralPath $setupPath
+        $readable = $true
+        $readError = ""
+        try {
+            $lines = @(Get-Content -LiteralPath $setupPath -ErrorAction Stop)
+        } catch {
+            $lines = @()
+            $readable = $false
+            $readError = Protect-SensitiveText $_.Exception.Message
+        }
+        $nonEmpty = @($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $hash = try { (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256 -ErrorAction Stop).Hash } catch { "Unavailable" }
+        $localSetupEvidence.Add([pscustomobject]@{
+            File = $setupPath
+            SizeKB = [math]::Round($item.Length / 1KB, 2)
+            LastWriteTime = $item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+            NonEmptyLines = $nonEmpty.Count
+            Readable = $readable
+            SHA256 = $hash
+        })
+        if (-not $readable) {
+            Add-Result "Not verifiable" "Windows Setup evidence" $setupPath "Readable local setup log" "Access unavailable" `
+                "The checker could not inspect this protected log in the current execution context: $readError" $setupPath
+            continue
+        }
+        if ($item.Name -ieq 'setuperr.log') {
+            if ($nonEmpty.Count -eq 0) {
+                Add-Result "Matched" "Windows Setup evidence" $setupPath "No recorded setup errors" "Log is empty" `
+                    "Windows retained this setup error log and it contains no non-empty records." $setupPath
+            } else {
+                $sample = @($nonEmpty | Select-Object -First 6 | ForEach-Object { Protect-SensitiveText ([string]$_).Trim() }) -join " | "
+                Add-Result "Mismatch" "Windows Setup evidence" $setupPath "No recorded setup errors" "$($nonEmpty.Count) non-empty line(s)" `
+                    "Windows Setup recorded messages in setuperr.log. They require review because not every retained message is fatal. First entries: $sample" $setupPath
+            }
+        } else {
+            $executionLines = New-Object System.Collections.Generic.List[object]
+            for ($index = 0; $index -lt $lines.Count; $index++) {
+                if ([string]$lines[$index] -match '(?i)SetupComplete|RunSynchronous|FirstLogonCommands') {
+                    $executionLines.Add([pscustomobject]@{ Line=$index + 1; Text=(Protect-SensitiveText ([string]$lines[$index]).Trim()) })
+                }
+            }
+            if ($executionLines.Count -gt 0) {
+                $sample = @($executionLines | Select-Object -First 6 | ForEach-Object { "line $($_.Line): $($_.Text)" }) -join " | "
+                Add-Result "Info" "Windows Setup evidence" "$($item.Directory.Name)\$($item.Name)" "Setup command invocation evidence" "$($executionLines.Count) related line(s)" `
+                    "Windows recorded setup command activity. This can prove invocation, but not the inner exit codes of every script. First entries: $sample" $setupPath
+            }
+        }
+    }
+    if ($localSetupEvidence.Count -eq 0) {
+        Add-Result "Not verifiable" "Windows Setup evidence" "Panther logs" "Local Windows Setup logs" "No standard Panther logs found" `
+            "The current Windows installation no longer exposes the standard setupact.log or setuperr.log files at the checked locations." "$env:WINDIR\Panther"
+    }
+
     $resultCsv = Join-Path $outputFolder "VerificationResults.csv"
     $sourceCsv = Join-Path $outputFolder "SourceInventory.csv"
+    $setupEvidenceCsv = Join-Path $outputFolder "LocalSetupEvidence.csv"
     $results | Export-Csv -LiteralPath $resultCsv -NoTypeInformation -Encoding UTF8
     $sources | Export-Csv -LiteralPath $sourceCsv -NoTypeInformation -Encoding UTF8
+    $localSetupEvidence | Export-Csv -LiteralPath $setupEvidenceCsv -NoTypeInformation -Encoding UTF8
 
     $statusOrder = @{ "Conflict"=0; "Mismatch"=1; "Not verifiable"=2; "Matched"=3; "Info"=4 }
     $ordered = @($results | Sort-Object @{Expression={ $statusOrder[$_.Status] }}, Area, Item)
@@ -498,7 +750,7 @@ try {
 <div class="metric warn"><b>$($counts['Not verifiable'])</b><span>Not verifiable</span></div>
 <div class="metric"><b>$($counts['Info'])</b><span>Information</span></div>
 </div>
-<div class="note"><strong>How to read this report:</strong> Matched means the current state can be demonstrated. Mismatch means a directly comparable state differs or is missing. Not verifiable means the XML proves intent but does not leave enough evidence to prove execution. This checker is read-only and does not change the PC.</div>
+<div class="note"><strong>How to read this report:</strong> Matched means the current state can be demonstrated or a supplied processing log contains no obvious failure marker. Mismatch means a directly comparable state differs, is missing, or a build/setup log contains failure evidence. Not verifiable means the supplied source does not leave enough durable evidence. This checker is read-only: supplied scripts and REG files are inspected but never executed or imported.</div>
 $sectionsHtml
 <details class="section source"><summary><span>Source package inventory</span><b>$($sources.Count)</b></summary><div class="table-wrap"><table><thead><tr><th>File</th><th>Type</th><th>Parser state</th><th>KB</th><th>SHA-256</th></tr></thead><tbody>$($sourceRowsHtml -join '')</tbody></table></div></details>
 </main></body></html>
@@ -506,9 +758,13 @@ $sectionsHtml
     $reportPath = Join-Path $outputFolder "NTLiteChecker_Result.html"
     [IO.File]::WriteAllText($reportPath, $html, [Text.UTF8Encoding]::new($true))
 
+    $resultZipPath = "${outputFolder}_Result.zip"
+    Compress-Archive -Path (Join-Path $outputFolder '*') -DestinationPath $resultZipPath -CompressionLevel Optimal -Force
+
     Write-Host "Verification complete." -ForegroundColor Green
     Write-Host "Matched: $($counts['Matched']) | Mismatch: $($counts['Mismatch']) | Conflict: $($counts['Conflict']) | Not verifiable: $($counts['Not verifiable'])" -ForegroundColor Gray
     Write-Host "Report: $reportPath" -ForegroundColor Cyan
+    Write-Host "Result ZIP: $resultZipPath" -ForegroundColor Cyan
     if ($OpenReport) { Start-Process -FilePath $reportPath | Out-Null }
 } finally {
     if (Test-Path -LiteralPath $extractFolder) {
