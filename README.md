@@ -112,7 +112,7 @@ Network event logs, cautious subnet discovery, and internet speed test run by de
 
 The tools are collect-only. They do not repair or modify the PC.
 
-Privacy mode masks common sensitive values, but it is not a guarantee. Review ZIP files before public sharing.
+Privacy mode masks common sensitive values, but it is not a guarantee. Deployment logs can contain setup command lines, although script source contents are not copied. Review ZIP files before public sharing.
 
 Running remote PowerShell code requires trust in this repository.
 
@@ -130,6 +130,7 @@ Running remote PowerShell code requires trust in this repository.
 - Disk, volume, free-space, and file-system checks
 - Disk event mapping to physical disk names and drive letters when Windows reports `\Device\Harddisk...`
 - Collapsed overview of explicitly changed local policy settings
+- Dedicated Deployment / Image Audit for NTLite, SetupComplete, unattend, first-logon evidence, setup logs, script hashes, and effective Widgets/Sticky Keys state
 - Hardware migration and stale fixed-hardware driver context
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection

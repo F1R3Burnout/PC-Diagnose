@@ -5,7 +5,7 @@
 .DESCRIPTION
     This version is intentionally analysis-friendly:
     - no full EVTX exports
-    - no optional Operational logs
+    - only narrowly scoped deployment Operational logs
     - no Security log
     - no large MEMORY.DMP copy
     - limited event count
@@ -55,7 +55,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "2.0 Shutdown Correlation"
+$ToolVersion = "2.1 Deployment Audit"
 $RunStarted = Get-Date
 
 function Test-IsAdmin {
@@ -85,6 +85,7 @@ $Dirs = @{
     Dumps     = Join-Path $Out "06_Minidumps"
     Policies  = Join-Path $Out "07_Policies"
     WER       = Join-Path $Out "08_WER"
+    Deployment = Join-Path $Out "09_Deployment_Audit"
     Runtime   = Join-Path $Out "99_Runtime"
 }
 
@@ -209,6 +210,7 @@ Privacy mode:  $([bool]$PrivacyMode)
 Note:
 This package contains only the most important diagnostics information for an initial analysis.
 It may still contain IP addresses, device names, user names, serial numbers, and paths.
+Deployment audit logs can contain setup command lines. Script source contents are not copied.
 Do not upload it publicly.
 
 Privacy mode:
@@ -3076,6 +3078,8 @@ Files for manual review:
 - 00_Report.html
 - 02_System_Hardware\HardwareMigration_*.csv
 - 07_Policies\Changed_Policy_Registry_Values.csv
+- 09_Deployment_Audit\Deployment_Audit.csv
+- 09_Deployment_Audit\Deployment_Log_Excerpts.csv
 - 01_Events\System_Targeted_Stability_Storage_Network_${EventRangeLabel}.csv
 - 01_Events\System_Targeted_TopEvents_${EventRangeLabel}.csv
 - 99_Runtime\runtime.log
@@ -3109,6 +3113,15 @@ function Write-HtmlReport {
     $dumps = Read-CsvSafe (Join-Path $Dirs.Dumps "DumpFiles.csv")
     $dumpAnalysis = @(Read-DumpAnalysisRows)
     $changedPolicies = Read-CsvSafe (Join-Path $Dirs.Policies "Changed_Policy_Registry_Values.csv")
+    $deploymentAudit = Read-CsvSafe (Join-Path $Dirs.Deployment "Deployment_Audit.csv")
+    $deploymentScripts = Read-CsvSafe (Join-Path $Dirs.Deployment "Setup_Script_Files.csv")
+    $deploymentLogs = Read-CsvSafe (Join-Path $Dirs.Deployment "Deployment_Log_Files.csv")
+    $deploymentExcerpts = Read-CsvSafe (Join-Path $Dirs.Deployment "Deployment_Log_Excerpts.csv")
+    $deploymentUserSettings = Read-CsvSafe (Join-Path $Dirs.Deployment "Loaded_User_Shell_Settings.csv")
+    $deploymentSetupEvents = Read-CsvSafe (Join-Path $Dirs.Deployment "Windows_Setup_Events.csv")
+    $deploymentPowerShellEvents = Read-CsvSafe (Join-Path $Dirs.Deployment "PowerShell_Deployment_Events.csv")
+    $deploymentGroupPolicyEvents = Read-CsvSafe (Join-Path $Dirs.Deployment "GroupPolicy_Operational_Events.csv")
+    $deploymentWidgetsPackages = Read-CsvSafe (Join-Path $Dirs.Deployment "Widgets_Appx_Packages.csv")
 
     $osText = ""
     $overviewPath = Join-Path $Dirs.System "System_Overview.txt"
@@ -3137,6 +3150,15 @@ function Write-HtmlReport {
     $dumpHtml = New-HtmlTable $dumps @("Type","Path","PackagePath","SizeMB","LastWriteTime") 10
     $dumpAnalysisHtml = New-HtmlTable $dumpAnalysis @("DumpFile","Status","BugCheck","ProbablyCausedBy","ProcessName","ModuleName","ImageName","SymbolName","FailureBucket","SuspectedArea","RecommendedAction","ExitCode","AnalysisFile","Note") 10
     $changedPolicyHtml = New-HtmlTable $changedPolicies @("Scope","PolicyRoot","KeyPath","ValueName","ValueKind","ValueData") 300
+    $deploymentAuditHtml = New-HtmlTable $deploymentAudit @("Severity","Area","Check","Status","Expected","Actual","Evidence","SourceFile","SourceEntry","Recommendation") 100
+    $deploymentScriptsHtml = New-HtmlTable $deploymentScripts @("FileType","Path","SizeBytes","Created","LastWriteTime","SHA256") 100
+    $deploymentLogsHtml = New-HtmlTable $deploymentLogs @("SourcePath","PackageFile","SizeBytes","Created","LastWriteTime","CapturedTailLines") 50
+    $deploymentExcerptsHtml = New-HtmlTable $deploymentExcerpts @("Severity","Timestamp","SourceFile","SourceEntry","Text") 200
+    $deploymentUserSettingsHtml = New-HtmlTable $deploymentUserSettings @("UserSid","TaskbarDa","StickyKeysFlags","SourceFile","SourceEntry") 50
+    $deploymentSetupEventsHtml = New-HtmlTable $deploymentSetupEvents @("TimeCreated","ProviderName","Id","LevelDisplayName","Message","RecordId") 100
+    $deploymentPowerShellEventsHtml = New-HtmlTable $deploymentPowerShellEvents @("TimeCreated","ProviderName","Id","LevelDisplayName","Message","RecordId") 100
+    $deploymentGroupPolicyEventsHtml = New-HtmlTable $deploymentGroupPolicyEvents @("TimeCreated","ProviderName","Id","LevelDisplayName","Message","RecordId") 100
+    $deploymentWidgetsPackagesHtml = New-HtmlTable $deploymentWidgetsPackages @("Name","PackageFullName","Version","InstallLocation","Status","SignatureKind","IsFramework") 50
 
 @"
 <!doctype html>
@@ -3188,6 +3210,26 @@ function Write-HtmlReport {
     $findingsHtml
     <h2>System</h2>
     <pre>$(Escape-Html $osText)</pre>
+    <h2>Deployment / Image Audit</h2>
+    <p class="muted">Read-only evidence for NTLite, SetupComplete, unattend, first-logon commands, policy state, and setup execution. Script source contents are not copied.</p>
+    <h3>Effective State and Evidence</h3>
+    $deploymentAuditHtml
+    <h3>Setup Script and Configuration Files</h3>
+    $deploymentScriptsHtml
+    <h3>Captured Setup Log Files</h3>
+    $deploymentLogsHtml
+    <h3>Relevant Setup Log Excerpts</h3>
+    $deploymentExcerptsHtml
+    <h3>Loaded User Shell Settings</h3>
+    $deploymentUserSettingsHtml
+    <h3>Windows Setup Events</h3>
+    $deploymentSetupEventsHtml
+    <h3>Deployment-related PowerShell Events</h3>
+    $deploymentPowerShellEventsHtml
+    <h3>Group Policy Operational Events</h3>
+    $deploymentGroupPolicyEventsHtml
+    <h3>Widgets-related Appx Packages</h3>
+    $deploymentWidgetsPackagesHtml
     <h2>Changed Policy Settings</h2>
     <p class="muted">Only explicit policy registry values found under common local Group Policy locations are shown.</p>
     $changedPolicyHtml
@@ -3300,6 +3342,27 @@ function Write-ResultWindowReport {
     $changedPolicies = Read-CsvSafe (Join-Path $Dirs.Policies "Changed_Policy_Registry_Values.csv")
     $changedPolicyHtml = New-HtmlTable $changedPolicies @("Scope","PolicyRoot","KeyPath","ValueName","ValueKind","ValueData") 300
     $changedPolicyCount = @($changedPolicies).Count
+    $deploymentAudit = Read-CsvSafe (Join-Path $Dirs.Deployment "Deployment_Audit.csv")
+    $deploymentScripts = Read-CsvSafe (Join-Path $Dirs.Deployment "Setup_Script_Files.csv")
+    $deploymentLogs = Read-CsvSafe (Join-Path $Dirs.Deployment "Deployment_Log_Files.csv")
+    $deploymentExcerpts = Read-CsvSafe (Join-Path $Dirs.Deployment "Deployment_Log_Excerpts.csv")
+    $deploymentUserSettings = Read-CsvSafe (Join-Path $Dirs.Deployment "Loaded_User_Shell_Settings.csv")
+    $deploymentSetupEvents = Read-CsvSafe (Join-Path $Dirs.Deployment "Windows_Setup_Events.csv")
+    $deploymentPowerShellEvents = Read-CsvSafe (Join-Path $Dirs.Deployment "PowerShell_Deployment_Events.csv")
+    $deploymentGroupPolicyEvents = Read-CsvSafe (Join-Path $Dirs.Deployment "GroupPolicy_Operational_Events.csv")
+    $deploymentWidgetsPackages = Read-CsvSafe (Join-Path $Dirs.Deployment "Widgets_Appx_Packages.csv")
+    $deploymentIssues = @($deploymentAudit | Where-Object { [string]$_.Severity -match 'Critical|High|Problem|Error|Warning' })
+    $deploymentAuditHtml = New-HtmlTable $deploymentAudit @("Severity","Area","Check","Status","Expected","Actual","Evidence","SourceFile","SourceEntry","Recommendation") 100
+    $deploymentScriptsHtml = New-HtmlTable $deploymentScripts @("FileType","Path","SizeBytes","Created","LastWriteTime","SHA256") 100
+    $deploymentLogsHtml = New-HtmlTable $deploymentLogs @("SourcePath","PackageFile","SizeBytes","Created","LastWriteTime","CapturedTailLines") 50
+    $deploymentExcerptsHtml = New-HtmlTable $deploymentExcerpts @("Severity","Timestamp","SourceFile","SourceEntry","Text") 200
+    $deploymentUserSettingsHtml = New-HtmlTable $deploymentUserSettings @("UserSid","TaskbarDa","StickyKeysFlags","SourceFile","SourceEntry") 50
+    $deploymentSetupEventsHtml = New-HtmlTable $deploymentSetupEvents @("TimeCreated","ProviderName","Id","LevelDisplayName","Message","RecordId") 100
+    $deploymentPowerShellEventsHtml = New-HtmlTable $deploymentPowerShellEvents @("TimeCreated","ProviderName","Id","LevelDisplayName","Message","RecordId") 100
+    $deploymentGroupPolicyEventsHtml = New-HtmlTable $deploymentGroupPolicyEvents @("TimeCreated","ProviderName","Id","LevelDisplayName","Message","RecordId") 100
+    $deploymentWidgetsPackagesHtml = New-HtmlTable $deploymentWidgetsPackages @("Name","PackageFullName","Version","InstallLocation","Status","SignatureKind","IsFramework") 50
+    $deploymentOpenAttribute = if ($deploymentIssues.Count -gt 0) { " open" } else { "" }
+    $deploymentCountText = "$($deploymentAudit.Count) checks, $($deploymentIssues.Count) to review"
 
 @"
 <!doctype html>
@@ -3325,6 +3388,7 @@ function Write-ResultWindowReport {
       --collection:#f1f5f9; --collection-line:#cbd5e1; --collection-ink:#334155;
       --general:#f8fafc; --general-line:#cbd5e1; --general-ink:#334155;
       --policy:#f8fafc; --policy-line:#cbd5e1; --policy-ink:#334155;
+      --deployment:#f5f3ff; --deployment-line:#c4b5fd; --deployment-ink:#5b21b6;
     }
     * { box-sizing:border-box; }
     body { margin:0; font-family: Segoe UI, Arial, sans-serif; color:var(--ink); background:#ffffff; }
@@ -3398,6 +3462,12 @@ function Write-ResultWindowReport {
     .policy-section h3,
     .policy-section .data-block h4 { color:var(--policy-ink); }
     .policy-section[open] > summary { border-bottom:1px solid var(--policy-line); }
+    .deployment-section { border-color:var(--deployment-line); border-left-color:var(--deployment-ink); background:var(--deployment); }
+    .deployment-section > summary,
+    .deployment-section .data-content { background:var(--deployment); }
+    .deployment-section h3,
+    .deployment-section .data-block h4 { color:var(--deployment-ink); }
+    .deployment-section[open] > summary { border-bottom:1px solid var(--deployment-line); }
     .table-scroll { display:block; width:100%; max-width:100%; overflow-x:auto; overflow-y:hidden; border-radius:8px; background:#fff; -webkit-overflow-scrolling:touch; }
     .table-scroll table { width:max-content; min-width:100%; max-width:none; }
     .table-scroll th, .table-scroll td { white-space:nowrap; }
@@ -3525,6 +3595,57 @@ function Write-ResultWindowReport {
 
         <h2>All Findings</h2>
         $allFindingsHtml
+
+        <h2>Deployment / Image Audit</h2>
+        <details class="data-section deployment-section"$deploymentOpenAttribute>
+          <summary>
+            <div>
+              <h3>NTLite, SetupComplete, unattend, and first-logon evidence</h3>
+              <p>$deploymentCountText. Effective registry state, script hashes, setup logs, and execution records. Script source contents are not copied.</p>
+            </div>
+            <span class="area-count">$($deploymentAudit.Count)</span>
+          </summary>
+          <div class="data-content">
+            <div class="data-grid">
+              <section class="data-block">
+                <h4>Effective State and Evidence</h4>
+                <div class="table-scroll">$deploymentAuditHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Setup Script and Configuration Files</h4>
+                <div class="table-scroll">$deploymentScriptsHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Captured Setup Log Files</h4>
+                <div class="table-scroll">$deploymentLogsHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Relevant Setup Log Excerpts</h4>
+                <div class="table-scroll">$deploymentExcerptsHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Loaded User Shell Settings</h4>
+                <div class="table-scroll">$deploymentUserSettingsHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Windows Setup Events</h4>
+                <div class="table-scroll">$deploymentSetupEventsHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Deployment-related PowerShell Events</h4>
+                <div class="table-scroll">$deploymentPowerShellEventsHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Group Policy Operational Events</h4>
+                <div class="table-scroll">$deploymentGroupPolicyEventsHtml</div>
+              </section>
+              <section class="data-block">
+                <h4>Widgets-related Appx Packages</h4>
+                <div class="table-scroll">$deploymentWidgetsPackagesHtml</div>
+              </section>
+            </div>
+          </div>
+        </details>
 
         <h2>Changed Policy Settings</h2>
         <details class="data-section policy-section">
@@ -4216,7 +4337,358 @@ if ($errors.Count -gt 0) {
 Invoke-ChildPowerShellWithTimeout -Name "Changed policy registry values" -ScriptContent $PolicyInventoryScript -TimeoutSeconds 45 | Out-Null
 
 # ==================================================================================================
-# Section 8: Relevant drivers instead of a full driver list
+# Section 8: Deployment / image audit
+# ==================================================================================================
+# Why:
+# Customized images can run SetupComplete, unattend, NTLite, and first-logon commands in different
+# security contexts. This captures execution evidence and effective state without changing the PC.
+
+$DeploymentAuditScript = New-ChildScript @'
+function Add-AuditRow {
+    param(
+        [string]$Severity,
+        [string]$Area,
+        [string]$Check,
+        [string]$Status,
+        [string]$Expected,
+        [string]$Actual,
+        [string]$Evidence,
+        [string]$SourceFile,
+        [string]$SourceEntry,
+        [string]$Recommendation
+    )
+
+    $script:AuditRows.Add([PSCustomObject]@{
+        Severity       = $Severity
+        Area           = $Area
+        Check          = $Check
+        Status         = $Status
+        Expected       = $Expected
+        Actual         = $Actual
+        Evidence       = $Evidence
+        SourceFile     = $SourceFile
+        SourceEntry    = $SourceEntry
+        Recommendation = $Recommendation
+    }) | Out-Null
+}
+
+function Get-RegistryValueAudit {
+    param([string]$Path, [string]$Name)
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return [PSCustomObject]@{ Exists = $false; Value = ""; Kind = ""; Error = "Key not found" }
+        }
+        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+        $value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($null -eq $value) {
+            return [PSCustomObject]@{ Exists = $false; Value = ""; Kind = ""; Error = "Value not found" }
+        }
+        $kind = ""
+        try { $kind = [string]$key.GetValueKind($Name) } catch {}
+        return [PSCustomObject]@{ Exists = $true; Value = [string]$value; Kind = $kind; Error = "" }
+    } catch {
+        return [PSCustomObject]@{ Exists = $false; Value = ""; Kind = ""; Error = $_.Exception.Message }
+    }
+}
+
+function Convert-EventForDeploymentCsv {
+    param([Parameter(Mandatory=$true)]$Event)
+
+    [PSCustomObject]@{
+        TimeCreated      = $Event.TimeCreated
+        LogName          = $Event.LogName
+        RecordId         = $Event.RecordId
+        ProviderName     = $Event.ProviderName
+        Id               = $Event.Id
+        LevelDisplayName = $Event.LevelDisplayName
+        Message          = $Event.Message
+    }
+}
+
+function Get-DeploymentEventsSafe {
+    param([string]$LogName, [int]$Limit = 600)
+
+    try {
+        $filter = @{ LogName = $LogName }
+        if ($null -ne $script:AuditStartTime) { $filter.StartTime = $script:AuditStartTime }
+        return @(Get-WinEvent -FilterHashtable $filter -MaxEvents $Limit -ErrorAction Stop)
+    } catch {
+        $script:CollectionNotes.Add("${LogName}: $($_.Exception.Message)") | Out-Null
+        return @()
+    }
+}
+
+$script:AuditRows = New-Object System.Collections.Generic.List[object]
+$script:ExcerptRows = New-Object System.Collections.Generic.List[object]
+$script:CollectionNotes = New-Object System.Collections.Generic.List[string]
+$scriptFileRows = New-Object System.Collections.Generic.List[object]
+$logFileRows = New-Object System.Collections.Generic.List[object]
+$userSettingRows = New-Object System.Collections.Generic.List[object]
+$logsOutput = Join-Path $Dirs.Deployment "Logs"
+New-Item -ItemType Directory -Force -Path $logsOutput | Out-Null
+
+$installDate = $null
+try { $installDate = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).InstallDate } catch {}
+if ($DaysBack -gt 0) {
+    $script:AuditStartTime = (Get-Date).AddDays(-$DaysBack)
+} elseif ($null -ne $installDate) {
+    $script:AuditStartTime = ([datetime]$installDate).AddDays(-1)
+} else {
+    $script:AuditStartTime = (Get-Date).AddDays(-30)
+}
+
+$scriptRoots = @(
+    "$env:WINDIR\Setup\Scripts",
+    "$env:WINDIR\System32\Sysprep",
+    "C:\ProgramData\NTLite",
+    "C:\NTLite"
+)
+$scriptExtensions = @(".cmd", ".bat", ".ps1", ".vbs", ".js", ".reg", ".xml", ".ini", ".log")
+foreach ($root in $scriptRoots | Select-Object -Unique) {
+    if (-not (Test-Path -LiteralPath $root)) { continue }
+    try {
+        foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $scriptExtensions -contains $_.Extension.ToLowerInvariant() })) {
+            $hash = ""
+            if ($file.Length -le 20MB) {
+                try { $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash } catch {}
+            }
+            $scriptFileRows.Add([PSCustomObject]@{
+                FileType     = if ($file.Extension -eq ".log") { "Log" } else { "Script or configuration" }
+                Path         = $file.FullName
+                SizeBytes    = $file.Length
+                Created      = $file.CreationTime
+                LastWriteTime = $file.LastWriteTime
+                SHA256       = $hash
+            }) | Out-Null
+        }
+    } catch {
+        $script:CollectionNotes.Add("Script inventory ${root}: $($_.Exception.Message)") | Out-Null
+    }
+}
+
+$explicitConfigPaths = @(
+    "$env:SystemDrive\Autounattend.xml",
+    "$env:WINDIR\Panther\unattend.xml",
+    "$env:WINDIR\Panther\unattend-original.xml",
+    "$env:WINDIR\System32\Sysprep\unattend.xml"
+)
+foreach ($path in $explicitConfigPaths | Select-Object -Unique) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+    if (@($scriptFileRows | Where-Object { $_.Path -eq $path }).Count -gt 0) { continue }
+    try {
+        $file = Get-Item -LiteralPath $path -ErrorAction Stop
+        $hash = ""
+        if ($file.Length -le 20MB) {
+            try { $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash } catch {}
+        }
+        $scriptFileRows.Add([PSCustomObject]@{
+            FileType      = "Unattend configuration"
+            Path          = $file.FullName
+            SizeBytes     = $file.Length
+            Created       = $file.CreationTime
+            LastWriteTime = $file.LastWriteTime
+            SHA256        = $hash
+        }) | Out-Null
+    } catch {
+        $script:CollectionNotes.Add("Unattend metadata ${path}: $($_.Exception.Message)") | Out-Null
+    }
+}
+
+$knownLogPaths = @(
+    "$env:WINDIR\Panther\setupact.log",
+    "$env:WINDIR\Panther\setuperr.log",
+    "$env:WINDIR\Panther\UnattendGC\setupact.log",
+    "$env:WINDIR\Panther\UnattendGC\setuperr.log",
+    "$env:WINDIR\System32\Sysprep\Panther\setupact.log",
+    "$env:WINDIR\System32\Sysprep\Panther\setuperr.log"
+)
+$setupScriptLogRoot = "$env:WINDIR\Setup\Scripts"
+if (Test-Path -LiteralPath $setupScriptLogRoot) {
+    $knownLogPaths += @(Get-ChildItem -LiteralPath $setupScriptLogRoot -Recurse -File -Filter *.log -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+}
+
+$matchPattern = 'SetupComplete|FirstLogon|RunSynchronous|RunAsynchronous|NTLite|unattend|powershell|\.ps1|\.cmd|AllowNewsAndInterests|TaskbarDa|StickyKeys|sethc|error|failed|failure|fatal|exception|exit code|0x[0-9A-Fa-f]{6,}'
+foreach ($path in @($knownLogPaths | Where-Object { $_ } | Select-Object -Unique)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+    try {
+        $file = Get-Item -LiteralPath $path -ErrorAction Stop
+        $safeName = (($file.FullName -replace '^[A-Za-z]:\\', '') -replace '[\\/:*?"<>| ]', '_')
+        $packageLog = Join-Path $logsOutput ("${safeName}_tail.txt")
+        @(
+            "Original source: $($file.FullName)"
+            "Captured: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            "Original size: $($file.Length) bytes"
+            "Note: last 5000 lines only; script source files are not copied."
+            ""
+        ) | Out-File -LiteralPath $packageLog -Encoding UTF8
+        Get-Content -LiteralPath $file.FullName -Tail 5000 -ErrorAction Stop | Out-File -LiteralPath $packageLog -Encoding UTF8 -Append
+
+        $logFileRows.Add([PSCustomObject]@{
+            SourcePath       = $file.FullName
+            PackageFile      = "09_Deployment_Audit\Logs\$([System.IO.Path]::GetFileName($packageLog))"
+            SizeBytes        = $file.Length
+            Created          = $file.CreationTime
+            LastWriteTime    = $file.LastWriteTime
+            CapturedTailLines = 5000
+        }) | Out-Null
+
+        $matches = @(Select-String -LiteralPath $file.FullName -Pattern $matchPattern -AllMatches -ErrorAction SilentlyContinue | Select-Object -Last 300)
+        foreach ($match in $matches) {
+            $text = [string]$match.Line
+            if ($text.Length -gt 1400) { $text = $text.Substring(0, 1400) + "..." }
+            $severity = if ($text -match '(?i)error|failed|failure|fatal|exception|exit code\s*[:=]?\s*[1-9]') { "Warning" } else { "Info" }
+            $timestampText = ""
+            if ($text -match '(?<ts>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[\.,]\d+)?)') {
+                $timestampText = [string]$Matches.ts
+            }
+            $script:ExcerptRows.Add([PSCustomObject]@{
+                Severity   = $severity
+                Timestamp  = $timestampText
+                SourceFile = $file.FullName
+                SourceEntry = "line $($match.LineNumber)"
+                Text       = $text
+            }) | Out-Null
+        }
+    } catch {
+        $script:CollectionNotes.Add("Setup log ${path}: $($_.Exception.Message)") | Out-Null
+    }
+}
+
+$setupEvents = @(Get-DeploymentEventsSafe -LogName "Setup" -Limit 800)
+$setupEvents | ForEach-Object { Convert-EventForDeploymentCsv $_ } |
+    Export-Csv (Join-Path $Dirs.Deployment "Windows_Setup_Events.csv") -NoTypeInformation -Encoding UTF8
+
+$groupPolicyEvents = @(Get-DeploymentEventsSafe -LogName "Microsoft-Windows-GroupPolicy/Operational" -Limit 800)
+$groupPolicyEvents | ForEach-Object { Convert-EventForDeploymentCsv $_ } |
+    Export-Csv (Join-Path $Dirs.Deployment "GroupPolicy_Operational_Events.csv") -NoTypeInformation -Encoding UTF8
+
+$powerShellEvents = @(Get-DeploymentEventsSafe -LogName "Microsoft-Windows-PowerShell/Operational" -Limit 2000 | Where-Object {
+    ([string]$_.Message) -match '(?i)SetupComplete|FirstLogon|RunSynchronous|NTLite|Windows\\Setup\\Scripts|AllowNewsAndInterests|TaskbarDa|StickyKeys|sethc'
+})
+$powerShellEvents | ForEach-Object { Convert-EventForDeploymentCsv $_ } |
+    Export-Csv (Join-Path $Dirs.Deployment "PowerShell_Deployment_Events.csv") -NoTypeInformation -Encoding UTF8
+
+$widgetsPackages = @()
+try {
+    $widgetsPackages = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)WebExperience|Widgets' } | Select-Object Name, PackageFullName, Version, InstallLocation, Status, SignatureKind, IsFramework)
+} catch {
+    $script:CollectionNotes.Add("Widgets package inventory: $($_.Exception.Message)") | Out-Null
+}
+$widgetsPackages | Export-Csv (Join-Path $Dirs.Deployment "Widgets_Appx_Packages.csv") -NoTypeInformation -Encoding UTF8
+
+$widgetsPolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"
+$widgetsPolicy = Get-RegistryValueAudit -Path $widgetsPolicyPath -Name "AllowNewsAndInterests"
+$widgetsStatus = "Not configured"
+$widgetsMeaning = "Windows default applies"
+if ($widgetsPolicy.Exists) {
+    if ([string]$widgetsPolicy.Value -eq "0") {
+        $widgetsStatus = "Configured"
+        $widgetsMeaning = "Widgets are disabled by machine policy"
+    } elseif ([string]$widgetsPolicy.Value -eq "1") {
+        $widgetsStatus = "Configured"
+        $widgetsMeaning = "Widgets are allowed by machine policy"
+    } else {
+        $widgetsStatus = "Unexpected value"
+        $widgetsMeaning = "Value should normally be 0 or 1"
+    }
+}
+$widgetsActual = if ($widgetsPolicy.Exists) { "$($widgetsPolicy.Kind) $($widgetsPolicy.Value)" } else { "Missing" }
+Add-AuditRow "Info" "Registry" "Machine-wide Widgets policy" $widgetsStatus "Use DWORD 0 only when the image is intended to disable Widgets" $widgetsActual "$widgetsMeaning. $($widgetsPolicy.Error)" "Registry" "HKLM\SOFTWARE\Policies\Microsoft\Dsh\AllowNewsAndInterests" "Compare the effective value with the intended master-image configuration."
+
+$currentTaskbar = Get-RegistryValueAudit -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarDa"
+$taskbarMeaning = if (-not $currentTaskbar.Exists) { "Windows default applies" } elseif ([string]$currentTaskbar.Value -eq "0") { "Widgets button hidden for this user" } else { "Widgets button visible for this user" }
+$currentTaskbarStatus = if ($currentTaskbar.Exists) { "Configured" } else { "Not configured" }
+$currentTaskbarActual = if ($currentTaskbar.Exists) { "$($currentTaskbar.Kind) $($currentTaskbar.Value)" } else { "Missing" }
+Add-AuditRow "Info" "Registry" "Current-user Widgets taskbar button" $currentTaskbarStatus "Depends on image intent; this is a per-user preference" $currentTaskbarActual "$taskbarMeaning. $($currentTaskbar.Error)" "Registry" "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDa" "For new profiles, apply user settings in the Default User profile or at first logon rather than in SYSTEM's HKCU hive."
+
+$currentSticky = Get-RegistryValueAudit -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags"
+$currentStickyStatus = if ($currentSticky.Exists) { "Configured" } else { "Not found" }
+$currentStickyActual = if ($currentSticky.Exists) { "$($currentSticky.Kind) $($currentSticky.Value)" } else { "Missing" }
+Add-AuditRow "Info" "Registry" "Current-user Sticky Keys flags" $currentStickyStatus "Compare with the intended accessibility configuration" $currentStickyActual $currentSticky.Error "Registry" "HKCU\Control Panel\Accessibility\StickyKeys\Flags" "Use this value to verify whether a user-context customization reached the signed-in account."
+
+try {
+    foreach ($sidKey in @(Get-ChildItem -LiteralPath Registry::HKEY_USERS -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^S-1-5-21-.+-\d+$' })) {
+        $sid = [string]$sidKey.PSChildName
+        $taskbar = Get-RegistryValueAudit -Path "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarDa"
+        $sticky = Get-RegistryValueAudit -Path "Registry::HKEY_USERS\$sid\Control Panel\Accessibility\StickyKeys" -Name "Flags"
+        $userSettingRows.Add([PSCustomObject]@{
+            UserSid         = $sid
+            TaskbarDa       = if ($taskbar.Exists) { $taskbar.Value } else { "Missing" }
+            StickyKeysFlags = if ($sticky.Exists) { $sticky.Value } else { "Missing" }
+            SourceFile      = "Registry"
+            SourceEntry     = "HKEY_USERS\$sid"
+        }) | Out-Null
+    }
+} catch {
+    $script:CollectionNotes.Add("Loaded user hive inventory: $($_.Exception.Message)") | Out-Null
+}
+
+$setupCompletePath = "$env:WINDIR\Setup\Scripts\SetupComplete.cmd"
+$setupCompleteFile = $null
+if (Test-Path -LiteralPath $setupCompletePath -PathType Leaf) {
+    $setupCompleteFile = Get-Item -LiteralPath $setupCompletePath -ErrorAction SilentlyContinue
+    $setupHash = ""
+    try { $setupHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setupCompletePath -ErrorAction Stop).Hash } catch {}
+    Add-AuditRow "Info" "Setup" "SetupComplete.cmd artifact" "Present" "Present only when this deployment method uses SetupComplete" "$($setupCompleteFile.Length) bytes; SHA256 $setupHash" "The script file remains on disk; its content was not copied." $setupCompletePath "file metadata" "Use the hash to compare the deployed script with the master-image source."
+} else {
+    Add-AuditRow "Info" "Setup" "SetupComplete.cmd artifact" "Not present" "Present only when this deployment method uses SetupComplete" "Missing" "NTLite or unattend may use another execution stage, so absence alone is not a failure." $setupCompletePath "file check" "Review the NTLite preset and unattend command stage."
+}
+
+$setupCompleteEvidence = @($script:ExcerptRows | Where-Object { $_.Text -match '(?i)SetupComplete' })
+if ($null -ne $setupCompleteFile -and $setupCompleteEvidence.Count -eq 0) {
+    Add-AuditRow "Warning" "Setup" "SetupComplete execution evidence" "Not found" "At least one Setup/Panther reference when SetupComplete was used" "0 matching log entries" "The file exists, but the captured setup logs do not prove that Windows executed it." "09_Deployment_Audit\Deployment_Log_Excerpts.csv" "search: SetupComplete" "Add explicit start/end/exit-code logging inside SetupComplete.cmd for the next image run."
+} elseif ($setupCompleteEvidence.Count -gt 0) {
+    Add-AuditRow "OK" "Setup" "SetupComplete execution evidence" "Found" "Execution reference" "$($setupCompleteEvidence.Count) matching log entry or entries" "Setup/Panther logs contain SetupComplete references." "09_Deployment_Audit\Deployment_Log_Excerpts.csv" "search: SetupComplete" "Review the matching lines and correlate their timestamps with script-generated logs."
+} else {
+    Add-AuditRow "Info" "Setup" "SetupComplete execution evidence" "Not found" "Only expected when this deployment method uses SetupComplete" "0 matching log entries" "No SetupComplete reference was found in the captured logs." "09_Deployment_Audit\Deployment_Log_Excerpts.csv" "search: SetupComplete" "Review the NTLite preset or unattend stage when SetupComplete was expected."
+}
+
+$ntliteEvidence = @($script:ExcerptRows | Where-Object { $_.Text -match '(?i)NTLite' })
+$ntliteArtifacts = @($scriptFileRows | Where-Object { $_.Path -match '(?i)NTLite' })
+$ntliteEvidenceCount = $ntliteEvidence.Count + $ntliteArtifacts.Count
+$ntliteEvidenceStatus = if ($ntliteEvidenceCount -gt 0) { "Found" } else { "Not found" }
+Add-AuditRow "Info" "NTLite" "NTLite execution or artifact evidence" $ntliteEvidenceStatus "Only expected on an NTLite-built or NTLite-serviced image" "$ntliteEvidenceCount matching item(s)" "Evidence is based on retained setup logs and file metadata; NTLite may clean up temporary artifacts after deployment." "09_Deployment_Audit\Deployment_Log_Excerpts.csv and Setup_Script_Files.csv" "search: NTLite" "Compare retained evidence with the NTLite preset and post-setup command list."
+
+$commandStageEvidence = @($script:ExcerptRows | Where-Object { $_.Text -match '(?i)FirstLogon|RunSynchronous|RunAsynchronous' })
+$commandStageStatus = if ($commandStageEvidence.Count -gt 0) { "Found" } else { "Not found" }
+Add-AuditRow "Info" "Unattend" "FirstLogon and synchronous command evidence" $commandStageStatus "Only expected when unattend commands use these stages" "$($commandStageEvidence.Count) matching log entry or entries" "Matched FirstLogon, RunSynchronous, or RunAsynchronous references in retained setup logs." "09_Deployment_Audit\Deployment_Log_Excerpts.csv" "search: FirstLogon / RunSynchronous / RunAsynchronous" "Use timestamps and execution context to verify whether machine and per-user settings ran in the intended stage."
+
+$warningExcerpts = @($script:ExcerptRows | Where-Object { $_.Severity -eq "Warning" })
+if ($warningExcerpts.Count -gt 0) {
+    Add-AuditRow "Warning" "Logs" "Deployment log warnings or errors" "Review needed" "No failed deployment commands" "$($warningExcerpts.Count) matching line or lines" "Filtered setup logs contain error-like text; not every setup warning is fatal." "09_Deployment_Audit\Deployment_Log_Excerpts.csv" "warning rows" "Review the exact timestamp, component, command, and exit code before changing the image."
+} else {
+    Add-AuditRow "Info" "Logs" "Deployment log warnings or errors" "No matching lines" "No failed deployment commands" "0 matching lines" "No error-like text was found in the captured deployment log excerpts." "09_Deployment_Audit\Deployment_Log_Excerpts.csv" "warning rows" "No action required unless a customization is visibly missing."
+}
+
+$scriptBlockLogging = Get-RegistryValueAudit -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -Name "EnableScriptBlockLogging"
+$loggingEnabled = $scriptBlockLogging.Exists -and ([string]$scriptBlockLogging.Value -eq "1")
+$scriptBlockStatus = if ($loggingEnabled) { "Enabled" } else { "Not enabled" }
+$scriptBlockActual = if ($scriptBlockLogging.Exists) { "$($scriptBlockLogging.Kind) $($scriptBlockLogging.Value)" } else { "Missing" }
+Add-AuditRow "Info" "Logging" "PowerShell Script Block Logging" $scriptBlockStatus "Enable temporarily while validating a master image when command-level history is required" $scriptBlockActual "$($powerShellEvents.Count) deployment-related PowerShell event(s) were captured. Script Block Logging can contain sensitive command data." "Registry and Microsoft-Windows-PowerShell/Operational" "EnableScriptBlockLogging / matched events" "Prefer explicit script transcripts and exit-code logs; enable Script Block Logging only for controlled validation images."
+
+Add-AuditRow "Info" "Events" "Windows Setup event log" "Captured" "Recent setup events" "$($setupEvents.Count) event(s)" "Windows Setup event records since the audit start time." "09_Deployment_Audit\Windows_Setup_Events.csv" "CSV rows" "Correlate timestamps with Panther logs and script artifacts."
+Add-AuditRow "Info" "Events" "Group Policy operational log" "Captured" "Recent policy processing events" "$($groupPolicyEvents.Count) event(s)" "Group Policy processing records since the audit start time." "09_Deployment_Audit\GroupPolicy_Operational_Events.csv" "CSV rows" "Use these records to distinguish image settings from policies applied after startup."
+Add-AuditRow "Info" "Packages" "Widgets-related Appx packages" "Inventoried" "Package presence does not prove whether Widgets are allowed" "$($widgetsPackages.Count) package(s)" "Installed package state is listed separately from effective policy state." "09_Deployment_Audit\Widgets_Appx_Packages.csv" "CSV rows" "Judge availability from policy and user settings, not package presence alone."
+
+if ($script:CollectionNotes.Count -gt 0) {
+    Add-AuditRow "Warning" "Collection" "Deployment audit collection coverage" "Some sources unavailable" "All supported sources readable" "$($script:CollectionNotes.Count) note(s)" "One or more optional logs, event channels, or inventory sources could not be read." "09_Deployment_Audit\Deployment_Audit_Collection_Notes.txt" "text lines" "Review the collection notes before treating missing evidence as proof that a command did not run."
+}
+
+$script:AuditRows | Export-Csv (Join-Path $Dirs.Deployment "Deployment_Audit.csv") -NoTypeInformation -Encoding UTF8
+$scriptFileRows | Sort-Object Path | Export-Csv (Join-Path $Dirs.Deployment "Setup_Script_Files.csv") -NoTypeInformation -Encoding UTF8
+$logFileRows | Sort-Object SourcePath | Export-Csv (Join-Path $Dirs.Deployment "Deployment_Log_Files.csv") -NoTypeInformation -Encoding UTF8
+$script:ExcerptRows | Sort-Object SourceFile, SourceEntry | Export-Csv (Join-Path $Dirs.Deployment "Deployment_Log_Excerpts.csv") -NoTypeInformation -Encoding UTF8
+$userSettingRows | Sort-Object UserSid | Export-Csv (Join-Path $Dirs.Deployment "Loaded_User_Shell_Settings.csv") -NoTypeInformation -Encoding UTF8
+if ($script:CollectionNotes.Count -gt 0) {
+    $script:CollectionNotes | Sort-Object -Unique | Out-File (Join-Path $Dirs.Deployment "Deployment_Audit_Collection_Notes.txt") -Encoding UTF8
+}
+'@
+
+Invoke-ChildPowerShellWithTimeout -Name "Deployment and image audit" -ScriptContent $DeploymentAuditScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
+
+# ==================================================================================================
+# Section 9: Relevant drivers instead of a full driver list
 # ==================================================================================================
 # Why:
 # For desktop instability, network, storage, disk, system, and low-level utility drivers are most relevant.
@@ -4374,7 +4846,7 @@ Get-HotFix |
 Invoke-ChildPowerShellWithTimeout -Name "Relevant driver classes and updates" -ScriptContent $DriverInventoryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
 
 # ==================================================================================================
-# Section 9: Event logs with timeout and limits
+# Section 10: Event logs with timeout and limits
 # ==================================================================================================
 # Why:
 # Event logs are the part that can take a long time or hang on some systems.
@@ -4522,7 +4994,7 @@ if (`$UseStartTime) {
 Invoke-ChildPowerShellWithTimeout -Name "Event log analysis System Application Targeted" -ScriptContent $EventScript -TimeoutSeconds $EventTimeoutSeconds | Out-Null
 
 # ==================================================================================================
-# Section 10: Windows Error Reporting app crash reports
+# Section 11: Windows Error Reporting app crash reports
 # ==================================================================================================
 # Why:
 # User-mode crashes such as games usually do not create C:\Windows\Minidump files.
@@ -4635,7 +5107,7 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
 }
 
 # ==================================================================================================
-# Section 11: Minidumps, but no huge MEMORY.DMP
+# Section 12: Minidumps, but no huge MEMORY.DMP
 # ==================================================================================================
 # Why:
 # Small minidumps are very useful for blue screens.
@@ -4809,7 +5281,7 @@ Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -
 }
 
 # ==================================================================================================
-# Section 11: Quick summary
+# Section 13: Quick summary
 # ==================================================================================================
 # Why:
 # This file shows the most important facts and top events without opening CSV files first.
@@ -4849,6 +5321,7 @@ This package contains only the most important data:
 - System/Application errors and warnings as CSV
 - targeted stability, storage, and network events
 - hardware, storage, network, and power information
+- deployment and master-image execution evidence
 - minidumps, if present
 
 "@ | Out-File $summaryPath -Encoding UTF8
@@ -4928,7 +5401,7 @@ if (Test-Path $targetedTxt) {
 Invoke-ChildPowerShellWithTimeout -Name "Create quick summary" -ScriptContent $SummaryScript -TimeoutSeconds $StepTimeoutSeconds | Out-Null
 
 # ==================================================================================================
-# Section 12: Findings, HTML report, manifest, and optional privacy mode
+# Section 14: Findings, HTML report, manifest, and optional privacy mode
 # ==================================================================================================
 # Why:
 # From here, the collected raw data is converted into an initial prioritization and readable overview.
@@ -4967,7 +5440,7 @@ if ($PrivacyMode) {
 }
 
 # ==================================================================================================
-# Section 13: Create ZIP
+# Section 15: Create ZIP
 # ==================================================================================================
 # Why:
 # At the end, only one package file should need to be shared.
