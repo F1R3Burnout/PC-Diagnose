@@ -172,15 +172,16 @@ Restart and shutdown results distinguish the actual incident time from the later
 - `Kernel-Power 41`: previous Windows session was not shut down cleanly
 - `BugCheck 1001`: blue-screen/bugcheck evidence when the provider also identifies a BugCheck or system error report
 
-Privacy mode masks common sensitive values, but it is not a guarantee. Deployment logs can contain setup command lines, although script source contents are not copied. Review ZIP files before public sharing.
+Privacy mode masks common sensitive values, but it is not a guarantee. Review ZIP files before public sharing.
 
 Running remote PowerShell code requires trust in this repository.
 
 ## Features
 
 - Menu-based tool selection from one short command
-- Portable, read-only NTLite verification against presets, unattended XML, NTLite logs, safe static registry assertions, current Windows state, and retained Panther setup evidence
+- Portable, read-only NTLite and policy verification in menu item `3` against presets, unattended XML, NTLite logs, safe static registry assertions, current Windows state, and retained Panther setup evidence
 - Local HTML result view
+- Compact hardware summary at the top of PCDiagLite with CPU, GPU, RAM, mainboard, and system storage
 - Timeout-protected collection steps with hardened child process handling
 - Findings grouped by primary area
 - Newest-first event timeline
@@ -190,8 +191,6 @@ Running remote PowerShell code requires trust in this repository.
 - SMART and storage reliability checks
 - Disk, volume, free-space, and file-system checks
 - Disk event mapping to physical disk names and drive letters when Windows reports `\Device\Harddisk...`
-- Collapsed overview of explicitly changed local policy settings
-- Plain-English Deployment / Image Audit for NTLite, SetupComplete, unattend, first-logon evidence, effective Widgets/Sticky Keys state, and repeated setup errors grouped by cause; complete technical evidence stays collapsed below
 - Hardware migration and stale fixed-hardware driver context
 - Network, DNS, hosts file, NRPT, and endpoint checks
 - TCP/UDP port exhaustion detection
