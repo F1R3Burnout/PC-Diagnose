@@ -52,6 +52,9 @@ Typical files:
 00_Result.html
 00_Report.html
 00_Findings_Summary.txt
+01_Events\Restart_Shutdown_History_<range>.csv
+01_Events\Restart_Shutdown_Incidents_<range>.csv
+99_Runtime\EventCollection_Status.txt
 PCDiagLite_<Computer>_<Timestamp>.zip
 ```
 
@@ -158,6 +161,17 @@ Network event logs, cautious subnet discovery, and internet speed test run by de
 
 The tools are collect-only. They do not repair or modify the PC.
 
+Restart and shutdown results distinguish the actual incident time from the later time at which Windows logged the event. `User32` event 1074 is treated as a planned request and identifies its initiating process, user, reason, and shutdown type when Windows recorded those fields. Windows Update is named as the initiator only when the event contains matching process, service, or reason evidence.
+
+`EventLog` 6008 and `Kernel-Power` 41 confirm that a previous Windows session did not end cleanly, but do not by themselves prove a blue screen, power-supply fault, or hardware defect. A blue screen is classified only when matching BugCheck evidence is present. The runtime status file makes missing or failed core event collection visible instead of allowing an incomplete scan to appear healthy.
+
+- `User32 1074`: planned shutdown/restart request and initiator
+- `EventLog 6006`: Event Log service stopped cleanly
+- `EventLog 6005`: Event Log service started and serves as a boot marker
+- `EventLog 6008`: previous shutdown was unexpected; normally written at the following boot
+- `Kernel-Power 41`: previous Windows session was not shut down cleanly
+- `BugCheck 1001`: blue-screen/bugcheck evidence when the provider also identifies a BugCheck or system error report
+
 Privacy mode masks common sensitive values, but it is not a guarantee. Deployment logs can contain setup command lines, although script source contents are not copied. Review ZIP files before public sharing.
 
 Running remote PowerShell code requires trust in this repository.
@@ -172,7 +186,7 @@ Running remote PowerShell code requires trust in this repository.
 - Newest-first event timeline
 - Clickable Event Viewer details
 - Source tracing for captured files, CSV rows, and Event Viewer record IDs
-- Unexpected shutdown correlation for EventLog 6008, Kernel-Power 41, planned restarts, and nearby hardware signals
+- Correlated restart/shutdown history for User32 1074, EventLog 6005/6006/6008, Kernel-Power 41, and BugCheck 1001, with incident time, log time, initiator, clean-shutdown confirmation, and source record IDs
 - SMART and storage reliability checks
 - Disk, volume, free-space, and file-system checks
 - Disk event mapping to physical disk names and drive letters when Windows reports `\Device\Harddisk...`

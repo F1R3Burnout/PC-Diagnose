@@ -55,8 +55,10 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "2.2 Human-readable Deployment Audit"
+$ToolVersion = "2.3 Restart and Shutdown Correlation"
 $RunStarted = Get-Date
+$RestartCorrelationWindowMinutes = 10
+$BootCorrelationWindowMinutes = 3
 
 function Test-IsAdmin {
     $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -300,29 +302,39 @@ function Invoke-ChildPowerShellWithTimeout {
 
     $safe = ($Name -replace '[\\/:*?""<>| ]','_')
     $child = Join-Path $Dirs.Runtime "${safe}.ps1"
-    $launcher = Join-Path $Dirs.Runtime "${safe}.cmd"
     $stdout = Join-Path $Dirs.Runtime "${safe}_stdout.txt"
     $stderr = Join-Path $Dirs.Runtime "${safe}_stderr.txt"
 
-    [System.IO.File]::WriteAllText($child, $ScriptContent, [System.Text.UTF8Encoding]::new($true))
+    $script:LastChildProcessResult = [PSCustomObject]@{
+        StepName       = $Name
+        ExitCode       = "Not started"
+        ChildScriptPath = $child
+        StdoutPath     = $stdout
+        StderrPath     = $stderr
+        TimedOut       = $false
+        Succeeded      = $false
+    }
+
     $psExe = ""
     try { $psExe = (Get-Command "powershell.exe" -ErrorAction Stop).Source } catch {}
     if ([string]::IsNullOrWhiteSpace($psExe)) {
         $psExe = Join-Path $PSHOME "powershell.exe"
     }
-    $launcherLines = @(
-        "@echo off",
-        ('"{0}" -NoProfile -ExecutionPolicy Bypass -File "{1}" 1> "{2}" 2> "{3}"' -f $psExe, $child, $stdout, $stderr),
-        "exit /b %ERRORLEVEL%"
-    )
-    [System.IO.File]::WriteAllLines($launcher, $launcherLines, [System.Text.Encoding]::ASCII)
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Write-ProgressLine "START: $Name (Timeout ${TimeoutSeconds}s)" "Cyan"
 
     try {
-        $argLine = "/d /c `"$launcher`""
-        $p = Start-Process -FilePath "cmd.exe" -ArgumentList $argLine -PassThru -WindowStyle Hidden
+        $encodingPreamble = '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)' + "`r`n" + '$OutputEncoding = [Console]::OutputEncoding' + "`r`n"
+        [System.IO.File]::WriteAllText($child, ($encodingPreamble + $ScriptContent), [System.Text.UTF8Encoding]::new($true))
+        $argumentLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $child
+        $p = Start-Process `
+            -FilePath $psExe `
+            -ArgumentList $argumentLine `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr `
+            -PassThru `
+            -WindowStyle Hidden
 
         $lastInfo = 0
         while (-not $p.HasExited) {
@@ -340,11 +352,33 @@ function Invoke-ChildPowerShellWithTimeout {
                 $msg = "SKIPPED/TIMEOUT: $Name after $TimeoutSeconds seconds"
                 Write-ProgressLine $msg "Yellow"
                 $msg | Out-File (Join-Path $Dirs.Runtime "timeouts.txt") -Encoding UTF8 -Append
+                $script:LastChildProcessResult.ExitCode = "Timeout"
+                $script:LastChildProcessResult.TimedOut = $true
+
+                $failureLines = @(
+                    "Child process timed out",
+                    "Step: $Name",
+                    "ExitCode: Timeout",
+                    "Script: $child",
+                    "Stdout: $stdout",
+                    "Stderr: $stderr"
+                )
+                if (Test-Path -LiteralPath $stderr) {
+                    $stderrTail = @(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue | Select-Object -Last 80)
+                    if ($stderrTail.Count -gt 0) {
+                        $failureLines += ""
+                        $failureLines += "Stderr (last $($stderrTail.Count) line(s)):"
+                        $failureLines += $stderrTail
+                    }
+                }
+                $failureLines += ""
+                $failureLines | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
                 return $false
             }
         }
 
         $sw.Stop()
+        try { $p.WaitForExit() } catch {}
         try { $p.Refresh() } catch {}
 
         $exitCode = $null
@@ -353,37 +387,77 @@ function Invoke-ChildPowerShellWithTimeout {
 
         if ([string]::IsNullOrWhiteSpace($exitCodeText)) {
             $stderrText = ""
-            if (Test-Path $stderr) {
-                try { $stderrText = Get-Content $stderr -Raw -ErrorAction SilentlyContinue } catch {}
+            if (Test-Path -LiteralPath $stderr) {
+                try { $stderrText = Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue } catch {}
             }
 
+            $script:LastChildProcessResult.ExitCode = "Unavailable"
             if ([string]::IsNullOrWhiteSpace($stderrText)) {
-                Write-ProgressLine ("OK: {0} ({1:n1}s)" -f $Name, $sw.Elapsed.TotalSeconds) "Green"
+                $script:LastChildProcessResult.Succeeded = $true
+                Write-ProgressLine ("OK: {0} ({1:n1}s, exit code unavailable)" -f $Name, $sw.Elapsed.TotalSeconds) "Green"
                 return $true
             }
 
             Write-ProgressLine "WARNING: $Name finished, exit code unavailable" "Yellow"
-            "Exit code unavailable" | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
-            $stderrText | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
+            @(
+                "Child process failed",
+                "Step: $Name",
+                "ExitCode: Unavailable",
+                "Script: $child",
+                "Stdout: $stdout",
+                "Stderr: $stderr",
+                "",
+                "Stderr:",
+                $stderrText,
+                ""
+            ) | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
             return $false
         }
 
+        $script:LastChildProcessResult.ExitCode = [int]$exitCode
         if ([int]$exitCode -eq 0) {
+            $script:LastChildProcessResult.Succeeded = $true
             Write-ProgressLine ("OK: {0} ({1:n1}s)" -f $Name, $sw.Elapsed.TotalSeconds) "Green"
             return $true
-        } else {
-            Write-ProgressLine "WARNING: $Name finished with exit code $exitCode" "Yellow"
-            "ExitCode $exitCode" | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
-            if (Test-Path $stderr) {
-                Get-Content $stderr -ErrorAction SilentlyContinue | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
-            }
-            return $false
         }
+
+        Write-ProgressLine "WARNING: $Name finished with exit code $exitCode" "Yellow"
+        $failureLines = @(
+            "Child process failed",
+            "Step: $Name",
+            "ExitCode: $exitCode",
+            "Script: $child",
+            "Stdout: $stdout",
+            "Stderr: $stderr"
+        )
+        if (Test-Path -LiteralPath $stderr) {
+            $stderrTail = @(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue | Select-Object -Last 80)
+            if ($stderrTail.Count -gt 0) {
+                $failureLines += ""
+                $failureLines += "Stderr (last $($stderrTail.Count) line(s)):"
+                $failureLines += $stderrTail
+            }
+        }
+        $failureLines += ""
+        $failureLines | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
+        return $false
     } catch {
         $sw.Stop()
         $msg = "ERROR: $Name - $($_.Exception.Message)"
         Write-ProgressLine $msg "Red"
-        $msg | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
+        $script:LastChildProcessResult.ExitCode = "Start failure"
+        @(
+            "Child process failed",
+            "Step: $Name",
+            "ExitCode: Start failure",
+            "Script: $child",
+            "Stdout: $stdout",
+            "Stderr: $stderr",
+            "",
+            "Exception:",
+            ($_ | Out-String).TrimEnd(),
+            ""
+        ) | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
         return $false
     }
 }
@@ -403,7 +477,7 @@ function New-ChildScript {
     }
 
 @"
-`$ErrorActionPreference = 'Continue'
+`$ErrorActionPreference = 'Stop'
 `$ProgressPreference = 'SilentlyContinue'
 `$DaysBack = $DaysBack
 `$EventRangeLabel = $(ConvertTo-PSStringLiteral $EventRangeLabel)
@@ -471,6 +545,37 @@ function Read-CsvSafe {
         return @(Add-SourceInfoToRows -Rows $rows -SourceFile $Path -FirstEntryNumber 2 -EntryPrefix "CSV row")
     } catch {
         return @()
+    }
+}
+
+function Export-CsvWithHeaders {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [object[]]$Rows,
+        [Parameter(Mandatory=$true)][string[]]$Columns
+    )
+
+    $items = @($Rows)
+    if ($items.Count -gt 0) {
+        $items | Select-Object $Columns | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
+        return
+    }
+
+    $header = @($Columns | ForEach-Object { '"' + ([string]$_ -replace '"','""') + '"' }) -join ','
+    $header | Out-File -LiteralPath $Path -Encoding UTF8
+}
+
+function Test-CsvReadable {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $firstLine = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace([string]$firstLine)) { return $false }
+        Import-Csv -LiteralPath $Path -ErrorAction Stop | Select-Object -First 1 | Out-Null
+        return $true
+    } catch {
+        return $false
     }
 }
 
@@ -1152,7 +1257,29 @@ function Test-EventLevelAtMost {
 }
 
 function Get-UnexpectedShutdownReportedTime {
-    param([AllowNull()][string]$Message)
+    param(
+        [AllowNull()][string]$Message,
+        [AllowNull()][string]$EventData = ""
+    )
+
+    $eventTimeText = Get-EventDataValue -EventData $EventData -Name "param1"
+    if ([string]::IsNullOrWhiteSpace($eventTimeText)) { $eventTimeText = Get-EventDataValue -EventData $EventData -Name "Data0" }
+    $eventDateText = Get-EventDataValue -EventData $EventData -Name "param2"
+    if ([string]::IsNullOrWhiteSpace($eventDateText)) { $eventDateText = Get-EventDataValue -EventData $EventData -Name "Data1" }
+    if (-not [string]::IsNullOrWhiteSpace($eventTimeText) -and -not [string]::IsNullOrWhiteSpace($eventDateText)) {
+        $candidate = "$eventDateText $eventTimeText" -replace '[\u200e\u200f]', ''
+        foreach ($culture in @(
+            [System.Globalization.CultureInfo]::CurrentCulture,
+            [System.Globalization.CultureInfo]::GetCultureInfo("de-DE"),
+            [System.Globalization.CultureInfo]::GetCultureInfo("en-US"),
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )) {
+            $parsed = [datetime]::MinValue
+            if ([datetime]::TryParse($candidate, $culture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) {
+                return $parsed
+            }
+        }
+    }
 
     $text = [string]$Message
     if ([string]::IsNullOrWhiteSpace($text)) { return $null }
@@ -1172,11 +1299,13 @@ function Get-UnexpectedShutdownReportedTime {
         } catch {}
     }
 
-    $enMatch = [regex]::Match($text, '(?i)previous system shutdown at\s+(\d{1,2}):(\d{2}):(\d{2})\s+(?:AM|PM)?\s+on\s+([^\.]+?)\s+was unexpected')
+    $enMatch = [regex]::Match($text, '(?i)previous system shutdown at\s+(?<time>\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)?)\s+on\s+(?<date>.+?)\s+was unexpected')
     if ($enMatch.Success) {
-        $candidate = "$($enMatch.Groups[4].Value) $($enMatch.Groups[1].Value):$($enMatch.Groups[2].Value):$($enMatch.Groups[3].Value)"
-        $parsed = [datetime]::MinValue
-        if ([datetime]::TryParse($candidate, [ref]$parsed)) { return $parsed }
+        $candidate = "$($enMatch.Groups['date'].Value) $($enMatch.Groups['time'].Value)"
+        foreach ($culture in @([System.Globalization.CultureInfo]::GetCultureInfo("en-US"), [System.Globalization.CultureInfo]::CurrentCulture)) {
+            $parsed = [datetime]::MinValue
+            if ([datetime]::TryParse($candidate, $culture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) { return $parsed }
+        }
     }
 
     return $null
@@ -1202,9 +1331,361 @@ function Get-EventDataValue {
     )
 
     if ([string]::IsNullOrWhiteSpace($EventData)) { return "" }
-    $match = [regex]::Match([string]$EventData, "(^|;\s*)$([regex]::Escape($Name))=([^;]*)")
+    $text = ([string]$EventData).Trim()
+    if ($text.StartsWith("{")) {
+        try {
+            $dataObject = $text | ConvertFrom-Json -ErrorAction Stop
+            $property = @($dataObject.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1)
+            if ($property.Count -gt 0) { return ([string]$property[0].Value).Trim() }
+        } catch {}
+    }
+    $match = [regex]::Match($text, "(?i)(^|;\s*)$([regex]::Escape($Name))=([^;]*)")
     if ($match.Success) { return $match.Groups[2].Value.Trim() }
     return ""
+}
+
+function Get-FirstEventDataValue {
+    param(
+        [AllowNull()][string]$EventData,
+        [string[]]$Names
+    )
+
+    foreach ($name in @($Names)) {
+        $value = Get-EventDataValue -EventData $EventData -Name $name
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+    return ""
+}
+
+function Get-Event1074Info {
+    param([Parameter(Mandatory=$true)]$Event)
+
+    $eventData = [string]$Event.EventData
+    $message = [string]$Event.Message
+    $process = Get-FirstEventDataValue -EventData $eventData -Names @("ProcessName","InitiatorProcess","param1","Data0")
+    $user = Get-FirstEventDataValue -EventData $eventData -Names @("User","UserName","InitiatingUser","param7","Data6")
+    $reason = Get-FirstEventDataValue -EventData $eventData -Names @("Reason","param3","Data2")
+    $reasonCode = Get-FirstEventDataValue -EventData $eventData -Names @("ReasonCode","param4","Data3")
+    $shutdownType = Get-FirstEventDataValue -EventData $eventData -Names @("ShutdownType","param5","Data4")
+    $comment = Get-FirstEventDataValue -EventData $eventData -Names @("Comment","param6","Data5")
+
+    if ([string]::IsNullOrWhiteSpace($process) -and $message -match '(?im)(?:The process|Der Prozess)\s+(.+?\.exe)(?:\s+\([^)]+\))?\s+(?:has initiated|hat den)') {
+        $process = $matches[1].Trim()
+    }
+    if ($process -match '^(?<path>.+?\.exe)(?:\s+\([^)]+\))?$') { $process = $matches.path.Trim() }
+    if ([string]::IsNullOrWhiteSpace($user) -and $message -match '(?im)(?:on behalf of user|im Auftrag des Benutzers)\s+([^\r\n]+?)(?:\s+for the following reason|\s+aus folgendem Grund)') {
+        $user = $matches[1].Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($reason) -and $message -match '(?im)(?:for the following reason|aus folgendem Grund):\s*([^\r\n]+)') {
+        $reason = $matches[1].Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($reasonCode) -and $message -match '(?im)(?:Reason Code|Ursachencode):\s*([^\r\n]+)') {
+        $reasonCode = $matches[1].Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($shutdownType) -and $message -match '(?im)(?:Shutdown Type|Herunterfahrtyp):\s*([^\r\n]+)') {
+        $shutdownType = $matches[1].Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($comment) -and $message -match '(?im)(?:Comment|Kommentar):\s*([^\r\n]*)') {
+        $comment = $matches[1].Trim()
+    }
+
+    $normalizedType = [string]$shutdownType
+    if ($normalizedType -match '(?i)restart|reboot|neu\s*start|Neustart') {
+        $normalizedType = "restart"
+    } elseif ($normalizedType -match '(?i)power\s*off|shutdown|herunter|ausschalten') {
+        $normalizedType = "shutdown"
+    }
+
+    $context = "$process $reason $reasonCode $shutdownType $comment $message"
+    $category = if ([string]::IsNullOrWhiteSpace($process)) { "Unknown" } else { "Application or service" }
+    if ($process -match '(?i)(?:^|\\)(MoNotificationUx|MusNotification|MusNotificationUx|UsoClient)\.exe$') {
+        $category = "Windows Update"
+    } elseif ($context -match '(?i)UpdateOrchestrator|Update Orchestrator|UsoSvc' -and ($process -notmatch '(?i)svchost\.exe$' -or $context -match '(?i)UsoSvc|UpdateOrchestrator')) {
+        $category = "Windows Update"
+    } elseif ($reason -match '(?i)Operating System:\s*Service pack\s*\(Planned\)|Betriebssystem:\s*Service Pack\s*\(geplant\)') {
+        $category = "Windows Update"
+    }
+
+    return [PSCustomObject]@{
+        InitiatorProcess  = $process
+        InitiatingUser    = $user
+        ShutdownType      = $normalizedType
+        Reason            = $reason
+        ReasonCode        = $reasonCode
+        Comment           = $comment
+        InitiatorCategory = $category
+    }
+}
+
+function Get-BugcheckCodeFromEvent {
+    param([AllowNull()]$Event)
+
+    if ($null -eq $Event) { return "" }
+    $eventData = [string]$Event.EventData
+    $code = Get-FirstEventDataValue -EventData $eventData -Names @("BugcheckCode","BugCheckCode","param1","Data0")
+    if (-not [string]::IsNullOrWhiteSpace($code)) { return $code }
+    $message = [string]$Event.Message
+    if ($message -match '(?i)(?:bugcheck was|Fehlerüberprüfung[^\r\n]*)(?:\s|:)+(0x[0-9a-f]+)') { return $matches[1] }
+    return ""
+}
+
+function Get-EventRecordKey {
+    param([AllowNull()]$Event)
+
+    if ($null -eq $Event) { return "" }
+    return "$([string]$Event.ProviderName)|$([string]$Event.Id)|$([string]$Event.RecordId)|$([string]$Event.TimeCreated)"
+}
+
+function Get-RelatedRecordIdsText {
+    param([object[]]$Events)
+
+    return (@($Events | Where-Object { $null -ne $_ } | ForEach-Object {
+        "$([string]$_.ProviderName) $([string]$_.Id) Record $([string]$_.RecordId)"
+    } | Sort-Object -Unique) -join "; ")
+}
+
+function New-RestartShutdownIncidentRows {
+    param(
+        [object[]]$HistoryRows,
+        [int]$RestartWindowMinutes = 10,
+        [int]$BootWindowMinutes = 3
+    )
+
+    $history = @($HistoryRows)
+    $plannedEvents = @($history | Where-Object { [string]$_.Id -eq '1074' } | Sort-Object { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) })
+    $unexpectedEvents = @($history | Where-Object { [string]$_.Id -eq '6008' })
+    $kernelEvents = @($history | Where-Object { [string]$_.Id -eq '41' -and [string]$_.ProviderName -match '(?i)Kernel-Power' })
+    $bugcheckEvents = @($history | Where-Object { [string]$_.Id -eq '1001' -and [string]$_.ProviderName -match '(?i)BugCheck|WER-SystemErrorReporting|System Error Reporting' })
+    $cleanStops = @($history | Where-Object { [string]$_.Id -eq '6006' })
+    $bootStarts = @($history | Where-Object { [string]$_.Id -eq '6005' })
+    $consumedUnexpected = @{}
+    $consumedKernel = @{}
+    $consumedBugcheck = @{}
+    $rows = @()
+
+    foreach ($plannedEvent in $plannedEvents) {
+        $requestTime = ConvertTo-DateTimeSafe ([string]$plannedEvent.TimeCreated)
+        if ($null -eq $requestTime) { continue }
+        $info = Get-Event1074Info -Event $plannedEvent
+
+        $cleanStop = @($cleanStops | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and $time -ge $requestTime -and ($time - $requestTime).TotalMinutes -le $RestartWindowMinutes
+        } | Sort-Object { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } | Select-Object -First 1)
+
+        $relatedUnexpected = @($unexpectedEvents | Where-Object {
+            $reported = Get-UnexpectedShutdownReportedTime -Message ([string]$_.Message) -EventData ([string]$_.EventData)
+            $null -ne $reported -and [math]::Abs(($reported - $requestTime).TotalMinutes) -le $RestartWindowMinutes
+        } | Sort-Object { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } | Select-Object -First 1)
+
+        $incidentTime = $requestTime
+        $loggedTime = $requestTime
+        if ($relatedUnexpected.Count -gt 0) {
+            $reported = Get-UnexpectedShutdownReportedTime -Message ([string]$relatedUnexpected[0].Message) -EventData ([string]$relatedUnexpected[0].EventData)
+            if ($null -ne $reported) { $incidentTime = $reported }
+            $logged = ConvertTo-DateTimeSafe ([string]$relatedUnexpected[0].TimeCreated)
+            if ($null -ne $logged) { $loggedTime = $logged }
+            $consumedUnexpected[(Get-EventRecordKey $relatedUnexpected[0])] = $true
+        }
+
+        $bootCenter = if ($cleanStop.Count -gt 0) { ConvertTo-DateTimeSafe ([string]$cleanStop[0].TimeCreated) } else { $loggedTime }
+        $boot = @($bootStarts | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and $null -ne $bootCenter -and $time -ge $bootCenter -and ($time - $bootCenter).TotalMinutes -le $RestartWindowMinutes
+        } | Sort-Object { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } | Select-Object -First 1)
+        $kernel = @($kernelEvents | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and [math]::Abs(($time - $loggedTime).TotalMinutes) -le $BootWindowMinutes
+        } | Sort-Object { [math]::Abs(((ConvertTo-DateTimeSafe ([string]$_.TimeCreated)) - $loggedTime).TotalMinutes) } | Select-Object -First 1)
+        $bugcheck = @($bugcheckEvents | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and ([math]::Abs(($time - $loggedTime).TotalMinutes) -le $RestartWindowMinutes -or [math]::Abs(($time - $incidentTime).TotalMinutes) -le $RestartWindowMinutes)
+        } | Sort-Object { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } | Select-Object -First 1)
+        if ($kernel.Count -gt 0) { $consumedKernel[(Get-EventRecordKey $kernel[0])] = $true }
+        if ($bugcheck.Count -gt 0) { $consumedBugcheck[(Get-EventRecordKey $bugcheck[0])] = $true }
+
+        $isRestart = ([string]$info.ShutdownType -eq "restart")
+        $classification = if ($isRestart) { "Planned restart" } else { "Planned shutdown" }
+        if ($cleanStop.Count -eq 0) { $classification += " requested; clean shutdown not confirmed" }
+        $assessment = if ($info.InitiatorCategory -eq "Windows Update") { "Windows Update initiated this $($info.ShutdownType)." } else { "Event 1074 records a planned $($info.ShutdownType) request." }
+        if ($cleanStop.Count -gt 0) {
+            $assessment += " EventLog 6006 confirms that the Event Log service stopped cleanly."
+        } else {
+            $assessment += " No EventLog 6006 record was captured within $RestartWindowMinutes minutes, so a clean shutdown is not confirmed."
+        }
+        if ($relatedUnexpected.Count -gt 0) {
+            $assessment += " Windows later reported that this session ended unexpectedly."
+        }
+
+        $related = @($plannedEvent)
+        if ($cleanStop.Count -gt 0) { $related += $cleanStop[0] }
+        if ($boot.Count -gt 0) { $related += $boot[0] }
+        if ($relatedUnexpected.Count -gt 0) { $related += $relatedUnexpected[0] }
+        if ($kernel.Count -gt 0) { $related += $kernel[0] }
+        if ($bugcheck.Count -gt 0) { $related += $bugcheck[0] }
+        $rows += [PSCustomObject]@{
+            IncidentTime                  = Format-FindingDate $incidentTime
+            LoggedTime                    = Format-FindingDate $loggedTime
+            RequestTime                   = Format-FindingDate $requestTime
+            Classification                = $classification
+            Planned                       = "Yes"
+            InitiatorCategory              = [string]$info.InitiatorCategory
+            InitiatorProcess               = [string]$info.InitiatorProcess
+            InitiatingUser                 = [string]$info.InitiatingUser
+            ShutdownType                   = [string]$info.ShutdownType
+            Reason                         = [string]$info.Reason
+            ReasonCode                     = [string]$info.ReasonCode
+            Comment                        = [string]$info.Comment
+            BugcheckCode                   = if ($bugcheck.Count -gt 0) { Get-BugcheckCodeFromEvent $bugcheck[0] } elseif ($kernel.Count -gt 0) { Get-BugcheckCodeFromEvent $kernel[0] } else { "" }
+            CleanShutdownConfirmed         = if ($cleanStop.Count -gt 0) { "Yes" } else { "No" }
+            KernelPower41Present           = if ($kernel.Count -gt 0) { "Yes" } else { "No" }
+            UnexpectedShutdown6008Present  = if ($relatedUnexpected.Count -gt 0) { "Yes" } else { "No" }
+            BugCheckPresent                = if ($bugcheck.Count -gt 0) { "Yes" } else { "No" }
+            BootConfirmed                  = if ($boot.Count -gt 0) { "Yes" } else { "No" }
+            RelatedRecordIds               = Get-RelatedRecordIdsText -Events $related
+            Assessment                     = $assessment
+        }
+    }
+
+    foreach ($unexpectedEvent in $unexpectedEvents) {
+        if ($consumedUnexpected.ContainsKey((Get-EventRecordKey $unexpectedEvent))) { continue }
+        $loggedTime = ConvertTo-DateTimeSafe ([string]$unexpectedEvent.TimeCreated)
+        $incidentTime = Get-UnexpectedShutdownReportedTime -Message ([string]$unexpectedEvent.Message) -EventData ([string]$unexpectedEvent.EventData)
+        if ($null -eq $incidentTime) { $incidentTime = $loggedTime }
+        if ($null -eq $loggedTime) { continue }
+
+        $kernel = @($kernelEvents | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and [math]::Abs(($time - $loggedTime).TotalMinutes) -le $BootWindowMinutes
+        } | Sort-Object { [math]::Abs(((ConvertTo-DateTimeSafe ([string]$_.TimeCreated)) - $loggedTime).TotalMinutes) } | Select-Object -First 1)
+        $bugcheck = @($bugcheckEvents | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and ([math]::Abs(($time - $loggedTime).TotalMinutes) -le $RestartWindowMinutes -or [math]::Abs(($time - $incidentTime).TotalMinutes) -le $RestartWindowMinutes)
+        } | Sort-Object { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } | Select-Object -First 1)
+        $cleanStop = @($cleanStops | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and [math]::Abs(($time - $incidentTime).TotalMinutes) -le $RestartWindowMinutes
+        } | Select-Object -First 1)
+        $boot = @($bootStarts | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and [math]::Abs(($time - $loggedTime).TotalMinutes) -le $BootWindowMinutes
+        } | Select-Object -First 1)
+        if ($kernel.Count -gt 0) { $consumedKernel[(Get-EventRecordKey $kernel[0])] = $true }
+        if ($bugcheck.Count -gt 0) { $consumedBugcheck[(Get-EventRecordKey $bugcheck[0])] = $true }
+
+        $classification = if ($bugcheck.Count -gt 0) { "Unexpected restart after bugcheck" } else { "Unexpected shutdown / hard reset" }
+        $assessment = "Windows confirms that the previous session ended unexpectedly. No matching Event 1074 planned request was found near the incident time."
+        if ($bugcheck.Count -gt 0) {
+            $assessment += " A BugCheck 1001 record was captured for this incident."
+        } else {
+            $assessment += " No BugCheck evidence was captured for this incident."
+        }
+        $assessment += " The available events cannot distinguish between power loss, hard reset, forced power-off, or a system freeze."
+        if ($cleanStop.Count -gt 0) { $assessment += " A nearby 6006 record also exists and should be reviewed because it conflicts with the unexpected-shutdown report." }
+
+        $related = @($unexpectedEvent)
+        if ($kernel.Count -gt 0) { $related += $kernel[0] }
+        if ($bugcheck.Count -gt 0) { $related += $bugcheck[0] }
+        if ($cleanStop.Count -gt 0) { $related += $cleanStop[0] }
+        if ($boot.Count -gt 0) { $related += $boot[0] }
+        $rows += [PSCustomObject]@{
+            IncidentTime                  = Format-FindingDate $incidentTime
+            LoggedTime                    = Format-FindingDate $loggedTime
+            RequestTime                   = ""
+            Classification                = $classification
+            Planned                       = "No"
+            InitiatorCategory              = "Unknown"
+            InitiatorProcess               = ""
+            InitiatingUser                 = ""
+            ShutdownType                   = if ($bugcheck.Count -gt 0) { "restart" } else { "unknown" }
+            Reason                         = ""
+            ReasonCode                     = ""
+            Comment                        = ""
+            BugcheckCode                   = if ($bugcheck.Count -gt 0) { Get-BugcheckCodeFromEvent $bugcheck[0] } elseif ($kernel.Count -gt 0) { Get-BugcheckCodeFromEvent $kernel[0] } else { "" }
+            CleanShutdownConfirmed         = if ($cleanStop.Count -gt 0) { "Yes" } else { "No" }
+            KernelPower41Present           = if ($kernel.Count -gt 0) { "Yes" } else { "No" }
+            UnexpectedShutdown6008Present  = "Yes"
+            BugCheckPresent                = if ($bugcheck.Count -gt 0) { "Yes" } else { "No" }
+            BootConfirmed                  = if ($boot.Count -gt 0) { "Yes" } else { "No" }
+            RelatedRecordIds               = Get-RelatedRecordIdsText -Events $related
+            Assessment                     = $assessment
+        }
+    }
+
+    foreach ($kernelEvent in $kernelEvents) {
+        if ($consumedKernel.ContainsKey((Get-EventRecordKey $kernelEvent))) { continue }
+        $loggedTime = ConvertTo-DateTimeSafe ([string]$kernelEvent.TimeCreated)
+        if ($null -eq $loggedTime) { continue }
+        $bugcheck = @($bugcheckEvents | Where-Object {
+            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
+            $null -ne $time -and [math]::Abs(($time - $loggedTime).TotalMinutes) -le $RestartWindowMinutes
+        } | Select-Object -First 1)
+        if ($bugcheck.Count -gt 0) { $consumedBugcheck[(Get-EventRecordKey $bugcheck[0])] = $true }
+        $bugcheckCode = if ($bugcheck.Count -gt 0) { Get-BugcheckCodeFromEvent $bugcheck[0] } else { Get-BugcheckCodeFromEvent $kernelEvent }
+        $classification = if ($bugcheck.Count -gt 0 -or (-not [string]::IsNullOrWhiteSpace($bugcheckCode) -and $bugcheckCode -ne "0")) { "Unexpected restart after bugcheck" } else { "Previous session ended unexpectedly" }
+        $assessment = "Kernel-Power 41 was written at boot and confirms only that the previous Windows session did not shut down cleanly."
+        if ($bugcheck.Count -eq 0 -and ($bugcheckCode -eq "0" -or [string]::IsNullOrWhiteSpace($bugcheckCode))) {
+            $assessment += " No BugCheck evidence was captured, so this event alone does not prove a blue screen or a hardware defect."
+        }
+        $related = @($kernelEvent)
+        if ($bugcheck.Count -gt 0) { $related += $bugcheck[0] }
+        $rows += [PSCustomObject]@{
+            IncidentTime                  = ""
+            LoggedTime                    = Format-FindingDate $loggedTime
+            RequestTime                   = ""
+            Classification                = $classification
+            Planned                       = "No"
+            InitiatorCategory              = "Unknown"
+            InitiatorProcess               = ""
+            InitiatingUser                 = ""
+            ShutdownType                   = "unknown"
+            Reason                         = ""
+            ReasonCode                     = ""
+            Comment                        = ""
+            BugcheckCode                   = $bugcheckCode
+            CleanShutdownConfirmed         = "No"
+            KernelPower41Present           = "Yes"
+            UnexpectedShutdown6008Present  = "No"
+            BugCheckPresent                = if ($bugcheck.Count -gt 0) { "Yes" } else { "No" }
+            BootConfirmed                  = "Yes"
+            RelatedRecordIds               = Get-RelatedRecordIdsText -Events $related
+            Assessment                     = $assessment
+        }
+    }
+
+    foreach ($bugcheckEvent in $bugcheckEvents) {
+        if ($consumedBugcheck.ContainsKey((Get-EventRecordKey $bugcheckEvent))) { continue }
+        $loggedTime = ConvertTo-DateTimeSafe ([string]$bugcheckEvent.TimeCreated)
+        if ($null -eq $loggedTime) { continue }
+        $rows += [PSCustomObject]@{
+            IncidentTime                  = ""
+            LoggedTime                    = Format-FindingDate $loggedTime
+            RequestTime                   = ""
+            Classification                = "Unexpected restart after bugcheck"
+            Planned                       = "No"
+            InitiatorCategory              = "Unknown"
+            InitiatorProcess               = ""
+            InitiatingUser                 = ""
+            ShutdownType                   = "restart"
+            Reason                         = ""
+            ReasonCode                     = ""
+            Comment                        = ""
+            BugcheckCode                   = Get-BugcheckCodeFromEvent $bugcheckEvent
+            CleanShutdownConfirmed         = "No"
+            KernelPower41Present           = "No"
+            UnexpectedShutdown6008Present  = "No"
+            BugCheckPresent                = "Yes"
+            BootConfirmed                  = ""
+            RelatedRecordIds               = Get-RelatedRecordIdsText -Events @($bugcheckEvent)
+            Assessment                     = "A BugCheck 1001 record confirms bugcheck evidence. Review the matching minidump and full event details for the stop code and suspected module."
+        }
+    }
+
+    return @($rows | Sort-Object @{ Expression = {
+        $time = ConvertTo-DateTimeSafe ([string]$_.IncidentTime)
+        if ($null -eq $time) { $time = ConvertTo-DateTimeSafe ([string]$_.LoggedTime) }
+        $time
+    }; Descending = $true })
 }
 
 function New-KernelPowerSummaryRows {
@@ -1250,91 +1731,6 @@ function New-KernelPowerSummaryRows {
             SourceEntry                    = [string]$_.SourceEntry
         }
     })
-}
-
-function Get-ShutdownSignalSummary {
-    param(
-        [object[]]$Rows,
-        [datetime]$Center,
-        [int]$WindowMinutes = 10
-    )
-
-    $signals = @($Rows | Where-Object {
-        $eventTime = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
-        $null -ne $eventTime -and
-        [math]::Abs(($eventTime - $Center).TotalMinutes) -le $WindowMinutes -and
-        (
-            [string]$_.ProviderName -match '(?i)Kernel-Power|BugCheck|WHEA|disk|Ntfs|volmgr|storahci|stornvme|iaStor|Display|nvlddmkm|amdkmdag|EventLog|Service Control Manager|User32' -or
-            [string]$_.Id -in @('41','51','55','98','1074','6005','6006','6008','1001','4101','7043')
-        )
-    } | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } })
-
-    if ($signals.Count -eq 0) {
-        return "No relevant System events found within +/-$WindowMinutes minutes."
-    }
-
-    return (@($signals | Select-Object -First 12 | ForEach-Object { Get-EventBriefText $_ }) -join "`r`n")
-}
-
-function New-ShutdownCorrelationRows {
-    param(
-        [object[]]$UnexpectedShutdownEvents,
-        [object[]]$KernelPowerEvents,
-        [object[]]$AllEvents
-    )
-
-    $rows = @()
-    foreach ($event in @($UnexpectedShutdownEvents)) {
-        $loggedAt = ConvertTo-DateTimeSafe ([string]$event.TimeCreated)
-        $reportedAt = Get-UnexpectedShutdownReportedTime -Message ([string]$event.Message)
-
-        $kernelNearLog = @($KernelPowerEvents | Where-Object {
-            $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
-            $null -ne $time -and $null -ne $loggedAt -and [math]::Abs(($time - $loggedAt).TotalMinutes) -le 2
-        } | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) } } | Select-Object -First 1)
-
-        $lastPlannedRestart = $null
-        $lastCleanStop = $null
-        if ($null -ne $reportedAt) {
-            $lastPlannedRestart = @($AllEvents | Where-Object {
-                $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
-                $null -ne $time -and $time -le $reportedAt -and [string]$_.Id -eq '1074'
-            } | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) }; Descending = $true } | Select-Object -First 1)
-            $lastCleanStop = @($AllEvents | Where-Object {
-                $time = ConvertTo-DateTimeSafe ([string]$_.TimeCreated)
-                $null -ne $time -and $time -le $reportedAt -and [string]$_.Id -eq '6006'
-            } | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.TimeCreated) }; Descending = $true } | Select-Object -First 1)
-        }
-
-        $gapText = ""
-        if ($null -ne $reportedAt -and $null -ne $loggedAt) {
-            $gap = New-TimeSpan -Start $reportedAt -End $loggedAt
-            $gapText = "{0:n1} hours" -f $gap.TotalHours
-        }
-
-        $directSignals = if ($null -ne $reportedAt) { Get-ShutdownSignalSummary -Rows $AllEvents -Center $reportedAt -WindowMinutes 10 } else { "Could not parse the shutdown time from EventLog 6008." }
-
-        $assessment = "Windows logged this at the next boot, not necessarily when the shutdown happened."
-        if ($null -ne $reportedAt -and $directSignals -match 'No relevant System events') {
-            $assessment += " No direct WHEA, disk, GPU reset, BugCheck, or Kernel-Power event was found near the reported shutdown timestamp."
-        }
-        if ($null -ne $lastPlannedRestart) {
-            $assessment += " A planned Windows restart was seen earlier, but it had clean shutdown/start records."
-        }
-
-        $rows += [PSCustomObject]@{
-            EventLogRecordTime       = if ($null -ne $loggedAt) { Format-FindingDate $loggedAt } else { [string]$event.TimeCreated }
-            ReportedShutdownTime     = if ($null -ne $reportedAt) { Format-FindingDate $reportedAt } else { "Not parsed" }
-            TimeUntilLogged          = $gapText
-            KernelPower41NearBoot    = if ($kernelNearLog.Count -gt 0) { Get-EventBriefText $kernelNearLog[0] } else { "No Kernel-Power 41 within +/-2 minutes of this 6008 record." }
-            LastPlannedRestartBefore = if ($null -ne $lastPlannedRestart) { Get-EventBriefText $lastPlannedRestart } else { "None found before reported shutdown time." }
-            LastCleanEventLogStop    = if ($null -ne $lastCleanStop) { Get-EventBriefText $lastCleanStop } else { "None found before reported shutdown time." }
-            NearbyReportedTimeEvents = $directSignals
-            Assessment               = $assessment
-        }
-    }
-
-    return $rows
 }
 
 function Get-FindingSeverityRank {
@@ -1849,11 +2245,16 @@ function Write-InitialFindingsReport {
     $targetedPath = Join-Path $Dirs.Events "System_Targeted_Stability_Storage_Network_${EventRangeLabel}.csv"
     $systemPath = Join-Path $Dirs.Events "System_WARN_ERR_CRIT_${EventRangeLabel}.csv"
     $applicationPath = Join-Path $Dirs.Events "Application_WARN_ERR_CRIT_${EventRangeLabel}.csv"
+    $restartHistoryPath = Join-Path $Dirs.Events "Restart_Shutdown_History_${EventRangeLabel}.csv"
+    $restartIncidentsPath = Join-Path $Dirs.Events "Restart_Shutdown_Incidents_${EventRangeLabel}.csv"
+    $eventCollectionStatusPath = Join-Path $Dirs.Runtime "EventCollection_Status.txt"
 
     $targeted = Read-CsvSafe $targetedPath
     $systemEvents = Read-CsvSafe $systemPath
     $applicationEvents = Read-CsvSafe $applicationPath
-    $allEvents = @($targeted + $systemEvents + $applicationEvents) |
+    $restartHistory = Read-CsvSafe $restartHistoryPath
+    $restartIncidents = Read-CsvSafe $restartIncidentsPath
+    $allEvents = @($targeted + $systemEvents + $applicationEvents + $restartHistory) |
         Group-Object { "$($_.TimeCreated)|$($_.LogName)|$($_.ProviderName)|$($_.Id)" } |
         ForEach-Object { $_.Group[0] }
     $werReports = Read-CsvSafe (Join-Path $Dirs.WER "WindowsErrorReporting_RecentReports.csv")
@@ -1862,9 +2263,34 @@ function Write-InitialFindingsReport {
         "$($_.DeviceName) $($_.Manufacturer) $($_.DriverProviderName) $($_.ClassName)" -match '(?i)Microsoft Basic Display Driver|Standard display types'
     })
 
-    $bugCheckEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and ($_.ProviderName -match 'BugCheck' -or $_.Id -eq '1001') })
+    $eventCollectionFailed = $true
+    $eventCollectionStatusText = "Event collection status file is missing."
+    if (Test-Path -LiteralPath $eventCollectionStatusPath) {
+        $eventCollectionStatusLines = @(Get-Content -LiteralPath $eventCollectionStatusPath -ErrorAction SilentlyContinue)
+        $eventCollectionStatusText = $eventCollectionStatusLines -join "`r`n"
+        $eventCollectionFailed = -not ($eventCollectionStatusLines | Where-Object { $_ -eq 'Status: Success' })
+    }
+    if ($eventCollectionFailed) {
+        Add-Finding ([ref]$findings) "High" "Collection" "Core Event Viewer collection failed" "The System/Application event collection did not complete successfully. Restart, shutdown, crash, and hardware-event conclusions are incomplete." "Review 99_Runtime\EventCollection_Status.txt, the named child stdout/stderr files, and 99_Runtime\errors.txt. Rerun PCDiagLite after fixing the collection failure." -TimeContext $currentObservation -DetailText $eventCollectionStatusText
+    }
+
+    $bugCheckEvents = @($allEvents | Where-Object { $_.Id -eq '1001' -and $_.ProviderName -match '(?i)BugCheck|WER-SystemErrorReporting|System Error Reporting' })
     if ($bugCheckEvents.Count -gt 0) {
         Add-Finding ([ref]$findings) "Critical" "Crash" "BugCheck / blue screen indicators found" "$($bugCheckEvents.Count) matching event(s), for example BugCheck provider or event ID 1001." "Analyze minidumps in 06_Minidumps with a driver and hardware focus. Then check storage, RAM, and driver versions." -EventRows $bugCheckEvents
+    }
+
+    $plannedIncidents = @($restartIncidents | Where-Object { [string]$_.Planned -eq 'Yes' })
+    if ($plannedIncidents.Count -gt 0) {
+        $updateCount = @($plannedIncidents | Where-Object { [string]$_.InitiatorCategory -eq 'Windows Update' }).Count
+        $cleanCount = @($plannedIncidents | Where-Object { [string]$_.CleanShutdownConfirmed -eq 'Yes' }).Count
+        $plannedEvidence = "$($plannedIncidents.Count) planned restart/shutdown request(s); $cleanCount with a nearby clean EventLog stop"
+        if ($updateCount -gt 0) { $plannedEvidence += "; $updateCount attributed to Windows Update by process/service/reason evidence" }
+        $latestPlanned = @($plannedIncidents | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.IncidentTime) }; Descending = $true } | Select-Object -First 1)
+        if ($latestPlanned.Count -gt 0) {
+            $plannedEvidence += ". Latest: $($latestPlanned[0].IncidentTime); initiator: $($latestPlanned[0].InitiatorProcess); category: $($latestPlanned[0].InitiatorCategory); reason: $($latestPlanned[0].Reason)"
+        }
+        $plannedEvents = @($restartHistory | Where-Object { [string]$_.Id -eq '1074' })
+        Add-Finding ([ref]$findings) "Info" "Stability" "Planned restart or shutdown requests recorded" $plannedEvidence "No action is required for expected requests. Review incidents where CleanShutdownConfirmed is No or where the initiator is unfamiliar." -EventRows $plannedEvents -DetailText (New-ObjectDetailsText -Rows $plannedIncidents -Title "Correlated planned restart and shutdown incidents")
     }
 
     $kernelPowerEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'Kernel-Power' -and $_.Id -eq '41' })
@@ -1878,22 +2304,21 @@ function Write-InitialFindingsReport {
         $kernelPowerDetails = @()
         $kernelPowerDetails += (New-ObjectDetailsText -Rows $kernelPowerSummaryRows -Title "Kernel-Power 41 interpretation rows")
         $kernelPowerDetails += (New-EventDetailsText -Rows $kernelPowerEvents)
-        Add-Finding ([ref]$findings) "High" "Stability" "Unexpected restart or power loss" $kernelPowerEvidence "If BugcheckCode is 0 and no WHEA/disk/GPU reset is nearby, treat this as an unclean power loss or hard freeze clue rather than a proven blue screen. Check power delivery, thermals, BIOS/UEFI, RAM/CPU stability, sleep/standby behavior, and events immediately before the restart." -EventRows $kernelPowerEvents -DetailText ($kernelPowerDetails -join "`r`n`r`n")
+        Add-Finding ([ref]$findings) "High" "Stability" "Previous Windows session did not shut down cleanly" $kernelPowerEvidence "Kernel-Power 41 is written during the following boot. Use BugcheckCode, EventLog 6008, BugCheck 1001, dumps, and events before the incident to distinguish a blue screen from power loss, forced power-off, reset, or a freeze." -EventRows $kernelPowerEvents -DetailText ($kernelPowerDetails -join "`r`n`r`n")
     }
 
     $unexpectedShutdownEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and ($_.Id -eq '6008' -or ($_.ProviderName -match 'EventLog' -and $_.Id -eq '6008')) })
     if ($unexpectedShutdownEvents.Count -gt 0) {
-        $shutdownCorrelationRows = @(New-ShutdownCorrelationRows -UnexpectedShutdownEvents $unexpectedShutdownEvents -KernelPowerEvents $kernelPowerEvents -AllEvents $allEvents)
-        $parsedShutdowns = @($shutdownCorrelationRows | Where-Object { [string]$_.ReportedShutdownTime -ne "Not parsed" })
-        $latestReported = @($parsedShutdowns | Sort-Object ReportedShutdownTime -Descending | Select-Object -First 1)
+        $unexpectedIncidents = @($restartIncidents | Where-Object { [string]$_.Planned -ne 'Yes' -and ([string]$_.UnexpectedShutdown6008Present -eq 'Yes' -or [string]$_.KernelPower41Present -eq 'Yes') })
+        $latestIncident = @($unexpectedIncidents | Sort-Object @{ Expression = { ConvertTo-DateTimeSafe ([string]$_.IncidentTime) }; Descending = $true } | Select-Object -First 1)
         $shutdownEvidence = "$($unexpectedShutdownEvents.Count) EventLog 6008 event(s)."
-        if ($latestReported.Count -gt 0) {
-            $shutdownEvidence += " Latest reported previous shutdown: $($latestReported[0].ReportedShutdownTime), logged at next boot: $($latestReported[0].EventLogRecordTime)."
+        if ($latestIncident.Count -gt 0) {
+            $shutdownEvidence += " Latest incident time: $($latestIncident[0].IncidentTime); report logged at the following boot: $($latestIncident[0].LoggedTime). Classification: $($latestIncident[0].Classification)."
         }
         $shutdownDetails = @()
-        $shutdownDetails += (New-ObjectDetailsText -Rows $shutdownCorrelationRows -Title "Unexpected shutdown correlation")
+        $shutdownDetails += (New-ObjectDetailsText -Rows $unexpectedIncidents -Title "Correlated unexpected restart and shutdown incidents")
         $shutdownDetails += (New-EventDetailsText -Rows $unexpectedShutdownEvents)
-        Add-Finding ([ref]$findings) "High" "Stability" "Windows reports an unexpected shutdown" $shutdownEvidence "Treat EventLog 6008 as a next-boot report. Review the correlation table first: if no direct BugCheck, WHEA, disk, GPU reset, or clean shutdown record exists near the reported shutdown time, investigate power loss, hard freeze, PSU/UPS, BIOS/UEFI, RAM/CPU stability, and thermals." -EventRows $unexpectedShutdownEvents -DetailText ($shutdownDetails -join "`r`n`r`n")
+        Add-Finding ([ref]$findings) "High" "Stability" "Windows reports that a previous session ended unexpectedly" $shutdownEvidence "EventLog 6008 records the reported incident time inside its message/EventData but is logged during a later boot. Review the correlated incident and nearby evidence; without a BugCheck or other direct signal, Windows cannot distinguish power loss, forced power-off, reset, or a freeze." -EventRows $unexpectedShutdownEvents -DetailText ($shutdownDetails -join "`r`n`r`n")
     }
 
     $wheaEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'WHEA-Logger' })
@@ -3121,8 +3546,11 @@ Files for manual review:
 - 09_Deployment_Audit\Deployment_Log_Groups.csv
 - 09_Deployment_Audit\Deployment_Audit.csv
 - 09_Deployment_Audit\Deployment_Log_Excerpts.csv
+- 01_Events\Restart_Shutdown_History_${EventRangeLabel}.csv
+- 01_Events\Restart_Shutdown_Incidents_${EventRangeLabel}.csv
 - 01_Events\System_Targeted_Stability_Storage_Network_${EventRangeLabel}.csv
 - 01_Events\System_Targeted_TopEvents_${EventRangeLabel}.csv
+- 99_Runtime\EventCollection_Status.txt
 - 99_Runtime\runtime.log
 - 99_Runtime\errors.txt and timeouts.txt, if present
 "@ | Out-File $reportPath -Encoding UTF8 -Append
@@ -3146,6 +3574,7 @@ function Write-HtmlReport {
     $udpTop = Read-CsvSafe (Join-Path $Dirs.Network "UDP_Endpoints_By_Process_Top30.csv")
     $topSystem = Read-CsvSafe (Join-Path $Dirs.Events "System_TopEvents_${EventRangeLabel}.csv")
     $targetedTop = Read-CsvSafe (Join-Path $Dirs.Events "System_Targeted_TopEvents_${EventRangeLabel}.csv")
+    $restartIncidents = Read-CsvSafe (Join-Path $Dirs.Events "Restart_Shutdown_Incidents_${EventRangeLabel}.csv")
     $migrationPnpProblems = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_PnpProblemDevices.csv")
     $migrationOldDrivers = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_OldThirdPartyDrivers.csv")
     $migrationVendorServices = Read-CsvSafe (Join-Path $Dirs.System "HardwareMigration_VendorDriverServices.csv")
@@ -3185,6 +3614,7 @@ function Write-HtmlReport {
     $udpTopHtml = New-HtmlTable $udpTop @("PID","Count","Process","Path") 30
     $topHtml = New-HtmlTable $topSystem @("Count","Name") 25
     $targetedHtml = New-HtmlTable $targetedTop @("Count","Name") 25
+    $restartIncidentsHtml = New-HtmlTable $restartIncidents @("IncidentTime","LoggedTime","Classification","Planned","InitiatorCategory","InitiatorProcess","InitiatingUser","ShutdownType","Reason","ReasonCode","BugcheckCode","CleanShutdownConfirmed","KernelPower41Present","UnexpectedShutdown6008Present","BugCheckPresent","BootConfirmed","Assessment","RelatedRecordIds") 200
     $migrationPnpHtml = New-HtmlTable $migrationPnpProblems @("Status","Class","FriendlyName","InstanceId","Problem") 50
     $migrationOldDriversHtml = New-HtmlTable $migrationOldDrivers @("DeviceName","DeviceClass","Manufacturer","DriverVersion","DriverDate","InfName","DeviceID") 80
     $migrationVendorServicesHtml = New-HtmlTable $migrationVendorServices @("VendorGroup","Name","DisplayName","State","Status","StartMode","PathName") 80
@@ -3266,6 +3696,9 @@ function Write-HtmlReport {
       <p><strong>Primary areas:</strong> $(Escape-Html (Get-PrimaryCategoriesText $findings))</p>
     </div>
     $findingsHtml
+    <h2>Restart / Shutdown History</h2>
+    <p class="muted">Newest first. Incident time is kept separate from the later Event Viewer log time. Planned requests are identified from User32 event 1074; Windows Update attribution requires matching process, service, or reason evidence.</p>
+    $restartIncidentsHtml
     <h2>System</h2>
     <pre>$(Escape-Html $osText)</pre>
     <h2>Deployment / Image Audit</h2>
@@ -3406,6 +3839,10 @@ function Write-ResultWindowReport {
     $smartPredictionHtml = New-HtmlTable $noteworthySmartPrediction @("InstanceName","Active","PredictFailure","Reason","Error") 30
     $timelineRows = Read-CsvSafe (Join-Path $Dirs.Runtime "TimelineEvents.csv")
     $timelineHtml = New-TimelineHtml -Rows $timelineRows -MaxRows 140
+    $restartIncidents = Read-CsvSafe (Join-Path $Dirs.Events "Restart_Shutdown_Incidents_${EventRangeLabel}.csv")
+    $restartIncidentProblems = @($restartIncidents | Where-Object { [string]$_.Planned -ne 'Yes' -or [string]$_.CleanShutdownConfirmed -ne 'Yes' })
+    $restartIncidentsHtml = New-HtmlTable $restartIncidents @("IncidentTime","LoggedTime","Classification","Planned","InitiatorCategory","InitiatorProcess","InitiatingUser","ShutdownType","Reason","ReasonCode","BugcheckCode","CleanShutdownConfirmed","KernelPower41Present","UnexpectedShutdown6008Present","BugCheckPresent","BootConfirmed","Assessment","RelatedRecordIds") 200
+    $restartOpenAttribute = if ($restartIncidentProblems.Count -gt 0) { " open" } else { "" }
     $packageDisplay = if ([string]::IsNullOrWhiteSpace($PackagePath)) { "Will be created after completion." } else { $PackagePath }
     $reportPath = "00_Report.html"
     $textReportPath = "00_Findings_Summary.txt"
@@ -3649,6 +4086,18 @@ function Write-ResultWindowReport {
       <section class="findings-panel">
         <h2>Findings by Primary Area</h2>
         $areaGroupedFindingsHtml
+
+        <h2>Restart / Shutdown History</h2>
+        <details class="data-section"$restartOpenAttribute>
+          <summary>
+            <div>
+              <h3>Correlated restart and shutdown incidents</h3>
+              <p>$($restartIncidents.Count) incident(s), newest first; $($restartIncidentProblems.Count) unexpected or not cleanly confirmed. Incident and later log times are shown separately.</p>
+            </div>
+            <span class="area-count">$($restartIncidents.Count)</span>
+          </summary>
+          <div class="data-content"><div class="table-scroll">$restartIncidentsHtml</div></div>
+        </details>
 
         <h2>Noteworthy Storage Data</h2>
         <details class="data-section" open>
@@ -5155,6 +5604,40 @@ $EventScript = @"
 `$UseStartTime = (`$DaysBack -gt 0)
 `$StartTime = if (`$UseStartTime) { (Get-Date).AddDays(-`$DaysBack) } else { `$null }
 
+function Export-CsvWithHeaders {
+    param(
+        [Parameter(Mandatory=`$true)][string]`$Path,
+        [object[]]`$Rows,
+        [Parameter(Mandatory=`$true)][string[]]`$Columns
+    )
+
+    `$items = @(`$Rows)
+    if (`$items.Count -gt 0) {
+        `$items | Select-Object `$Columns | Export-Csv -LiteralPath `$Path -NoTypeInformation -Encoding UTF8
+        return
+    }
+
+    `$header = @(`$Columns | ForEach-Object { '"' + ([string]`$_ -replace '"','""') + '"' }) -join ','
+    `$header | Out-File -LiteralPath `$Path -Encoding UTF8
+}
+
+function Get-EventsSafe {
+    param(
+        [Parameter(Mandatory=`$true)][hashtable]`$Filter,
+        [int]`$Maximum = 0
+    )
+
+    try {
+        if (`$Maximum -gt 0) {
+            return @(Get-WinEvent -FilterHashtable `$Filter -MaxEvents `$Maximum -ErrorAction Stop)
+        }
+        return @(Get-WinEvent -FilterHashtable `$Filter -ErrorAction Stop)
+    } catch {
+        if ([string]`$_.FullyQualifiedErrorId -match 'NoMatchingEventsFound') { return @() }
+        throw
+    }
+}
+
 function Get-EventLevelName {
     param([Parameter(Mandatory=`$true)]`$Event)
     try {
@@ -5177,6 +5660,7 @@ function Get-EventDataSummary {
             `$name = [string]`$data.Name
             `$value = [string]`$data.'#text'
             if ([string]::IsNullOrWhiteSpace(`$value)) { `$value = [string]`$data.InnerText }
+            if ([string]::IsNullOrWhiteSpace(`$value)) { `$value = [string]`$data }
             if ([string]::IsNullOrWhiteSpace(`$name)) { `$name = "Data`$index" }
             if (`$value.Length -gt 160) { `$value = `$value.Substring(0,160) + "..." }
             if (-not [string]::IsNullOrWhiteSpace(`$value)) {
@@ -5186,6 +5670,31 @@ function Get-EventDataSummary {
             if (`$parts.Count -ge 30) { break }
         }
         return (`$parts -join "; ")
+    } catch {
+        return ""
+    }
+}
+
+function Get-EventDataJson {
+    param([Parameter(Mandatory=`$true)]`$Event)
+
+    try {
+        [xml]`$xml = `$Event.ToXml()
+        `$index = 0
+        `$values = [ordered]@{}
+        foreach (`$data in @(`$xml.Event.EventData.Data)) {
+            `$name = [string]`$data.Name
+            `$value = [string]`$data.'#text'
+            if ([string]::IsNullOrWhiteSpace(`$value)) { `$value = [string]`$data.InnerText }
+            if ([string]::IsNullOrWhiteSpace(`$value)) { `$value = [string]`$data }
+            if ([string]::IsNullOrWhiteSpace(`$name)) { `$name = "Data`$index" }
+            if (`$values.Contains(`$name)) { `$name = "`$name`_`$index" }
+            `$values[`$name] = `$value
+            `$index++
+        }
+        `$binary = [string]`$xml.Event.EventData.Binary
+        if (-not [string]::IsNullOrWhiteSpace(`$binary)) { `$values['Binary'] = `$binary }
+        return (`$values | ConvertTo-Json -Compress -Depth 4)
     } catch {
         return ""
     }
@@ -5219,21 +5728,17 @@ foreach (`$log in @('System','Application')) {
         `$filter.StartTime = `$StartTime
     }
 
-    if (`$UseStartTime) {
-        `$events = Get-WinEvent -FilterHashtable `$filter -MaxEvents `$MaxEvents -ErrorAction SilentlyContinue
-    } else {
-        `$events = Get-WinEvent -FilterHashtable `$filter -ErrorAction SilentlyContinue
-    }
+    `$queryMaximum = if (`$UseStartTime) { `$MaxEvents } else { 0 }
+    `$events = @(Get-EventsSafe -Filter `$filter -Maximum `$queryMaximum)
 
-    `$events |
-        Select-EventForCsv |
-        Export-Csv (Join-Path `$EventsDir "`${safe}_WARN_ERR_CRIT_`$EventRangeLabel.csv") -NoTypeInformation -Encoding UTF8
+    `$eventRows = @(`$events | Select-EventForCsv)
+    Export-CsvWithHeaders -Path (Join-Path `$EventsDir "`${safe}_WARN_ERR_CRIT_`$EventRangeLabel.csv") -Rows `$eventRows -Columns @('TimeCreated','LogName','RecordId','Level','LevelDisplayName','ProviderName','Id','EventData','Message')
 
-    `$events |
+    `$topRows = @(`$events |
         Group-Object ProviderName, Id, Level |
         Sort-Object Count -Descending |
-        Select-Object Count, Name |
-        Export-Csv (Join-Path `$EventsDir "`${safe}_TopEvents_`$EventRangeLabel.csv") -NoTypeInformation -Encoding UTF8
+        Select-Object Count, Name)
+    Export-CsvWithHeaders -Path (Join-Path `$EventsDir "`${safe}_TopEvents_`$EventRangeLabel.csv") -Rows `$topRows -Columns @('Count','Name')
 }
 
 `$systemFilter = @{
@@ -5243,33 +5748,69 @@ if (`$UseStartTime) {
     `$systemFilter.StartTime = `$StartTime
 }
 
-if (`$UseStartTime) {
-    `$rawSystem = Get-WinEvent -FilterHashtable `$systemFilter -MaxEvents 7000 -ErrorAction SilentlyContinue
-} else {
-    `$rawSystem = Get-WinEvent -FilterHashtable `$systemFilter -ErrorAction SilentlyContinue
-}
+`$rawSystemMaximum = if (`$UseStartTime) { 7000 } else { 0 }
+`$rawSystem = @(Get-EventsSafe -Filter `$systemFilter -Maximum `$rawSystemMaximum)
 
 `$targeted = `$rawSystem | Where-Object {
     (
-        `$_.ProviderName -match 'Kernel-Power|EventLog|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|UASPStor|USBSTOR|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NetBT|Netwtw|Time-Service|NtpClient|Service Control Manager|Kernel-PnP|UserPnp|DeviceSetupManager|DriverFrameworks-UserMode|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment|DistributedCOM|GamingServices|GameInput'
+        `$_.ProviderName -match 'Kernel-Power|EventLog|User32|BugCheck|volmgr|WHEA-Logger|disk|Ntfs|storahci|stornvme|iaStor|UASPStor|USBSTOR|e1|e2f|e2fnexpress|NDIS|Tcpip|Dhcp|DNS Client Events|Microsoft-Windows-DNS-Client|NetBT|Netwtw|Time-Service|NtpClient|Service Control Manager|Kernel-PnP|UserPnp|DeviceSetupManager|DriverFrameworks-UserMode|Power-Troubleshooter|Kernel-General|Kernel-Boot|WindowsUpdateClient|Bits-Client|Perflib|Application Hang|Application Error|AppModel-Runtime|AppXDeployment|DistributedCOM|GamingServices|GameInput'
     ) -or
     (
-        `$_.Id -in 1,12,13,17,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,4231,4266,4321,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034,10010
+        `$_.Id -in 1,12,13,17,20,27,41,42,51,55,98,129,153,154,157,161,162,1000,1001,1002,1008,1023,1074,4231,4266,4321,5007,5973,6005,6006,6008,7000,7001,7009,7011,7022,7023,7024,7031,7032,7034,10010
     )
 }
 if (`$UseStartTime) {
     `$targeted = `$targeted | Select-Object -First `$MaxEvents
 }
 
-`$targeted |
-    Select-EventForCsv |
-    Export-Csv (Join-Path `$EventsDir "System_Targeted_Stability_Storage_Network_`$EventRangeLabel.csv") -NoTypeInformation -Encoding UTF8
+`$targetedRows = @(`$targeted | Select-EventForCsv)
+Export-CsvWithHeaders -Path (Join-Path `$EventsDir "System_Targeted_Stability_Storage_Network_`$EventRangeLabel.csv") -Rows `$targetedRows -Columns @('TimeCreated','LogName','RecordId','Level','LevelDisplayName','ProviderName','Id','EventData','Message')
 
-`$targeted |
+`$targetedTopRows = @(`$targeted |
     Group-Object ProviderName, Id, Level |
     Sort-Object Count -Descending |
-    Select-Object Count, Name |
-    Export-Csv (Join-Path `$EventsDir "System_Targeted_TopEvents_`$EventRangeLabel.csv") -NoTypeInformation -Encoding UTF8
+    Select-Object Count, Name)
+Export-CsvWithHeaders -Path (Join-Path `$EventsDir "System_Targeted_TopEvents_`$EventRangeLabel.csv") -Rows `$targetedTopRows -Columns @('Count','Name')
+
+`$restartFilter = @{
+    LogName = 'System'
+    Id = 41,1074,1001,6005,6006,6008
+}
+if (`$UseStartTime) { `$restartFilter.StartTime = `$StartTime }
+`$restartCandidates = @(Get-EventsSafe -Filter `$restartFilter)
+
+`$kernelGeneralFilter = @{
+    LogName = 'System'
+    ProviderName = 'Microsoft-Windows-Kernel-General'
+    Id = 12,13
+}
+if (`$UseStartTime) { `$kernelGeneralFilter.StartTime = `$StartTime }
+`$kernelGeneralEvents = @()
+try { `$kernelGeneralEvents = @(Get-EventsSafe -Filter `$kernelGeneralFilter) } catch {}
+
+`$restartShutdownEvents = @(@(`$restartCandidates + `$kernelGeneralEvents) | Where-Object {
+    (`$_.ProviderName -match '(?i)Kernel-Power' -and `$_.Id -eq 41) -or
+    (`$_.ProviderName -match '(?i)^User32$' -and `$_.Id -eq 1074) -or
+    (`$_.ProviderName -match '(?i)^EventLog$' -and `$_.Id -in 6005,6006,6008) -or
+    (`$_.ProviderName -match '(?i)BugCheck|WER-SystemErrorReporting|System Error Reporting' -and `$_.Id -eq 1001) -or
+    (`$_.ProviderName -match '(?i)Kernel-General' -and `$_.Id -in 12,13)
+} | Sort-Object TimeCreated -Descending)
+
+`$restartShutdownRows = @(`$restartShutdownEvents | ForEach-Object {
+    [PSCustomObject]@{
+        TimeCreated      = `$_.TimeCreated
+        LogName          = `$_.LogName
+        ProviderName     = `$_.ProviderName
+        EventId          = `$_.Id
+        Id               = `$_.Id
+        RecordId         = `$_.RecordId
+        Level            = `$_.Level
+        LevelDisplayName = Get-EventLevelName `$_
+        EventData        = Get-EventDataJson `$_
+        Message          = try { `$_.Message } catch { "" }
+    }
+})
+Export-CsvWithHeaders -Path (Join-Path `$EventsDir "Restart_Shutdown_History_`$EventRangeLabel.csv") -Rows `$restartShutdownRows -Columns @('TimeCreated','LogName','ProviderName','EventId','Id','RecordId','Level','LevelDisplayName','EventData','Message')
 
 `$targeted |
     Select-Object -First 200 TimeCreated, Level, ProviderName, Id |
@@ -5278,7 +5819,71 @@ if (`$UseStartTime) {
     Out-File (Join-Path `$EventsDir "System_Targeted_Last200.txt") -Encoding UTF8
 "@
 
-Invoke-ChildPowerShellWithTimeout -Name "Event log analysis System Application Targeted" -ScriptContent $EventScript -TimeoutSeconds $EventTimeoutSeconds | Out-Null
+$eventCollectionSucceeded = Invoke-ChildPowerShellWithTimeout -Name "Event log analysis System Application Targeted" -ScriptContent $EventScript -TimeoutSeconds $EventTimeoutSeconds
+$eventStepResult = $script:LastChildProcessResult
+
+$restartHistoryPath = Join-Path $Dirs.Events "Restart_Shutdown_History_${EventRangeLabel}.csv"
+$restartIncidentsPath = Join-Path $Dirs.Events "Restart_Shutdown_Incidents_${EventRangeLabel}.csv"
+$eventStatusPath = Join-Path $Dirs.Runtime "EventCollection_Status.txt"
+$incidentColumns = @(
+    'IncidentTime','LoggedTime','RequestTime','Classification','Planned','InitiatorCategory',
+    'InitiatorProcess','InitiatingUser','ShutdownType','Reason','ReasonCode','Comment','BugcheckCode',
+    'CleanShutdownConfirmed','KernelPower41Present','UnexpectedShutdown6008Present','BugCheckPresent',
+    'BootConfirmed','RelatedRecordIds','Assessment'
+)
+$incidentGenerationSucceeded = $false
+$incidentError = ""
+try {
+    if (-not (Test-CsvReadable -Path $restartHistoryPath)) {
+        throw "Restart/shutdown history CSV is missing or unreadable: $restartHistoryPath"
+    }
+    $restartHistoryRows = Read-CsvSafe $restartHistoryPath
+    $restartIncidents = @(New-RestartShutdownIncidentRows `
+        -HistoryRows $restartHistoryRows `
+        -RestartWindowMinutes $RestartCorrelationWindowMinutes `
+        -BootWindowMinutes $BootCorrelationWindowMinutes)
+    Export-CsvWithHeaders -Path $restartIncidentsPath -Rows $restartIncidents -Columns $incidentColumns
+    $incidentGenerationSucceeded = Test-CsvReadable -Path $restartIncidentsPath
+    if (-not $incidentGenerationSucceeded) { throw "Incident CSV could not be read after export: $restartIncidentsPath" }
+} catch {
+    $incidentError = $_.Exception.Message
+    "Restart/shutdown incident generation failed: $incidentError" | Out-File (Join-Path $Dirs.Runtime "errors.txt") -Encoding UTF8 -Append
+}
+
+$requiredEventFiles = @(
+    (Join-Path $Dirs.Events "System_WARN_ERR_CRIT_${EventRangeLabel}.csv"),
+    (Join-Path $Dirs.Events "Application_WARN_ERR_CRIT_${EventRangeLabel}.csv"),
+    (Join-Path $Dirs.Events "System_Targeted_Stability_Storage_Network_${EventRangeLabel}.csv"),
+    $restartHistoryPath,
+    $restartIncidentsPath
+)
+$missingOrUnreadable = @($requiredEventFiles | Where-Object { -not (Test-CsvReadable -Path $_) })
+$eventStatus = if ($eventCollectionSucceeded -and $incidentGenerationSucceeded -and $missingOrUnreadable.Count -eq 0) { "Success" } else { "Failed" }
+$systemStatus = if (Test-CsvReadable -Path $requiredEventFiles[0]) { "Present" } else { "Missing or unreadable" }
+$applicationStatus = if (Test-CsvReadable -Path $requiredEventFiles[1]) { "Present" } else { "Missing or unreadable" }
+$targetedStatus = if (Test-CsvReadable -Path $requiredEventFiles[2]) { "Present" } else { "Missing or unreadable" }
+$historyStatus = if (Test-CsvReadable -Path $restartHistoryPath) { "Present" } else { "Missing or unreadable" }
+$incidentsStatus = if (Test-CsvReadable -Path $restartIncidentsPath) { "Present" } else { "Missing or unreadable" }
+@(
+    "Status: $eventStatus"
+    "Step: Event log analysis System Application Targeted"
+    "StepExitCode: $([string]$eventStepResult.ExitCode)"
+    "TimedOut: $([bool]$eventStepResult.TimedOut)"
+    "System_WARN_ERR_CRIT: $systemStatus"
+    "Application_WARN_ERR_CRIT: $applicationStatus"
+    "System_Targeted: $targetedStatus"
+    "Restart_Shutdown_History: $historyStatus"
+    "Restart_Shutdown_Incidents: $incidentsStatus"
+    "ChildScript: $([string]$eventStepResult.ChildScriptPath)"
+    "Stdout: $([string]$eventStepResult.StdoutPath)"
+    "Stderr: $([string]$eventStepResult.StderrPath)"
+    "HistoryFile: $restartHistoryPath"
+    "IncidentFile: $restartIncidentsPath"
+    "CorrelationWindowMinutes: $RestartCorrelationWindowMinutes"
+    "BootCorrelationWindowMinutes: $BootCorrelationWindowMinutes"
+    "IncidentGenerationError: $incidentError"
+    "MissingOrUnreadable: $($missingOrUnreadable -join '; ')"
+) | Out-File -LiteralPath $eventStatusPath -Encoding UTF8
 
 # ==================================================================================================
 # Section 11: Windows Error Reporting app crash reports
