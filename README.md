@@ -196,6 +196,8 @@ Running remote PowerShell code requires trust in this repository.
 - TCP/UDP port exhaustion detection
 - Main network report separates VPN-related adapters, routes, tests, and findings into a dedicated VPN section at the bottom
 - Network report prioritizes system info, active adapters, ping, DNS, speed, findings, and logs; skipped optional tests are listed at the bottom
+- Network report correlates NDIS resets, physical link losses, negotiated link speed, adapter driver/settings, and packet-counter changes during the scan
+- Ping rows are deduplicated per destination and show loss, minimum, median, average, 95th percentile, maximum, and true successive-sample jitter
 - Dedicated VPN overview for common providers such as Tailscale, OpenVPN, Surfshark, WireGuard, NordVPN, Proton VPN, Mullvad, Cloudflare WARP, ZeroTier, Cisco AnyConnect, Fortinet, GlobalProtect, and similar tools
 - Collapsible network event logs directly above the VPN section
 - Sortable network report tables with colored result markers for reachability, DNS resolution, latency, packet loss, Wi-Fi signal, and speed values

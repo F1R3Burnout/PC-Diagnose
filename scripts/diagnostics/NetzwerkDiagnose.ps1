@@ -131,7 +131,7 @@ param(
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 $ToolName = "NetzwerkDiagnose"
-$ToolVersion = "1.2 Prioritized Sections"
+$ToolVersion = "1.3 Link Incident Analysis"
 $Started = Get-Date
 $ComputerSafe = ($env:COMPUTERNAME -replace '[\\/:*?"<>| ]', '_')
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -147,6 +147,14 @@ $script:Sections = [ordered]@{}
 function Get-ResultRows {
     if ($null -eq $script:Results) { return @() }
     return @($script:Results.ToArray())
+}
+
+function Sort-ResultRowsByPriority {
+    param([object[]]$Rows)
+
+    return @($Rows | Sort-Object `
+        @{ Expression = { switch ([string]$_.Severity) { "Error" { 0 } "Warning" { 1 } "OK" { 2 } default { 3 } } } }, `
+        @{ Expression = { if ([string]$_.Category -eq "Adapter incidents") { 0 } elseif ([string]$_.Category -eq "Adapters") { 1 } elseif ([string]$_.Category -eq "Ping") { 2 } else { 3 } } })
 }
 
 function Write-Step {
@@ -479,10 +487,10 @@ function Get-HtmlCellClass {
         if ($text -match '(?i)2\.4\s*GHz|2,4\s*GHz|2GHz|^1$|^6$|^11$') { return "cell-warn" }
     }
 
-    if ($Column -in @("DownloadMbps","UploadMbps","AvgMs","LatencyMs","PingMs","DurationMs","JitterMs")) {
+    if ($Column -in @("DownloadMbps","UploadMbps","MinMs","MedianMs","AvgMs","P95Ms","MaxMs","LatencyMs","PingMs","DurationMs","JitterMs")) {
         $num = ConvertTo-Number $text
         if ($null -ne $num) {
-            if ($Column -in @("AvgMs","LatencyMs","PingMs","DurationMs","JitterMs")) {
+            if ($Column -in @("MinMs","MedianMs","AvgMs","P95Ms","MaxMs","LatencyMs","PingMs","DurationMs","JitterMs")) {
                 if ($num -le 30) { return "cell-good" }
                 if ($num -le 80) { return "cell-info" }
                 if ($num -le 150) { return "cell-warn" }
@@ -621,20 +629,24 @@ function Test-PingTarget {
     $role = [string]$TargetRow.Role
     $type = [string]$TargetRow.TargetType
     $resolved = Resolve-TargetAddress -Target $target
-    $times = @()
+    $times = New-Object System.Collections.Generic.List[double]
     $success = 0
 
     $ping = $null
     try {
         $ping = New-Object System.Net.NetworkInformation.Ping
+        # Exclude the first reply so ARP resolution and a cold path do not distort the sample.
+        try { [void]$ping.Send($target, 1200) } catch {}
+        Start-Sleep -Milliseconds 100
         for ($i = 0; $i -lt $Count; $i++) {
             try {
                 $reply = $ping.Send($target, 1200)
                 if ($reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
-                    $times += [double]$reply.RoundtripTime
+                    [void]$times.Add([double]$reply.RoundtripTime)
                     $success++
                 }
             } catch {}
+            if ($i -lt ($Count - 1)) { Start-Sleep -Milliseconds 100 }
         }
     } catch {
     } finally {
@@ -646,7 +658,26 @@ function Test-PingTarget {
     $min = if ($times.Count -gt 0) { [math]::Round((($times | Measure-Object -Minimum).Minimum), 2) } else { "" }
     $max = if ($times.Count -gt 0) { [math]::Round((($times | Measure-Object -Maximum).Maximum), 2) } else { "" }
     $avg = if ($times.Count -gt 0) { [math]::Round((($times | Measure-Object -Average).Average), 2) } else { "" }
-    $jitter = if ($times.Count -gt 0) { [math]::Round(([double]$max - [double]$min), 2) } else { "" }
+    $median = ""
+    $p95 = ""
+    $jitter = ""
+    if ($times.Count -gt 0) {
+        $sorted = @($times | Sort-Object)
+        $middle = [int][math]::Floor($sorted.Count / 2)
+        $medianValue = if (($sorted.Count % 2) -eq 0) { ([double]$sorted[$middle - 1] + [double]$sorted[$middle]) / 2 } else { [double]$sorted[$middle] }
+        $p95Index = [math]::Max(0, [math]::Ceiling($sorted.Count * 0.95) - 1)
+        $median = [math]::Round($medianValue, 2)
+        $p95 = [math]::Round([double]$sorted[$p95Index], 2)
+    }
+    if ($times.Count -gt 1) {
+        $deltas = New-Object System.Collections.Generic.List[double]
+        for ($i = 1; $i -lt $times.Count; $i++) {
+            [void]$deltas.Add([math]::Abs([double]$times[$i] - [double]$times[$i - 1]))
+        }
+        $jitter = [math]::Round((($deltas | Measure-Object -Average).Average), 2)
+    } elseif ($times.Count -eq 1) {
+        $jitter = 0
+    }
 
     $severity = "OK"
     $result = "Reachable"
@@ -700,7 +731,9 @@ function Test-PingTarget {
         Successful = $success
         LossPercent = $loss
         MinMs = $min
+        MedianMs = $median
         AvgMs = $avg
+        P95Ms = $p95
         MaxMs = $max
         JitterMs = $jitter
         Severity = $severity
@@ -708,8 +741,30 @@ function Test-PingTarget {
         Recommendation = $recommendation
     }
 
-    Add-Result -Category "Ping" -Test "Ping target" -Role $role -Target $target -InterfaceAlias ([string]$TargetRow.InterfaceAlias) -Severity $severity -Result $result -Value ("loss={0}%, avg={1} ms, jitter={2} ms" -f $loss, $avg, $jitter) -Details ("Resolved address: {0}" -f $resolved) -Recommendation $recommendation
+    Add-Result -Category "Ping" -Test "Ping target" -Role $role -Target $target -InterfaceAlias ([string]$TargetRow.InterfaceAlias) -Severity $severity -Result $result -Value ("loss={0}%, median={1} ms, avg={2} ms, p95={3} ms, jitter={4} ms" -f $loss, $median, $avg, $p95, $jitter) -Details ("Resolved address: {0}; {1} measured replies after one excluded warm-up ping" -f $resolved, $success) -Recommendation $recommendation
     return $row
+}
+
+function Get-UniquePingTargets {
+    param([object[]]$TargetMatrix)
+
+    $rows = @()
+    foreach ($group in @($TargetMatrix | Where-Object { $_.TestPing } | Group-Object Target, InterfaceAlias, VpnProvider)) {
+        $sample = @($group.Group | Select-Object -First 1)[0]
+        $roles = @($group.Group | Select-Object -ExpandProperty Role -Unique)
+        $rows += [PSCustomObject]@{
+            Role = $roles -join "; "
+            Target = [string]$sample.Target
+            InterfaceAlias = [string]$sample.InterfaceAlias
+            VpnProvider = [string]$sample.VpnProvider
+            Source = (@($group.Group | Select-Object -ExpandProperty Source -Unique) -join "; ")
+            TestPing = $true
+            TestDns = [bool](@($group.Group | Where-Object { $_.TestDns }).Count -gt 0)
+            TcpPorts = @($group.Group | ForEach-Object { @($_.TcpPorts) } | Select-Object -Unique)
+            TargetType = if (@($group.Group | Where-Object { $_.TargetType -eq "Local" }).Count -gt 0) { "Local" } else { [string]$sample.TargetType }
+        }
+    }
+    return $rows
 }
 
 function Test-TcpTarget {
@@ -873,6 +928,7 @@ function Get-NetworkAdapterRows {
             LinkSpeed = [string]$adapter.LinkSpeed
             LinkSpeedMbps = Convert-LinkSpeedToMbps ([string]$adapter.LinkSpeed)
             MacAddress = [string]$adapter.MacAddress
+            PnPDeviceID = [string]$adapter.PnPDeviceID
             IPv4Address = $ipv4
             IPv6Address = $ipv6
             PrefixLength = $prefix
@@ -904,6 +960,71 @@ function Get-NetworkAdapterRows {
             if ($row.InterfaceDescription -match '(?i)ethernet|gbe|i219|i225|i226|realtek|killer|intel' -and $null -ne $row.LinkSpeedMbps -and $row.LinkSpeedMbps -lt 1000) {
                 Add-Result -Category "Adapters" -Test "Link speed" -Role "Ethernet adapter" -Target $row.Name -InterfaceAlias $row.Name -Severity "Warning" -Result "Low link speed" -Value $row.LinkSpeed -Recommendation "A wired adapter below 1 Gbit/s can indicate cable, switch port, autonegotiation, docking station, or driver issues."
             }
+        }
+    }
+    return $rows
+}
+
+function Get-NetworkAdapterHealthRows {
+    param(
+        [object[]]$AdapterRows,
+        [object[]]$BaselineStatistics = @()
+    )
+
+    $statistics = @(Invoke-Capture "Get-NetAdapterStatistics" { Get-NetAdapterStatistics -ErrorAction Stop } @())
+    $drivers = @(Invoke-Capture "Network adapter driver inventory" { Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop | Where-Object { $_.DeviceClass -eq "NET" } } @())
+    $advanced = @(Invoke-Capture "Get-NetAdapterAdvancedProperty" { Get-NetAdapterAdvancedProperty -ErrorAction Stop } @())
+    $rows = @()
+
+    foreach ($adapter in @($AdapterRows | Where-Object { [string]$_.InterfaceDescription -notmatch '(?i)loopback' })) {
+        $name = [string]$adapter.Name
+        $stat = @($statistics | Where-Object { [string]$_.Name -eq $name } | Select-Object -First 1)
+        $baseline = @($BaselineStatistics | Where-Object { [string]$_.Name -eq $name } | Select-Object -First 1)
+        $driver = @($drivers | Where-Object {
+            (-not [string]::IsNullOrWhiteSpace([string]$adapter.PnPDeviceID) -and [string]$_.DeviceID -eq [string]$adapter.PnPDeviceID) -or
+            [string]$_.DeviceName -eq [string]$adapter.InterfaceDescription
+        } | Select-Object -First 1)
+        $adapterAdvanced = @($advanced | Where-Object { [string]$_.Name -eq $name })
+        $eee = @($adapterAdvanced | Where-Object { [string]$_.DisplayName -match '(?i)energy.efficient|energieeffizient|green ethernet' } | Select-Object -First 1)
+        $speedDuplex = @($adapterAdvanced | Where-Object { [string]$_.DisplayName -match '(?i)speed.*duplex|geschwindigkeit.*duplex' } | Select-Object -First 1)
+        $power = $null
+        try { $power = Get-NetAdapterPowerManagement -Name $name -ErrorAction Stop } catch {}
+
+        $receiveErrors = if ($stat.Count -gt 0) { [long]$stat[0].ReceivedPacketErrors } else { 0 }
+        $sendErrors = if ($stat.Count -gt 0) { [long]$stat[0].OutboundPacketErrors } else { 0 }
+        $receiveDiscards = if ($stat.Count -gt 0) { [long]$stat[0].ReceivedDiscardedPackets } else { 0 }
+        $sendDiscards = if ($stat.Count -gt 0) { [long]$stat[0].OutboundDiscardedPackets } else { 0 }
+        $baselineErrors = if ($baseline.Count -gt 0) { [long]$baseline[0].ReceivedPacketErrors + [long]$baseline[0].OutboundPacketErrors } else { $receiveErrors + $sendErrors }
+        $baselineDiscards = if ($baseline.Count -gt 0) { [long]$baseline[0].ReceivedDiscardedPackets + [long]$baseline[0].OutboundDiscardedPackets } else { $receiveDiscards + $sendDiscards }
+        $observedErrorDelta = [math]::Max(0, ($receiveErrors + $sendErrors) - $baselineErrors)
+        $observedDiscardDelta = [math]::Max(0, ($receiveDiscards + $sendDiscards) - $baselineDiscards)
+        $severity = if ($observedErrorDelta -gt 0 -or $observedDiscardDelta -gt 0 -or ($receiveErrors + $sendErrors) -gt 0 -or ($receiveDiscards + $sendDiscards) -gt 100) { "Warning" } else { "Info" }
+        $driverDate = if ($driver.Count -gt 0 -and $driver[0].DriverDate) { ([datetime]$driver[0].DriverDate).ToString("yyyy-MM-dd") } else { "" }
+        $powerSaving = if ($power) { [string](Get-FirstProperty -Object $power -Names @("AllowComputerToTurnOffDevice","DeviceSleepOnDisconnect")) } else { "" }
+        $source = "Get-NetAdapterStatistics; Win32_PnPSignedDriver; Get-NetAdapterPowerManagement; Get-NetAdapterAdvancedProperty"
+
+        $rows += [PSCustomObject]@{
+            Severity = $severity
+            Name = $name
+            Status = [string]$adapter.Status
+            LinkSpeed = [string]$adapter.LinkSpeed
+            DriverProvider = if ($driver.Count -gt 0) { [string]$driver[0].DriverProviderName } else { "" }
+            DriverVersion = if ($driver.Count -gt 0) { [string]$driver[0].DriverVersion } else { "" }
+            DriverDate = $driverDate
+            ReceiveErrors = $receiveErrors
+            SendErrors = $sendErrors
+            ReceiveDiscards = $receiveDiscards
+            SendDiscards = $sendDiscards
+            NewErrorsDuringRun = $observedErrorDelta
+            NewDiscardsDuringRun = $observedDiscardDelta
+            EnergyEfficientEthernet = if ($eee.Count -gt 0) { [string]$eee[0].DisplayValue } else { "" }
+            SpeedDuplex = if ($speedDuplex.Count -gt 0) { [string]$speedDuplex[0].DisplayValue } else { "" }
+            PowerSaving = $powerSaving
+            Source = $source
+        }
+
+        if ($severity -eq "Warning") {
+            Add-Result -Category "Adapters" -Test "Adapter packet counters" -Role "Adapter health" -Target $name -InterfaceAlias $name -Severity "Warning" -Result "Packet errors or excessive discards detected" -Value ("total rx errors={0}; total tx errors={1}; total rx discards={2}; total tx discards={3}; new errors during run={4}; new discards during run={5}" -f $receiveErrors,$sendErrors,$receiveDiscards,$sendDiscards,$observedErrorDelta,$observedDiscardDelta) -Details ("{0}. Totals are cumulative for the current adapter session; deltas compare snapshots taken before and after the diagnostics." -f $source) -Recommendation "Correlate these counters with NDIS resets and link events. Check cable, switch port, adapter driver, power management, and adapter hardware."
         }
     }
     return $rows
@@ -1299,9 +1420,13 @@ function Get-WlanRows {
         }
         if ($channel -ne "") {
             $sameChannel = @($networkRows | Where-Object { [string]$_.Channel -eq [string]$channel })
-            if ($sameChannel.Count -ge 4) {
-                Add-Result -Category "WLAN" -Test "Channel congestion" -Role "Nearby BSSIDs" -Target $ssid -Severity "Warning" -Result "Several BSSIDs on current channel" -Value ("channel={0}; count={1}" -f $channel, $sameChannel.Count) -Recommendation "Consider 5 GHz/6 GHz, a cleaner channel, less channel width, or better AP placement."
-            }
+            $visibleSsids = @($sameChannel | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.SSID) } | Select-Object -ExpandProperty SSID -Unique)
+            $sameSsidCount = @($sameChannel | Where-Object { [string]$_.SSID -eq [string]$ssid }).Count
+            $channelNumber = ConvertTo-Number $channel
+            $is24Ghz = ($null -ne $channelNumber -and $channelNumber -ge 1 -and $channelNumber -le 14) -or [string]$band -match '(?i)2[\.,]4|2\.4'
+            $channelSeverity = if ($is24Ghz -and $visibleSsids.Count -ge 4) { "Warning" } else { "Info" }
+            $channelResult = if ($channelSeverity -eq "Warning") { "Several distinct 2.4 GHz networks share the channel" } else { "Channel occupancy context collected" }
+            Add-Result -Category "WLAN" -Test "Channel occupancy" -Role "Nearby networks" -Target $ssid -Severity $channelSeverity -Result $channelResult -Value ("channel={0}; BSSIDs={1}; distinct visible SSIDs={2}; same SSID BSSIDs={3}" -f $channel,$sameChannel.Count,$visibleSsids.Count,$sameSsidCount) -Recommendation "BSSID count alone does not prove congestion because mesh systems and one access point can advertise several BSSIDs. Use packet loss, gateway latency, signal, and repeated measurements before changing channels."
         }
     }
 
@@ -1536,8 +1661,10 @@ function Get-ServiceRows {
             $startType = ""
             try { $startType = (Get-CimInstance Win32_Service -Filter "Name='$name'" -ErrorAction SilentlyContinue).StartMode } catch {}
             $rows += [PSCustomObject]@{ Name=$svc.Name; DisplayName=$svc.DisplayName; Status=$svc.Status; StartType=$startType }
-            if ($svc.Status -ne "Running" -and $name -in @("Dhcp","Dnscache","NlaSvc","netprofm","LanmanWorkstation")) {
+            if ($svc.Status -ne "Running" -and $name -in @("Dhcp","Dnscache")) {
                 Add-Result -Category "Services" -Test "Network service" -Role $name -Severity "Warning" -Result "Not running" -Value ([string]$svc.Status) -Recommendation "This service is commonly required for normal client networking. Check whether it is intentionally disabled."
+            } elseif ($startType -eq "Disabled" -and $name -in @("NlaSvc","netprofm","LanmanWorkstation")) {
+                Add-Result -Category "Services" -Test "Network service" -Role $name -Severity "Warning" -Result "Disabled" -Value ([string]$svc.Status) -Recommendation "This service is disabled. Confirm that this is intentional; a stopped Manual/trigger-start service alone is not treated as a fault."
             }
         } else {
             $rows += [PSCustomObject]@{ Name=$name; DisplayName=""; Status="Missing"; StartType="" }
@@ -1565,7 +1692,7 @@ function Get-NetworkEventRows {
                 $msg = ""
                 try { $msg = [string]$ev.Message } catch {}
                 if ($msg.Length -gt 500) { $msg = $msg.Substring(0,500) + "..." }
-                $rows += [PSCustomObject]@{ TimeCreated=$ev.TimeCreated; LogName=$log; ProviderName=$ev.ProviderName; Id=$ev.Id; LevelDisplayName=$ev.LevelDisplayName; Message=$msg }
+                $rows += [PSCustomObject]@{ TimeCreated=$ev.TimeCreated; LogName=$log; ProviderName=$ev.ProviderName; Id=$ev.Id; RecordId=$ev.RecordId; LevelDisplayName=$ev.LevelDisplayName; Message=$msg }
             }
         } catch {
             Add-Result -Category "Event Logs" -Test "Read event log" -Target $log -Severity "Info" -Result "Skipped" -Details $_.Exception.Message -Recommendation "This log can be unavailable or require permissions on some systems."
@@ -1574,7 +1701,118 @@ function Get-NetworkEventRows {
     if ($rows.Count -gt 0) {
         Add-Result -Category "Event Logs" -Test "Relevant network events" -Severity "Info" -Result "Events found" -Value $rows.Count -Recommendation "Review event timestamps and correlate them with reported network symptoms."
     }
-    return $rows
+    return @($rows | Sort-Object TimeCreated -Descending)
+}
+
+function Get-NetworkEventAdapterName {
+    param([object]$EventRow)
+
+    $message = [string]$EventRow.Message
+    if ($message -match '(?is)(?:Netzwerkschnittstelle|network interface)\s+(.+?)\s+(?:wurde|has|was)') {
+        return $matches[1].Trim(" `"'`r`n")
+    }
+    if ([string]$EventRow.ProviderName -match '(?i)^e\d.*express$|realtek|netwtw') {
+        $firstLine = @($message -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
+        if ($firstLine.Count -gt 0 -and $firstLine[0] -notmatch '(?i)network link|netzwerkverbindung') {
+            return [string]$firstLine[0].Trim()
+        }
+    }
+    return [string]$EventRow.ProviderName
+}
+
+function Get-NetworkEventInsightRows {
+    param([object[]]$EventRows)
+
+    $insights = @()
+    $ndisResets = @($EventRows | Where-Object { [string]$_.ProviderName -match '(?i)NDIS' -and [int]$_.Id -eq 10400 })
+    foreach ($group in @($ndisResets | Group-Object { Get-NetworkEventAdapterName $_ })) {
+        $events = @($group.Group | Sort-Object TimeCreated)
+        $messages = ($events | Select-Object -ExpandProperty Message) -join "`n"
+        $hardwareStopped = $messages -match '(?i)hardware has stopped responding|hardware.*nicht mehr.*Befehl|stopped responding to commands'
+        $reason = if ($hardwareStopped) { "The adapter hardware stopped responding to driver commands." } elseif ($messages -match '(?i)driver requested.*reset|Treiber.*Zurucksetzung|Treiber.*Zurücksetzung') { "The driver requested an adapter reset." } else { "Windows reset the network adapter." }
+        $severity = if ($hardwareStopped) { "Error" } else { "Warning" }
+        $firstSeen = $events[0].TimeCreated
+        $lastSeen = $events[$events.Count - 1].TimeCreated
+        $records = @($events | ForEach-Object { "{0} {1} record {2}" -f $_.ProviderName,$_.Id,$_.RecordId }) -join "; "
+        $insights += [PSCustomObject]@{
+            Severity = $severity
+            Incident = "Network adapter reset"
+            Adapter = [string]$group.Name
+            Count = $events.Count
+            FirstSeen = $firstSeen
+            LastSeen = $lastSeen
+            Interpretation = $reason
+            Evidence = $records
+            Recommendation = "Check cable and switch port first, then update or reinstall the OEM NIC driver and BIOS/firmware. Temporarily disable Energy Efficient Ethernet and adapter power saving. If resets continue on another cable and port, test another network adapter."
+        }
+        Add-Result -Category "Adapter incidents" -Test "NDIS adapter reset" -Role ([string]$group.Name) -Target ([string]$group.Name) -InterfaceAlias ([string]$group.Name) -Severity $severity -Result $reason -Value ("{0} reset event(s); first={1}; last={2}" -f $events.Count,$firstSeen,$lastSeen) -Details $records -Recommendation $insights[-1].Recommendation
+    }
+
+    $linkLosses = @($EventRows | Where-Object {
+        [string]$_.ProviderName -match '(?i)^e\d.*express$|realtek|netwtw' -and
+        ([int]$_.Id -eq 27 -or [string]$_.Message -match '(?i)network link is disconnected|Netzwerkverbindung.*unterbrochen|link.*disconnected')
+    })
+    foreach ($group in @($linkLosses | Group-Object { Get-NetworkEventAdapterName $_ })) {
+        $events = @($group.Group | Sort-Object TimeCreated)
+        $hasRelatedReset = @($ndisResets | Where-Object { (Get-NetworkEventAdapterName $_) -eq [string]$group.Name }).Count -gt 0
+        $severity = if ($events.Count -ge 2 -or $hasRelatedReset) { "Warning" } else { "Info" }
+        $records = @($events | ForEach-Object { "{0} {1} record {2}" -f $_.ProviderName,$_.Id,$_.RecordId }) -join "; "
+        $insights += [PSCustomObject]@{
+            Severity = $severity
+            Incident = "Physical network link lost"
+            Adapter = [string]$group.Name
+            Count = $events.Count
+            FirstSeen = $events[0].TimeCreated
+            LastSeen = $events[$events.Count - 1].TimeCreated
+            Interpretation = if ($hasRelatedReset) { "The link losses occurred in the same lookback window as NDIS adapter resets." } else { "The physical link was disconnected. A single event can also be caused by unplugging the cable or shutting down the peer device." }
+            Evidence = $records
+            Recommendation = "Replace the Ethernet cable and use another switch/router port. Confirm that the link negotiates its expected speed and correlate the timestamps with NDIS reset events."
+        }
+        if ($severity -eq "Warning") {
+            Add-Result -Category "Adapter incidents" -Test "Ethernet link loss" -Role ([string]$group.Name) -Target ([string]$group.Name) -InterfaceAlias ([string]$group.Name) -Severity "Warning" -Result $insights[-1].Interpretation -Value ("{0} disconnect event(s); first={1}; last={2}" -f $events.Count,$events[0].TimeCreated,$events[$events.Count - 1].TimeCreated) -Details $records -Recommendation $insights[-1].Recommendation
+        }
+    }
+
+    $slowLinks = @($EventRows | Where-Object {
+        [string]$_.ProviderName -match '(?i)^e\d.*express$|realtek' -and [string]$_.Message -match '(?i)\b(10|100)\s*(Mbps|Mbit)\b'
+    })
+    foreach ($group in @($slowLinks | Group-Object { Get-NetworkEventAdapterName $_ })) {
+        $events = @($group.Group | Sort-Object TimeCreated)
+        $records = @($events | ForEach-Object { "{0} {1} record {2}" -f $_.ProviderName,$_.Id,$_.RecordId }) -join "; "
+        $insights += [PSCustomObject]@{
+            Severity = "Warning"
+            Incident = "Ethernet negotiated below 1 Gbps"
+            Adapter = [string]$group.Name
+            Count = $events.Count
+            FirstSeen = $events[0].TimeCreated
+            LastSeen = $events[$events.Count - 1].TimeCreated
+            Interpretation = "The link event reports a 10/100 Mbps connection. On a gigabit-capable adapter this commonly points to cabling, port, docking, autonegotiation, or driver issues."
+            Evidence = $records
+            Recommendation = "Replace the cable, try another gigabit port, leave Speed & Duplex on Auto Negotiation, and verify that Windows reports 1 Gbps afterward."
+        }
+        Add-Result -Category "Adapter incidents" -Test "Historical link speed" -Role ([string]$group.Name) -Target ([string]$group.Name) -InterfaceAlias ([string]$group.Name) -Severity "Warning" -Result "Link established below 1 Gbps" -Value ("first={0}; last={1}" -f $events[0].TimeCreated,$events[$events.Count - 1].TimeCreated) -Details $records -Recommendation $insights[-1].Recommendation
+    }
+
+    $wlanDisconnects = @($EventRows | Where-Object { [string]$_.ProviderName -match '(?i)WLAN-AutoConfig' -and [int]$_.Id -eq 8003 })
+    if ($wlanDisconnects.Count -gt 0) {
+        $events = @($wlanDisconnects | Sort-Object TimeCreated)
+        $requested = @($events | Where-Object { [string]$_.Message -match '(?i)operational status change request|Betriebsstatus.*ander|Betriebsstatus.*änder' })
+        $unexpectedCount = $events.Count - $requested.Count
+        $severity = if ($unexpectedCount -ge 2) { "Warning" } else { "Info" }
+        $insights += [PSCustomObject]@{
+            Severity = $severity
+            Incident = "WLAN disconnect events"
+            Adapter = "WLAN"
+            Count = $events.Count
+            FirstSeen = $events[0].TimeCreated
+            LastSeen = $events[$events.Count - 1].TimeCreated
+            Interpretation = "{0} disconnect(s) were caused by an operational-status change request; {1} had another reason." -f $requested.Count,$unexpectedCount
+            Evidence = (@($events | ForEach-Object { "{0} {1} record {2}" -f $_.ProviderName,$_.Id,$_.RecordId }) -join "; ")
+            Recommendation = if ($unexpectedCount -ge 2) { "Review the exact WLAN reason codes, signal history, roaming, USB power management, and WLAN driver." } else { "Operational-status change requests often occur during restart, adapter switching, or a deliberate disconnect and are not RF failures by themselves." }
+        }
+    }
+
+    return @($insights | Sort-Object LastSeen -Descending)
 }
 
 function Convert-IPv4ToUInt32 {
@@ -1676,7 +1914,7 @@ function New-HtmlReport {
     $ok = @($results | Where-Object { $_.Severity -eq "OK" })
     $info = @($results | Where-Object { $_.Severity -eq "Info" })
     $overall = if ($errors.Count -gt 0) { "Error" } elseif ($warnings.Count -gt 0) { "Warning" } else { "OK" }
-    $topProblems = @($results | Where-Object { $_.Severity -in @("Error","Warning") } | Select-Object -First 12)
+    $topProblems = @(Sort-ResultRowsByPriority ($results | Where-Object { $_.Severity -in @("Error","Warning") }) | Select-Object -First 12)
     $topProblemHtml = if ($topProblems.Count -gt 0) {
         "<ul>" + (($topProblems | ForEach-Object { "<li><strong>$(Escape-Html $_.Category): $(Escape-Html $_.Test)</strong> - $(Escape-Html $_.Result). $(Escape-Html $_.Recommendation)</li>" }) -join "") + "</ul>"
     } else {
@@ -1696,10 +1934,12 @@ function New-HtmlReport {
     $prioritySectionSpecs = @(
         @{ Id="system"; Title="System information"; Kind="utility"; Rows=$Data.SystemInfo; Columns=@("ComputerName","UserName","DomainOrWorkgroup","PartOfDomain","Windows","BuildNumber","PowerShellVersion","UptimeDays","DateTime","TimeZone","IsAdmin"); Empty="No system information was collected."; AlwaysOpen=$true },
         @{ Id="adapters"; Title="Main network adapters"; Kind="network"; Rows=$Data.MainAdapters; Columns=@("Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile"); Empty="No non-VPN network adapter was detected."; PromoteStandard=$true },
-        @{ Id="ping"; Title="Main ping tests"; Kind="network"; Rows=$Data.MainPing; Columns=@("Severity","Role","Target","ResolvedAddress","InterfaceAlias","LossPercent","AvgMs","JitterMs","Result","Recommendation"); Empty="No ping tests were collected."; AlwaysOpen=$true; ShowStandard=$true },
+        @{ Id="adapter-health"; Title="Adapter health, driver, and link settings"; Kind="network"; Rows=$Data.AdapterHealth; Columns=@("Severity","Name","Status","LinkSpeed","DriverProvider","DriverVersion","DriverDate","ReceiveErrors","SendErrors","ReceiveDiscards","SendDiscards","NewErrorsDuringRun","NewDiscardsDuringRun","EnergyEfficientEthernet","SpeedDuplex","PowerSaving","Source"); Empty="No adapter health details were collected." },
+        @{ Id="adapter-incidents"; Title="Interpreted adapter and link incidents"; Kind="network"; Rows=$Data.EventInsights; Columns=@("Severity","Incident","Adapter","Count","FirstSeen","LastSeen","Interpretation","Evidence","Recommendation"); Empty="No adapter or link incidents were detected in the event lookback window." },
+        @{ Id="ping"; Title="Main ping tests"; Kind="network"; Rows=$Data.MainPing; Columns=@("Severity","Role","Target","ResolvedAddress","InterfaceAlias","LossPercent","MinMs","MedianMs","AvgMs","P95Ms","MaxMs","JitterMs","Result","Recommendation"); Empty="No ping tests were collected."; AlwaysOpen=$true; ShowStandard=$true },
         @{ Id="dns"; Title="DNS diagnostics"; Kind="network"; Rows=$Data.Dns; Columns=@("Severity","Role","Name","Server","Addresses","DurationMs","Result","Error","Recommendation"); Empty="No DNS diagnostics were collected."; AlwaysOpen=$true; ShowStandard=$true },
         @{ Id="speedtest"; Title="Internet speed test"; Kind="utility"; Rows=$Data.Speedtest; Columns=@("Severity","Tool","Server","DownloadMbps","UploadMbps","PingMs","Details"); Empty="No internet speed data was collected."; AlwaysOpen=$true; PromoteStandard=$true },
-        @{ Id="results"; Title="Main findings and test results"; Kind="utility"; Rows=$Data.MainResults; Columns=@("Severity","Category","Test","Role","Target","Result","Value","Recommendation"); Empty="No findings or test results were collected." }
+        @{ Id="results"; Title="Main findings and test results"; Kind="utility"; Rows=$Data.MainResults; Columns=@("Severity","Category","Test","Role","Target","Result","Value","Details","Recommendation"); Empty="No findings or test results were collected." }
     )
 
     $restSectionSpecs = @(
@@ -1741,13 +1981,13 @@ function New-HtmlReport {
     }
 
     $skippedHtml = New-ReportSection -Id "skipped" -Title "Skipped or optional tests" -Kind "utility" -Rows $skippedRows.ToArray() -Columns @("Section","Severity","Test","Target","Result","Details") -EmptyMessage "No skipped or optional test rows." -IncludeSkippedRows
-    $eventsHtml = New-ReportSection -Id "events" -Title "Network event logs" -Kind "logs" -Rows $Data.Events -Columns @("TimeCreated","LogName","ProviderName","Id","LevelDisplayName","Message") -EmptyMessage "No network event log rows were collected." -AlwaysOpen -ShowStandardRows
+    $eventsHtml = New-ReportSection -Id "events" -Title "Network event logs" -Kind "logs" -Rows $Data.Events -Columns @("TimeCreated","LogName","ProviderName","Id","RecordId","LevelDisplayName","Message") -EmptyMessage "No network event log rows were collected." -AlwaysOpen -ShowStandardRows
     $vpnSections = @(
         New-ReportSection -Id "vpn-overview" -Title "VPN overview" -Kind "vpn" -Rows $Data.Vpn -Columns @("Provider","ItemType","Name","Status","InterfaceAlias","RouteCount","DefaultRoute","Details") -EmptyMessage "No VPN adapter, route, service, or process was detected."
         New-ReportSection -Id "vpn-adapters" -Title "VPN adapters and IP configuration" -Kind "vpn" -Rows $Data.VpnAdapters -Columns @("Provider","Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile") -EmptyMessage "No VPN network adapter was detected."
         New-ReportSection -Id "vpn-routes" -Title "VPN routes" -Kind "vpn" -Rows $Data.VpnRoutes -Columns @("DestinationPrefix","NextHop","InterfaceAlias","VpnProvider","RouteMetric","InterfaceMetric") -EmptyMessage "No VPN routes were detected."
         New-ReportSection -Id "vpn-targets" -Title "VPN target matrix" -Kind "vpn" -Rows $Data.VpnTargetMatrix -Columns @("Role","Target","InterfaceAlias","VpnProvider","Source","TargetType","TestPing","TestDns","TcpPorts") -EmptyMessage "No VPN targets were detected."
-        New-ReportSection -Id "vpn-ping" -Title "VPN ping tests" -Kind "vpn" -Rows $Data.VpnPing -Columns @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","VpnProvider","LossPercent","AvgMs","JitterMs","Result","Recommendation") -EmptyMessage "No VPN ping tests were collected."
+        New-ReportSection -Id "vpn-ping" -Title "VPN ping tests" -Kind "vpn" -Rows $Data.VpnPing -Columns @("Severity","Role","Target","ResolvedAddress","InterfaceAlias","VpnProvider","LossPercent","MinMs","MedianMs","AvgMs","P95Ms","MaxMs","JitterMs","Result","Recommendation") -EmptyMessage "No VPN ping tests were collected."
         New-ReportSection -Id "vpn-tcp" -Title "VPN TCP port tests" -Kind "vpn" -Rows $Data.VpnTcp -Columns @("Severity","Role","Host","Port","TcpTestSucceeded","InterfaceAlias","VpnProvider","LatencyMs","Result","Recommendation") -EmptyMessage "No VPN TCP tests were collected."
         New-ReportSection -Id "vpn-firewall" -Title "VPN firewall and profile rows" -Kind "vpn" -Rows $Data.VpnFirewall -Columns @("Name","InterfaceAlias","NetworkCategory","IPv4Connectivity","IPv6Connectivity","Enabled","DefaultInboundAction","DefaultOutboundAction") -EmptyMessage "No VPN firewall or profile rows were detected."
         New-ReportSection -Id "vpn-results" -Title "VPN findings and test results" -Kind "vpn" -Rows $Data.VpnResults -Columns @("Severity","Category","Test","Role","Target","InterfaceAlias","Result","Value","Details","Recommendation") -EmptyMessage "No VPN-specific findings were detected."
@@ -1898,6 +2138,7 @@ $systemInfo = @(Get-SystemInfoRows)
 
 Write-Step "Collecting network adapters..."
 $adapters = @(Get-NetworkAdapterRows)
+$adapterStatisticsBefore = @(Invoke-Capture "Initial adapter statistics" { Get-NetAdapterStatistics -ErrorAction Stop } @())
 
 Write-Step "Collecting routes..."
 $routes = @(Get-RouteRows -AdapterRows $adapters)
@@ -1910,7 +2151,8 @@ $targetMatrix = @(Build-TargetMatrix -AdapterRows $adapters -RouteRows $routes)
 
 Write-Step "Running ping tests..."
 $pingRows = @()
-foreach ($target in @($targetMatrix | Where-Object { $_.TestPing })) {
+$pingTargets = @(Get-UniquePingTargets -TargetMatrix $targetMatrix)
+foreach ($target in $pingTargets) {
     $pingRows += Test-PingTarget -TargetRow $target -Count $PingCount
 }
 
@@ -1938,6 +2180,10 @@ Write-Step "Collecting service diagnostics..."
 $serviceRows = @(Get-ServiceRows)
 Write-Step "Collecting network event logs..."
 $eventRows = @(Get-NetworkEventRows)
+Write-Step "Interpreting adapter and link incidents..."
+$eventInsightRows = @(Get-NetworkEventInsightRows -EventRows $eventRows)
+Write-Step "Collecting final adapter health, driver, and link settings..."
+$adapterHealthRows = @(Get-NetworkAdapterHealthRows -AdapterRows $adapters -BaselineStatistics $adapterStatisticsBefore)
 Write-Step "Collecting subnet discovery..."
 $subnetRows = @(Get-SubnetDiscoveryRows -AdapterRows $adapters -PrimaryAlias $primaryAlias)
 
@@ -1982,19 +2228,21 @@ $nonVpnRoutes = @($routes | Where-Object { -not (Test-RowHasVpnContext $_) } | S
 $vpnRouteRows = @($routes | Where-Object { Test-RowHasVpnContext $_ } | Select-Object DestinationPrefix, NextHop, InterfaceAlias, VpnProvider, RouteMetric, InterfaceMetric)
 $nonVpnTargets = @($targetMatrix | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object Role, Target, InterfaceAlias, Source, TargetType, TestPing, TestDns, TcpPorts)
 $vpnTargets = @($targetMatrix | Where-Object { Test-RowHasVpnContext $_ } | Select-Object Role, Target, InterfaceAlias, VpnProvider, Source, TargetType, TestPing, TestDns, TcpPorts)
-$nonVpnPing = @($pingRows | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object Severity, Role, Target, ResolvedAddress, InterfaceAlias, LossPercent, AvgMs, JitterMs, Result, Recommendation)
-$vpnPing = @($pingRows | Where-Object { Test-RowHasVpnContext $_ } | Select-Object Severity, Role, Target, ResolvedAddress, InterfaceAlias, VpnProvider, LossPercent, AvgMs, JitterMs, Result, Recommendation)
+$nonVpnPing = @($pingRows | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object Severity, Role, Target, ResolvedAddress, InterfaceAlias, LossPercent, MinMs, MedianMs, AvgMs, P95Ms, MaxMs, JitterMs, Result, Recommendation)
+$vpnPing = @($pingRows | Where-Object { Test-RowHasVpnContext $_ } | Select-Object Severity, Role, Target, ResolvedAddress, InterfaceAlias, VpnProvider, LossPercent, MinMs, MedianMs, AvgMs, P95Ms, MaxMs, JitterMs, Result, Recommendation)
 $nonVpnTcp = @($tcpRows | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object Severity, Role, Host, Port, TcpTestSucceeded, InterfaceAlias, LatencyMs, Result, Recommendation)
 $vpnTcp = @($tcpRows | Where-Object { Test-RowHasVpnContext $_ } | Select-Object Severity, Role, Host, Port, TcpTestSucceeded, InterfaceAlias, VpnProvider, LatencyMs, Result, Recommendation)
 $nonVpnFirewall = @($firewallRows | Where-Object { -not (Test-RowHasVpnContext $_) })
 $vpnFirewall = @($firewallRows | Where-Object { Test-RowHasVpnContext $_ })
 $resultRows = @(Get-ResultRows)
-$mainResults = @($resultRows | Where-Object { -not (Test-RowHasVpnContext $_) } | Select-Object Severity, Category, Test, Role, Target, Result, Value, Recommendation)
+$mainResults = @(Sort-ResultRowsByPriority ($resultRows | Where-Object { -not (Test-RowHasVpnContext $_) }) | Select-Object Severity, Category, Test, Role, Target, Result, Value, Details, Recommendation)
 $vpnResults = @($resultRows | Where-Object { Test-RowHasVpnContext $_ } | Select-Object Severity, Category, Test, Role, Target, InterfaceAlias, Result, Value, Details, Recommendation)
 
 $data = @{
     SystemInfo = $systemInfo
     Adapters = $adapters
+    AdapterHealth = $adapterHealthRows
+    EventInsights = $eventInsightRows
     MainAdapters = $nonVpnAdapters
     VpnAdapters = $vpnAdapters
     Vpn = $vpnRows
@@ -2044,7 +2292,7 @@ New-HtmlReport -Path $HtmlPath -Data $data
 $resultRows = @(Get-ResultRows)
 $errors = @($resultRows | Where-Object { $_.Severity -eq "Error" })
 $warnings = @($resultRows | Where-Object { $_.Severity -eq "Warning" })
-$top = @($resultRows | Where-Object { $_.Severity -in @("Error","Warning") } | Select-Object -First 5)
+$top = @(Sort-ResultRowsByPriority ($resultRows | Where-Object { $_.Severity -in @("Error","Warning") }) | Select-Object -First 5)
 
 Write-Host ""
 Write-Host "Network diagnostics finished." -ForegroundColor Green
