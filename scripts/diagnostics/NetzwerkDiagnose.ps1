@@ -40,7 +40,7 @@
     Ping count per target. Default: 10.
 
 .PARAMETER EventHours
-    Event log lookback in hours when IncludeEventLogs is used. Default: 24.
+    Event log lookback in hours. Default: 168 (7 days).
 
 .PARAMETER IncludeEventLogs
     Compatibility switch. Relevant network event logs are collected by default.
@@ -116,7 +116,7 @@ param(
     [string]$SmbTestPath = "",
     [int]$SmbTestSizeMB = 256,
     [int]$PingCount = 10,
-    [int]$EventHours = 24,
+    [int]$EventHours = 168,
     [switch]$IncludeEventLogs,
     [switch]$IncludeRawData,
     [switch]$IncludeTraceroute,
@@ -131,7 +131,7 @@ param(
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 $ToolName = "NetzwerkDiagnose"
-$ToolVersion = "1.3 Link Incident Analysis"
+$ToolVersion = "1.3.1 Link Incident Follow-up"
 $Started = Get-Date
 $ComputerSafe = ($env:COMPUTERNAME -replace '[\\/:*?"<>| ]', '_')
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -280,7 +280,7 @@ function Test-RowProblem {
     foreach ($name in @("Result","TcpTestSucceeded","PingSucceeded","Status","State","IPv4Connectivity","IPv6Connectivity")) {
         if ($Row.PSObject.Properties.Name -contains $name) {
             $value = [string]$Row.$name
-            if ($value -match '(?i)^false$|not reachable|failed|error|down|disconnected|unreachable|timeout|degraded') {
+            if ($value -match '(?i)^false$|not reachable|failed|error|unreachable|timeout|degraded') {
                 return $true
             }
         }
@@ -458,9 +458,9 @@ function Get-HtmlCellClass {
     if ([string]::IsNullOrWhiteSpace($text)) { return "" }
 
     if ($Column -in @("Result","TcpTestSucceeded","PingSucceeded","Status","State","IPv4Connectivity","IPv6Connectivity")) {
-        if ($text -match '(?i)^true$|reachable|resolved|online|up|connected|success|completed|ok|internet') { return "cell-good" }
-        if ($text -match '(?i)skipped|stale|limited|unknown|degraded') { return "cell-info" }
         if ($text -match '(?i)^false$|not reachable|failed|error|down|disconnected|unreachable|timeout') { return "cell-bad" }
+        if ($text -match '(?i)^true$|reachable|resolved|online|^up$|^connected$|success|completed|ok|internet') { return "cell-good" }
+        if ($text -match '(?i)skipped|stale|limited|unknown|degraded') { return "cell-info" }
     }
 
     if ($Column -in @("LossPercent")) {
@@ -998,7 +998,9 @@ function Get-NetworkAdapterHealthRows {
         $baselineDiscards = if ($baseline.Count -gt 0) { [long]$baseline[0].ReceivedDiscardedPackets + [long]$baseline[0].OutboundDiscardedPackets } else { $receiveDiscards + $sendDiscards }
         $observedErrorDelta = [math]::Max(0, ($receiveErrors + $sendErrors) - $baselineErrors)
         $observedDiscardDelta = [math]::Max(0, ($receiveDiscards + $sendDiscards) - $baselineDiscards)
-        $severity = if ($observedErrorDelta -gt 0 -or $observedDiscardDelta -gt 0 -or ($receiveErrors + $sendErrors) -gt 0 -or ($receiveDiscards + $sendDiscards) -gt 100) { "Warning" } else { "Info" }
+        $lowWiredLink = [string]$adapter.Status -match '(?i)^Up$' -and [string]$adapter.InterfaceDescription -match '(?i)ethernet|gbe|i219|i225|i226|realtek|killer|intel' -and $null -ne $adapter.LinkSpeedMbps -and [double]$adapter.LinkSpeedMbps -lt 1000
+        $counterWarning = $observedErrorDelta -gt 0 -or $observedDiscardDelta -gt 0 -or ($receiveErrors + $sendErrors) -gt 0 -or ($receiveDiscards + $sendDiscards) -gt 100
+        $severity = if ($lowWiredLink -or $counterWarning) { "Warning" } else { "Info" }
         $driverDate = if ($driver.Count -gt 0 -and $driver[0].DriverDate) { ([datetime]$driver[0].DriverDate).ToString("yyyy-MM-dd") } else { "" }
         $powerSaving = if ($power) { [string](Get-FirstProperty -Object $power -Names @("AllowComputerToTurnOffDevice","DeviceSleepOnDisconnect")) } else { "" }
         $source = "Get-NetAdapterStatistics; Win32_PnPSignedDriver; Get-NetAdapterPowerManagement; Get-NetAdapterAdvancedProperty"
@@ -1023,7 +1025,7 @@ function Get-NetworkAdapterHealthRows {
             Source = $source
         }
 
-        if ($severity -eq "Warning") {
+        if ($counterWarning) {
             Add-Result -Category "Adapters" -Test "Adapter packet counters" -Role "Adapter health" -Target $name -InterfaceAlias $name -Severity "Warning" -Result "Packet errors or excessive discards detected" -Value ("total rx errors={0}; total tx errors={1}; total rx discards={2}; total tx discards={3}; new errors during run={4}; new discards during run={5}" -f $receiveErrors,$sendErrors,$receiveDiscards,$sendDiscards,$observedErrorDelta,$observedDiscardDelta) -Details ("{0}. Totals are cumulative for the current adapter session; deltas compare snapshots taken before and after the diagnostics." -f $source) -Recommendation "Correlate these counters with NDIS resets and link events. Check cable, switch port, adapter driver, power management, and adapter hardware."
         }
     }
@@ -1367,13 +1369,19 @@ function Get-WlanRows {
     $severity = "Info"
     $result = "WLAN data collected"
     $rec = "Review signal quality, channel, band, link rates, security mode, and nearby networks if Wi-Fi issues are reported."
+    $isConnected = [string]$state -match '(?i)^\s*(connected|verbunden)\s*$'
     $signalNumber = ConvertTo-Number $signal
-    if ($null -ne $signalNumber -and $signalNumber -lt 50) {
+    if ($isConnected -and $null -ne $signalNumber -and $signalNumber -lt 50) {
         $severity = "Warning"
         $result = "Weak Wi-Fi signal"
         $rec = "Wi-Fi signal is weak. Check distance, walls, roaming, interference, antenna, and AP channel plan."
     }
-    Add-Result -Category "WLAN" -Test "Wi-Fi signal" -Role "Active WLAN" -Target $ssid -Severity $severity -Result $result -Value ("signal={0}%; rx={1}; tx={2}; band={3}; channel={4}" -f $signal, $rxRate, $txRate, $band, $channel) -Recommendation $rec
+    if ($isConnected) {
+        Add-Result -Category "WLAN" -Test "Wi-Fi signal" -Role "Active WLAN" -Target $ssid -Severity $severity -Result $result -Value ("signal={0}%; rx={1}; tx={2}; band={3}; channel={4}" -f $signal, $rxRate, $txRate, $band, $channel) -Recommendation $rec
+    } else {
+        $result = "WLAN adapter is not connected"
+        $rec = "No Wi-Fi quality assessment is generated while the adapter is disconnected."
+    }
     $rows += [PSCustomObject]@{ RowType="Active connection"; Name=$name; SSID=$ssid; BSSID=$bssid; SignalPercent=$signal; RadioType=$radio; Band=$band; Channel=$channel; ReceiveRate=$rxRate; TransmitRate=$txRate; Authentication=$auth; Cipher=$cipher; Profile=$profile; Severity=$severity; Recommendation=$rec; Details=$state }
 
     if (-not [string]::IsNullOrWhiteSpace($drivers)) {
@@ -1685,9 +1693,10 @@ function Get-NetworkEventRows {
     $start = (Get-Date).AddHours(-1 * [math]::Max(1, $EventHours))
     foreach ($log in $logs) {
         try {
-            $events = @(Get-WinEvent -FilterHashtable @{ LogName=$log; StartTime=$start } -MaxEvents 400 -ErrorAction Stop | Where-Object {
+            $maxEvents = if ($log -eq "System") { 5000 } else { 1200 }
+            $events = @(Get-WinEvent -FilterHashtable @{ LogName=$log; StartTime=$start } -MaxEvents $maxEvents -ErrorAction Stop | Where-Object {
                 "$($_.ProviderName) $($_.Message)" -match '(?i)Tcpip|Dhcp|DNS|Netwtw|e1d|e2f|Realtek|NDIS|NetAdapter|WLAN|disconnect|duplicate|lease|name resolution'
-            } | Select-Object -First 80)
+            } | Select-Object -First 250)
             foreach ($ev in $events) {
                 $msg = ""
                 try { $msg = [string]$ev.Message } catch {}
@@ -1695,7 +1704,10 @@ function Get-NetworkEventRows {
                 $rows += [PSCustomObject]@{ TimeCreated=$ev.TimeCreated; LogName=$log; ProviderName=$ev.ProviderName; Id=$ev.Id; RecordId=$ev.RecordId; LevelDisplayName=$ev.LevelDisplayName; Message=$msg }
             }
         } catch {
-            Add-Result -Category "Event Logs" -Test "Read event log" -Target $log -Severity "Info" -Result "Skipped" -Details $_.Exception.Message -Recommendation "This log can be unavailable or require permissions on some systems."
+            $noMatches = [string]$_.FullyQualifiedErrorId -match '(?i)NoMatchingEventsFound' -or [string]$_.Exception.Message -match '(?i)no events were found|keine Ereignisse gefunden'
+            if (-not $noMatches) {
+                Add-Result -Category "Event Logs" -Test "Read event log" -Target $log -Severity "Info" -Result "Skipped" -Details $_.Exception.Message -Recommendation "This log can be unavailable or require permissions on some systems."
+            }
         }
     }
     if ($rows.Count -gt 0) {
@@ -1935,7 +1947,7 @@ function New-HtmlReport {
         @{ Id="system"; Title="System information"; Kind="utility"; Rows=$Data.SystemInfo; Columns=@("ComputerName","UserName","DomainOrWorkgroup","PartOfDomain","Windows","BuildNumber","PowerShellVersion","UptimeDays","DateTime","TimeZone","IsAdmin"); Empty="No system information was collected."; AlwaysOpen=$true },
         @{ Id="adapters"; Title="Main network adapters"; Kind="network"; Rows=$Data.MainAdapters; Columns=@("Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile"); Empty="No non-VPN network adapter was detected."; PromoteStandard=$true },
         @{ Id="adapter-health"; Title="Adapter health, driver, and link settings"; Kind="network"; Rows=$Data.AdapterHealth; Columns=@("Severity","Name","Status","LinkSpeed","DriverProvider","DriverVersion","DriverDate","ReceiveErrors","SendErrors","ReceiveDiscards","SendDiscards","NewErrorsDuringRun","NewDiscardsDuringRun","EnergyEfficientEthernet","SpeedDuplex","PowerSaving","Source"); Empty="No adapter health details were collected." },
-        @{ Id="adapter-incidents"; Title="Interpreted adapter and link incidents"; Kind="network"; Rows=$Data.EventInsights; Columns=@("Severity","Incident","Adapter","Count","FirstSeen","LastSeen","Interpretation","Evidence","Recommendation"); Empty="No adapter or link incidents were detected in the event lookback window." },
+        @{ Id="adapter-incidents"; Title=("Interpreted adapter and link incidents - last {0} hours" -f $EventHours); Kind="network"; Rows=$Data.EventInsights; Columns=@("Severity","Incident","Adapter","Count","FirstSeen","LastSeen","Interpretation","Evidence","Recommendation"); Empty="No adapter or link incidents were detected in the event lookback window." },
         @{ Id="ping"; Title="Main ping tests"; Kind="network"; Rows=$Data.MainPing; Columns=@("Severity","Role","Target","ResolvedAddress","InterfaceAlias","LossPercent","MinMs","MedianMs","AvgMs","P95Ms","MaxMs","JitterMs","Result","Recommendation"); Empty="No ping tests were collected."; AlwaysOpen=$true; ShowStandard=$true },
         @{ Id="dns"; Title="DNS diagnostics"; Kind="network"; Rows=$Data.Dns; Columns=@("Severity","Role","Name","Server","Addresses","DurationMs","Result","Error","Recommendation"); Empty="No DNS diagnostics were collected."; AlwaysOpen=$true; ShowStandard=$true },
         @{ Id="speedtest"; Title="Internet speed test"; Kind="utility"; Rows=$Data.Speedtest; Columns=@("Severity","Tool","Server","DownloadMbps","UploadMbps","PingMs","Details"); Empty="No internet speed data was collected."; AlwaysOpen=$true; PromoteStandard=$true },
@@ -1981,7 +1993,7 @@ function New-HtmlReport {
     }
 
     $skippedHtml = New-ReportSection -Id "skipped" -Title "Skipped or optional tests" -Kind "utility" -Rows $skippedRows.ToArray() -Columns @("Section","Severity","Test","Target","Result","Details") -EmptyMessage "No skipped or optional test rows." -IncludeSkippedRows
-    $eventsHtml = New-ReportSection -Id "events" -Title "Network event logs" -Kind "logs" -Rows $Data.Events -Columns @("TimeCreated","LogName","ProviderName","Id","RecordId","LevelDisplayName","Message") -EmptyMessage "No network event log rows were collected." -AlwaysOpen -ShowStandardRows
+    $eventsHtml = New-ReportSection -Id "events" -Title ("Network event logs - last {0} hours" -f $EventHours) -Kind "logs" -Rows $Data.Events -Columns @("TimeCreated","LogName","ProviderName","Id","RecordId","LevelDisplayName","Message") -EmptyMessage "No network event log rows were collected." -AlwaysOpen -ShowStandardRows
     $vpnSections = @(
         New-ReportSection -Id "vpn-overview" -Title "VPN overview" -Kind "vpn" -Rows $Data.Vpn -Columns @("Provider","ItemType","Name","Status","InterfaceAlias","RouteCount","DefaultRoute","Details") -EmptyMessage "No VPN adapter, route, service, or process was detected."
         New-ReportSection -Id "vpn-adapters" -Title "VPN adapters and IP configuration" -Kind "vpn" -Rows $Data.VpnAdapters -Columns @("Provider","Name","Description","Status","LinkSpeed","IPv4","Gateway","DNS","DHCP","Metric","Profile") -EmptyMessage "No VPN network adapter was detected."
@@ -2070,7 +2082,7 @@ function New-HtmlReport {
 <body>
   <header>
     <h1>Network Diagnostics Report</h1>
-    <div class="meta">$ToolName $ToolVersion | Created: $(Escape-Html (Get-Date)) | Computer: $(Escape-Html $env:COMPUTERNAME)</div>
+    <div class="meta">$ToolName $ToolVersion | Created: $(Escape-Html (Get-Date)) | Computer: $(Escape-Html $env:COMPUTERNAME) | Event lookback: $(Escape-Html $EventHours) hours</div>
     <div class="summary $overall">
       <h2>Executive Summary</h2>
       <p><strong>Overall status:</strong> $overall</p>
@@ -2193,7 +2205,7 @@ if ($IncludeRawData) {
     try { $script:RawData["route print"] = (route.exe print 2>&1) -join "`n" } catch {}
 }
 
-$nonVpnAdapters = @($adapters | Where-Object { -not (Test-RowHasVpnContext $_) } | ForEach-Object {
+$nonVpnAdapters = @($adapters | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.VpnProvider) } | ForEach-Object {
     $ipv4Cidr = if (-not [string]::IsNullOrWhiteSpace([string]$_.IPv4Address)) { "{0}/{1}" -f $_.IPv4Address, $_.PrefixLength } else { "" }
     [PSCustomObject]@{
         Name = $_.Name
@@ -2208,7 +2220,7 @@ $nonVpnAdapters = @($adapters | Where-Object { -not (Test-RowHasVpnContext $_) }
         Profile = $_.NetworkProfile
     }
 })
-$vpnAdapters = @($adapters | Where-Object { Test-RowHasVpnContext $_ } | ForEach-Object {
+$vpnAdapters = @($adapters | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.VpnProvider) } | ForEach-Object {
     $ipv4Cidr = if (-not [string]::IsNullOrWhiteSpace([string]$_.IPv4Address)) { "{0}/{1}" -f $_.IPv4Address, $_.PrefixLength } else { "" }
     [PSCustomObject]@{
         Provider = $_.VpnProvider
