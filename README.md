@@ -17,7 +17,6 @@ irm https://kiwus-it.de/r|iex
 ```text
 1 = PCDiagLite
 2 = NetzwerkDiagnose
-3 = NTLiteChecker
 ```
 
 4. Accept the UAC prompt only when the selected tool asks for it.
@@ -66,39 +65,6 @@ The result view shows the most important findings first. The ZIP contains the fu
 C:\Temp\NetzwerkDiagnose
 ```
 
-`NTLiteChecker` asks for a ZIP and writes its HTML, CSV, and result ZIP files to:
-
-```text
-C:\Temp\NTLiteChecker
-```
-
-## NTLite Verification
-
-The checker is portable and read-only. Nothing from PC-Diagnose must be installed or added to the Windows image.
-
-For a new NTLite installation:
-
-1. Build the image from one fixed Windows version and edition.
-2. Save the final NTLite preset immediately before Apply and keep the auto-saved session preset created by Apply.
-3. Keep the exact unattended XML and NTLite build logs.
-4. Put the files below into one ZIP. Subfolders are supported.
-5. Install Windows normally.
-6. Run menu item `3 = NTLiteChecker` on the installed PC and select the ZIP.
-
-Include:
-
-1. The final auto-saved NTLite session preset created after the last Apply operation. This is the most important file.
-2. The exact `autounattend.xml` or `unattend.xml` used for Windows Setup.
-3. Every manually loaded NTLite `[Preset].xml` file, for history and conflict detection.
-4. The matching `NTLite.log` and `NTLite_dism.log` from the image build.
-5. Post-setup `.ps1`, `.cmd`, `.bat`, and `.reg` source files referenced by the presets.
-
-NTLite logs are normally stored in `%LOCALAPPDATA%\Temp`; the configured temporary directory is shown in NTLite under `Menu > Settings`.
-
-The checker safely compares literal REG entries and simple literal registry commands with the current PC. It never imports or executes supplied files. It also reads the Windows Setup evidence already retained under `C:\Windows\Panther`. Historical script exit codes remain `Not verifiable` when Windows did not retain them, but durable effects can still be verified from the current state.
-
-The original input ZIP is not copied into the result ZIP. Product keys and common secret parameters are redacted from generated output, but review archives before sharing them publicly.
-
 ## Optional Commands
 
 Start PCDiagLite directly:
@@ -137,18 +103,6 @@ Start NetzwerkDiagnose directly:
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool netdiag
 ```
 
-Start NTLiteChecker directly and select the ZIP in the file dialog:
-
-```powershell
-& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool ntlitecheck
-```
-
-Provide the ZIP directly:
-
-```powershell
-& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool ntlitecheck -NTLiteInputZip 'C:\Temp\NTLite-Verification.zip'
-```
-
 Run NetzwerkDiagnose with extra path tests:
 
 ```powershell
@@ -179,7 +133,6 @@ Running remote PowerShell code requires trust in this repository.
 ## Features
 
 - Menu-based tool selection from one short command
-- Portable, read-only NTLite and policy verification in menu item `3` against presets, unattended XML, NTLite logs, safe static registry assertions, current Windows state, and retained Panther setup evidence
 - Local HTML result view
 - Compact hardware summary at the top of PCDiagLite with CPU, GPU, RAM, mainboard, and system storage
 - Timeout-protected collection steps with hardened child process handling

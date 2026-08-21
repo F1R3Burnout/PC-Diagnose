@@ -21,8 +21,6 @@ param(
     [switch]$DaysBackProvided,
     [switch]$NoElevate,
     [string]$OutputPath = "C:\Temp\NetzwerkDiagnose",
-    [string]$NTLiteInputZip = "",
-    [string]$NTLiteOutputRoot = "C:\Temp\NTLiteChecker",
     [string[]]$LocalTargets = @(),
     [string[]]$TcpTargets = @(),
     [string[]]$DnsTestNames = @("google.de", "microsoft.com", "dns.msftncsi.com"),
@@ -30,7 +28,7 @@ param(
     [string]$SmbTestPath = "",
     [int]$SmbTestSizeMB = 256,
     [int]$PingCount = 10,
-    [int]$EventHours = 24,
+    [int]$EventHours = 168,
     [switch]$IncludeEventLogs,
     [switch]$IncludeRawData,
     [switch]$IncludeTraceroute,
@@ -105,8 +103,6 @@ function Start-ElevatedBootstrap {
             "-MaxEvents $MaxEvents " +
             "-EventTimeoutSeconds $EventTimeoutSeconds " +
             "-StepTimeoutSeconds $StepTimeoutSeconds " +
-            "-NTLiteInputZip $(Quote-ForSingleQuotedPowerShell $NTLiteInputZip) " +
-            "-NTLiteOutputRoot $(Quote-ForSingleQuotedPowerShell $NTLiteOutputRoot) " +
             "$(if ($PrivacyMode) { '-PrivacyMode ' } else { '' })" +
             "$(if ($AutoInstallDebugTools) { '-AutoInstallDebugTools ' } else { '' })" +
             "$(if ($DaysBackWasProvided) { '-DaysBackProvided ' } else { '' })" +
@@ -273,10 +269,6 @@ function Invoke-RemoteTool {
         if ($NoWriteTests) {
             $toolArgs.NoWriteTests = $true
         }
-        $toolArgs.OpenReport = $true
-    } elseif ($toolInfo.id -eq "ntlitecheck") {
-        $toolArgs.InputZip = $NTLiteInputZip
-        $toolArgs.OutputRoot = $NTLiteOutputRoot
         $toolArgs.OpenReport = $true
     }
 

@@ -58,30 +58,6 @@
           "description": "Open the HTML report after completion."
         }
       ]
-    },
-    {
-      "id": "ntlitecheck",
-      "name": "NTLiteChecker",
-      "category": "pc-test",
-      "description": "Read-only verification of NTLite presets, unattended XML, build logs, post-setup source files, and retained Windows Setup evidence.",
-      "path": "scripts/diagnostics/NTLiteChecker.ps1",
-      "kind": "powershell",
-      "requiresAdmin": true,
-      "safeMode": "collect-only",
-      "parameters": [
-        {
-          "name": "InputZip",
-          "type": "string",
-          "default": "",
-          "description": "ZIP containing NTLite presets, unattended XML, NTLite logs, and optional post-setup source files. A file picker opens when omitted."
-        },
-        {
-          "name": "OutputRoot",
-          "type": "string",
-          "default": "C:\\Temp\\NTLiteChecker",
-          "description": "Output folder for the verification report."
-        }
-      ]
     }
   ]
 }
