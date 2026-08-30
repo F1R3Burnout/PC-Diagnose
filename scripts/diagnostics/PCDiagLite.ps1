@@ -5767,7 +5767,7 @@ Invoke-Step "Analyze all copied crash dumps" {
         Select-Object -First 12)
 
     if ($copiedDumps.Count -eq 0) {
-        "No copied minidumps were available for local analysis." | Out-File $statusPath -Encoding UTF8
+        "No copied minidumps or live-kernel dumps were available for local analysis." | Out-File $statusPath -Encoding UTF8
         $analysisRows | Export-Csv (Join-Path $Dirs.Dumps "DumpAnalysis.csv") -NoTypeInformation -Encoding UTF8
         return
     }
@@ -5819,7 +5819,10 @@ Review DumpAnalysis_Status.txt and 99_Runtime\errors.txt, then rerun PCDiagLite 
     $analysisCsvPath = Join-Path $Dirs.Dumps "DumpAnalysis.csv"
     "Debugger: $debugger" | Out-File $statusPath -Encoding UTF8
 
+    $dumpIndex = 0
+    $dumpTotal = $copiedDumps.Count
     foreach ($dump in $copiedDumps) {
+        $dumpIndex++
         $dumpPackagePath = ConvertTo-PackageRelativePath $dump.FullName
         $analysisKey = (($dumpPackagePath -replace '\.[^\.\\]+$', '') -replace '[\\/:*?"<>|\s]+', '_').Trim('_')
         if ([string]::IsNullOrWhiteSpace($analysisKey)) { $analysisKey = [IO.Path]::GetFileNameWithoutExtension($dump.Name) }
@@ -5831,6 +5834,8 @@ Review DumpAnalysis_Status.txt and 99_Runtime\errors.txt, then rerun PCDiagLite 
 
         try {
             "Analyzing dump: $($dump.Name)" | Out-File $statusPath -Encoding UTF8 -Append
+            $dumpSizeMb = [math]::Round($dump.Length / 1MB, 1)
+            Write-ProgressLine "Analyzing crash dump $dumpIndex of $dumpTotal`: $dumpPackagePath ($dumpSizeMb MB; per-dump timeout 120s)..." "Cyan"
             Remove-Item -LiteralPath $analysisFile -Force -ErrorAction SilentlyContinue
 
             $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -5851,16 +5856,21 @@ Review DumpAnalysis_Status.txt and 99_Runtime\errors.txt, then rerun PCDiagLite 
                 Stop-ProcessTreeSafe -ProcessId ([int]$proc.Id) -Reason "Minidump analysis timeout"
                 $status = "Timeout"
                 $note = "Timed out after $timeoutSeconds seconds"
+                Write-ProgressLine "TIMEOUT: Crash dump $dumpIndex of $dumpTotal after $timeoutSeconds seconds. Continuing with the next dump." "Yellow"
             } else {
                 $exitCode = [string]$proc.ExitCode
                 if ($proc.ExitCode -ne 0) {
                     $status = "Warning"
                     $note = "Debugger exit code $($proc.ExitCode)"
+                    Write-ProgressLine "WARNING: Crash dump $dumpIndex of $dumpTotal finished with debugger exit code $($proc.ExitCode)." "Yellow"
+                } else {
+                    Write-ProgressLine "OK: Crash dump $dumpIndex of $dumpTotal analyzed." "Green"
                 }
             }
         } catch {
             $status = "Error"
             $note = $_.Exception.Message
+            Write-ProgressLine "ERROR: Crash dump $dumpIndex of $dumpTotal could not be analyzed: $note" "Red"
         }
 
         if (-not (Test-Path -LiteralPath $analysisFile)) {
