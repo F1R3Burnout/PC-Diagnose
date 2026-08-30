@@ -95,7 +95,7 @@ Use privacy mode:
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -PrivacyMode
 ```
 
-Auto-install Windows Debugging Tools when minidumps need analysis:
+The legacy switch below remains accepted for compatibility, but is no longer required:
 
 ```powershell
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -AutoInstallDebugTools
@@ -117,7 +117,7 @@ Network event logs, cautious subnet discovery, and internet speed test run by de
 
 ## Important Notes
 
-The tools are collect-only. They do not repair or modify the PC.
+The diagnostics do not repair drivers, devices, registry settings, or Windows configuration. One deliberate exception applies: when PCDiagLite finds a copied crash dump and `cdb.exe` is missing, it automatically installs Microsoft's Windows Debugging Tools so every captured minidump and live-kernel dump can be analyzed locally.
 
 Restart and shutdown results distinguish the actual incident time from the later time at which Windows logged the event. `User32` event 1074 is treated as a planned request and identifies its initiating process, user, reason, and shutdown type when Windows recorded those fields. Windows Update is named as the initiator only when the event contains matching process, service, or reason evidence.
 
@@ -165,7 +165,7 @@ Running remote PowerShell code requires trust in this repository.
 - Gaming-related error interpretation for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, game paths, and Counter-Strike 2 (`cs2.exe`)
 - Windows Error Reporting appcrash collection for deeper game and application crash context
 - Dedicated GPU/display-driver evidence section with LiveKernelReports/WATCHDOG dumps, matching WER report attachments, current display-adapter status, AMD CIM installer logs, and a filtered SetupAPI display-driver history
-- Automatic `!analyze -v` coverage for copied live-kernel dumps as well as normal blue-screen minidumps, with bounded package sizes and exact source/package paths
+- Automatic `!analyze -v` coverage for copied live-kernel dumps as well as normal blue-screen minidumps; missing Windows Debugging Tools are installed automatically only when a dump needs analysis
 - Counter-Strike 2 crash correlation with WER BEX/StackHash, overlay/GPU module hints, and nearby system signals
 - More precise NVIDIA/AMD/ASUS vendor utility, graphics driver, service, Windows Update, AppX, and application hang checks
 - Minidump copies in the ZIP and optional local `!analyze -v` interpretation

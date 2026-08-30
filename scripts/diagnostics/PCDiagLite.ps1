@@ -35,6 +35,9 @@
 
 .PARAMETER PrivacyMode
     Masks typical IP addresses, user names, computer names, MACs, serial numbers, and device IDs before ZIP creation.
+
+.PARAMETER AutoInstallDebugTools
+    Legacy compatibility switch. Debugging Tools are now installed automatically whenever copied crash dumps require analysis.
 #>
 
 [CmdletBinding()]
@@ -711,14 +714,6 @@ function Read-DumpAnalysisRows {
     }
 
     return $fallbackRows
-}
-
-function Test-InteractivePromptAvailable {
-    try {
-        return [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
-    } catch {
-        return $false
-    }
 }
 
 function Install-WindowsDebuggingTools {
@@ -5763,7 +5758,7 @@ Invoke-Step "Collect minidumps and list large dumps only" {
         Out-File (Join-Path $Dirs.Dumps "CrashControl_Settings.txt") -Encoding UTF8
 }
 
-Invoke-Step "Analyze minidumps when debugger is available" {
+Invoke-Step "Analyze all copied crash dumps" {
     $analysisRows = @()
     $statusPath = Join-Path $Dirs.Dumps "DumpAnalysis_Status.txt"
     $debugger = Get-DumpDebuggerPath
@@ -5781,29 +5776,19 @@ Invoke-Step "Analyze minidumps when debugger is available" {
         @"
 No local dump debugger was found.
 
-PCDiagLite can install Windows Debugging Tools automatically and then analyze the copied minidumps.
+PCDiagLite installs Windows Debugging Tools automatically and then analyzes all copied crash dumps.
 Expected debugger: cdb.exe
 "@ | Out-File $statusPath -Encoding UTF8
 
-        $shouldInstallDebugTools = [bool]$AutoInstallDebugTools
-        if (-not $shouldInstallDebugTools -and (Test-InteractivePromptAvailable)) {
-            Write-Host ""
-            Write-Host "Minidumps were found, but cdb.exe is missing." -ForegroundColor Yellow
-            Write-Host "Install Windows Debugging Tools now so the dumps can be analyzed? [Y/N]" -ForegroundColor Yellow
-            $answer = Read-Host "Install Debugging Tools"
-            $shouldInstallDebugTools = ($answer -match '^(y|yes|j|ja)$')
-        }
-
-        if ($shouldInstallDebugTools) {
-            $debugger = Install-WindowsDebuggingTools -StatusPath $statusPath
-        }
+        Write-ProgressLine "Crash dumps were found, but cdb.exe is missing. Installing Windows Debugging Tools automatically..." "Yellow"
+        $debugger = Install-WindowsDebuggingTools -StatusPath $statusPath
     }
 
     if ([string]::IsNullOrWhiteSpace($debugger) -or -not (Test-Path -LiteralPath $debugger)) {
         @"
-Minidump analysis was skipped because cdb.exe is still unavailable.
+Crash dump analysis was skipped because cdb.exe is still unavailable after the automatic installation attempt.
 
-Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -AutoInstallDebugTools.
+Review DumpAnalysis_Status.txt and 99_Runtime\errors.txt, then rerun PCDiagLite after resolving the Windows Debugging Tools installation failure.
 "@ | Out-File $statusPath -Encoding UTF8 -Append
 
         foreach ($dump in $copiedDumps) {
@@ -5820,10 +5805,10 @@ Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -
                 FailureBucket    = ""
                 FailureHash      = ""
                 SuspectedArea    = "Not analyzed"
-                RecommendedAction = "Install Windows Debugging Tools and rerun PCDiagLite, or start PCDiagLite with -AutoInstallDebugTools."
+                RecommendedAction = "Review the automatic Windows Debugging Tools installation failure in DumpAnalysis_Status.txt and 99_Runtime\errors.txt, then rerun PCDiagLite."
                 ExitCode         = ""
                 AnalysisFile     = ""
-                Note             = "cdb.exe was not found or installation was declined/failed"
+                Note             = "cdb.exe was not found after the automatic installation attempt"
             }
         }
 
