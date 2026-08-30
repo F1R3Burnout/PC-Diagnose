@@ -53,6 +53,10 @@ Typical files:
 00_Findings_Summary.txt
 01_Events\Restart_Shutdown_History_<range>.csv
 01_Events\Restart_Shutdown_Incidents_<range>.csv
+06_Minidumps\LiveKernelReports\...
+07_WER\Reports\...
+08_GPU_Driver\GPUDriverAssessment.csv
+08_GPU_Driver\AMDInstallerLogs.csv
 99_Runtime\EventCollection_Status.txt
 PCDiagLite_<Computer>_<Timestamp>.zip
 ```
@@ -160,6 +164,8 @@ Running remote PowerShell code requires trust in this repository.
 - Network event logs, cautious subnet discovery, and internet speed test run by default
 - Gaming-related error interpretation for Xbox Game Bar, Gaming Services, launchers, overlays, anti-cheat, game paths, and Counter-Strike 2 (`cs2.exe`)
 - Windows Error Reporting appcrash collection for deeper game and application crash context
+- Dedicated GPU/display-driver evidence section with LiveKernelReports/WATCHDOG dumps, matching WER report attachments, current display-adapter status, AMD CIM installer logs, and a filtered SetupAPI display-driver history
+- Automatic `!analyze -v` coverage for copied live-kernel dumps as well as normal blue-screen minidumps, with bounded package sizes and exact source/package paths
 - Counter-Strike 2 crash correlation with WER BEX/StackHash, overlay/GPU module hints, and nearby system signals
 - More precise NVIDIA/AMD/ASUS vendor utility, graphics driver, service, Windows Update, AppX, and application hang checks
 - Minidump copies in the ZIP and optional local `!analyze -v` interpretation
