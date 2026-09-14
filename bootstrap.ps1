@@ -282,6 +282,7 @@ function Invoke-RemoteTool {
         $toolArgs.OpenReport = $true
     } elseif ($toolInfo.id -eq "displaydiag") {
         $toolArgs.OutputRoot = Join-Path $OutputRoot "HDMIDiagnose"
+        $toolArgs.Branch = $Branch
         if ($dependencyPaths.ContainsKey("HDMIDiagnostics.Core.psm1")) {
             $toolArgs.ModulePath = $dependencyPaths["HDMIDiagnostics.Core.psm1"]
         }

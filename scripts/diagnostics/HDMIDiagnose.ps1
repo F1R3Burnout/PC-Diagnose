@@ -42,21 +42,38 @@ param(
     [ValidateRange(500,10000)][int]$PollMilliseconds = 1000,
     [int]$EventDays = 7,
     [switch]$NoOpen,
-    [string]$ModulePath = ""
+    [string]$ModulePath = "",
+    [string]$Branch = "main"
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 function Resolve-HdmiModulePath {
     if ($ModulePath -and (Test-Path -LiteralPath $ModulePath)) { return (Resolve-Path -LiteralPath $ModulePath).Path }
-    $candidates = @(
-        (Join-Path $PSScriptRoot "HDMIDiagnostics.Core.psm1"),
-        (Join-Path $PSScriptRoot "..\..\lib\HDMIDiagnostics.Core.psm1")
-    )
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace([string]$PSScriptRoot)) {
+        $candidates += Join-Path $PSScriptRoot "HDMIDiagnostics.Core.psm1"
+        $candidates += Join-Path $PSScriptRoot "..\..\lib\HDMIDiagnostics.Core.psm1"
+    }
     foreach ($candidate in $candidates) {
         if (Test-Path -LiteralPath $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
     }
-    throw "HDMIDiagnostics.Core.psm1 wurde nicht gefunden."
+
+    $cacheRoot = Join-Path $env:TEMP "PC-Diagnose\displaydiag"
+    New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
+    $escapedBranch = [Uri]::EscapeDataString($Branch)
+    $rawBase = "https://raw.githubusercontent.com/F1R3Burnout/PC-Diagnose/$escapedBranch"
+    foreach ($dependency in @("HDMIDiagnostics.Core.psm1","HDMIDiagnostics.Native.cs")) {
+        $repositoryPath = if ($dependency -like "*.psm1") { "lib/HDMIDiagnostics.Core.psm1" } else { "lib/HDMIDiagnostics.Native.cs" }
+        $destination = Join-Path $cacheRoot $dependency
+        $content = (Invoke-WebRequest -UseBasicParsing -Uri "$rawBase/$repositoryPath").Content
+        [IO.File]::WriteAllText($destination, ([string]$content).TrimStart([char]0xFEFF), [Text.UTF8Encoding]::new($true))
+        try { Unblock-File -LiteralPath $destination -ErrorAction SilentlyContinue } catch {}
+    }
+    $downloadedModule = Join-Path $cacheRoot "HDMIDiagnostics.Core.psm1"
+    if (Test-Path -LiteralPath $downloadedModule) { return $downloadedModule }
+    throw "HDMIDiagnostics.Core.psm1 konnte weder lokal gefunden noch geladen werden."
 }
 
 function Show-HdmiHelp {
