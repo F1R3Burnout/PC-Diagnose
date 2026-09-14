@@ -26,7 +26,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("Menu","Full","Monitor","EDID","Events","Snapshot","Compare","BandwidthTest","OpenReport")]
+    [ValidateSet("Menu","Full","Monitor","EDID","Events","Snapshot","Compare","BandwidthTest","OpenReport","Exit")]
     [string]$Mode = "Menu",
     [switch]$Full,
     [switch]$Monitor,
