@@ -58,6 +58,28 @@
           "description": "Open the HTML report after completion."
         }
       ]
+    },
+    {
+      "id": "displaydiag",
+      "name": "HDMI- und Display-Diagnose",
+      "category": "pc-test",
+      "description": "Analyzes active displays, EDID, HDR, display bandwidth, HDMI audio, GPU events, reconnects, and read-only state comparisons.",
+      "path": "scripts/diagnostics/HDMIDiagnose.ps1",
+      "dependencies": [
+        "lib/HDMIDiagnostics.Core.psm1",
+        "lib/HDMIDiagnostics.Native.cs"
+      ],
+      "kind": "powershell",
+      "requiresAdmin": false,
+      "safeMode": "collect-only",
+      "parameters": [
+        {
+          "name": "OutputRoot",
+          "type": "string",
+          "default": "C:\\Temp\\HDMIDiagnose",
+          "description": "Output folder for reports, snapshots, EDID data, and live-monitor logs."
+        }
+      ]
     }
   ]
 }

@@ -17,6 +17,7 @@ irm https://kiwus-it.de/r|iex
 ```text
 1 = PCDiagLite
 2 = NetzwerkDiagnose
+3 = HDMI- und Display-Diagnose
 ```
 
 4. Accept the UAC prompt only when the selected tool asks for it.
@@ -69,6 +70,13 @@ The result view shows the most important findings first. The ZIP contains the fu
 C:\Temp\NetzwerkDiagnose
 ```
 
+`HDMI- und Display-Diagnose` writes reports, EDID raw data, snapshots, and
+live-monitor logs to:
+
+```text
+C:\Temp\HDMIDiagnose
+```
+
 ## Optional Commands
 
 Start PCDiagLite directly:
@@ -107,6 +115,34 @@ Start NetzwerkDiagnose directly:
 & ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool netdiag
 ```
 
+Start the HDMI/display tool directly and select its mode:
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool displaydiag
+```
+
+The display tool offers a full report, live monitoring, EDID export, event-log
+analysis, before/after snapshots, snapshot comparison, and a guided bandwidth
+test. The downloaded tool runs read-only. It does not change display modes,
+drivers, devices, EDID, or registry settings.
+
+Direct commands from a repository checkout:
+
+```powershell
+.\scripts\diagnostics\HDMIDiagnose.ps1 -Full
+.\scripts\diagnostics\HDMIDiagnose.ps1 -Monitor
+.\scripts\diagnostics\HDMIDiagnose.ps1 -EDID
+.\scripts\diagnostics\HDMIDiagnose.ps1 -Events
+.\scripts\diagnostics\HDMIDiagnose.ps1 -Snapshot BeforeTest
+.\scripts\diagnostics\HDMIDiagnose.ps1 -Snapshot AfterTest
+.\scripts\diagnostics\HDMIDiagnose.ps1 -Compare BeforeTest,AfterTest
+```
+
+Windows can report display paths, modes, EDID, advanced-color state, audio
+endpoints, and related system events. It cannot measure HDMI bit-error rates,
+eye patterns, electrical cable quality, or remaining physical signal margin.
+The report labels calculated bandwidth and heuristic conclusions accordingly.
+
 Run NetzwerkDiagnose with extra path tests:
 
 ```powershell
@@ -139,6 +175,7 @@ Running remote PowerShell code requires trust in this repository.
 - Menu-based tool selection from one short command
 - Local HTML result view
 - Compact hardware summary at the top of PCDiagLite with CPU, GPU, RAM, mainboard, and system storage
+- Dedicated read-only HDMI/display diagnostics with active Windows display paths, GPU mapping, raw and decoded EDID, HDR/advanced color, HDMI audio, bandwidth estimates, event correlation, live monitoring, and snapshot comparison
 - Timeout-protected collection steps with hardened child process handling
 - Findings grouped by primary area
 - Newest-first event timeline

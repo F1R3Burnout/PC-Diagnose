@@ -217,6 +217,16 @@ function Invoke-RemoteTool {
         Unblock-File -LiteralPath $scriptPath -ErrorAction SilentlyContinue
     } catch {}
 
+    $dependencyPaths = @{}
+    foreach ($dependency in @($toolInfo.dependencies)) {
+        if ([string]::IsNullOrWhiteSpace([string]$dependency)) { continue }
+        $dependencyPath = Join-Path $toolCacheDir (Split-Path -Path ([string]$dependency) -Leaf)
+        $dependencyText = Get-RepositoryFileText -Path ([string]$dependency)
+        [IO.File]::WriteAllText($dependencyPath, [string]$dependencyText, [Text.UTF8Encoding]::new($true))
+        try { Unblock-File -LiteralPath $dependencyPath -ErrorAction SilentlyContinue } catch {}
+        $dependencyPaths[(Split-Path -Path ([string]$dependency) -Leaf)] = $dependencyPath
+    }
+
     Write-Host ""
     Write-Host ("Starting {0}..." -f $toolInfo.name) -ForegroundColor Cyan
     Write-Host ("Source: {0}" -f $toolUri) -ForegroundColor DarkGray
@@ -270,6 +280,11 @@ function Invoke-RemoteTool {
             $toolArgs.NoWriteTests = $true
         }
         $toolArgs.OpenReport = $true
+    } elseif ($toolInfo.id -eq "displaydiag") {
+        $toolArgs.OutputRoot = Join-Path $OutputRoot "HDMIDiagnose"
+        if ($dependencyPaths.ContainsKey("HDMIDiagnostics.Core.psm1")) {
+            $toolArgs.ModulePath = $dependencyPaths["HDMIDiagnostics.Core.psm1"]
+        }
     }
 
     $toolScriptBlock = [scriptblock]::Create([string]$scriptText)
