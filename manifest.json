@@ -80,6 +80,81 @@
           "description": "Output folder for reports, snapshots, EDID data, and live-monitor logs."
         }
       ]
+    },
+    {
+      "id": "hardwarestability",
+      "name": "Hardware-Stabilitätstest",
+      "category": "pc-test",
+      "description": "Verification-first hardware stability testing: known data/computation is processed by CPU, RAM, GPU, VRAM, and storage, then read back and compared against the expected result. High load/temperature are permitted side effects of individual tests, not the test result itself.",
+      "path": "scripts/diagnostics/HardwareStability.ps1",
+      "dependencies": [
+        "config/HardwareStabilityTools.json",
+        "lib/HardwareStability/Common.psm1",
+        "lib/HardwareStability/ProcessRunner.psm1",
+        "lib/HardwareStability/ToolManager.psm1",
+        "lib/HardwareStability/Profiles.psm1",
+        "lib/HardwareStability/Inventory.psm1",
+        "lib/HardwareStability/Telemetry.psm1",
+        "lib/HardwareStability/ThermalGuard.psm1",
+        "lib/HardwareStability/EventCorrelation.psm1",
+        "lib/HardwareStability/CrashRecovery.psm1",
+        "lib/HardwareStability/CpuTests.psm1",
+        "lib/HardwareStability/MemoryTests.psm1",
+        "lib/HardwareStability/GpuTests.psm1",
+        "lib/HardwareStability/StorageTests.psm1",
+        "lib/HardwareStability/StorageSurface.psm1",
+        "lib/HardwareStability/StorageWriteVerify.psm1",
+        "lib/HardwareStability/Reporting.psm1",
+        "lib/HardwareStability/Native/RawDiskReader.cs",
+        "lib/HardwareStability/Native/D3D11ComputeVerifier.cs"
+      ],
+      "kind": "powershell",
+      "requiresAdmin": true,
+      "safeMode": "active-verification",
+      "parameters": [
+        {
+          "name": "Profile",
+          "type": "string",
+          "default": "Quick",
+          "description": "Quick, Standard, or Extended - controls pass counts, data volume, and coverage."
+        },
+        {
+          "name": "Components",
+          "type": "string",
+          "default": "CPU,Cache,RAM,GPU,VRAM,Storage,PCIe,System",
+          "description": "Comma-separated components to run."
+        },
+        {
+          "name": "OutputRoot",
+          "type": "string",
+          "default": "C:\\Temp",
+          "description": "Output folder for the result package."
+        },
+        {
+          "name": "NoDownload",
+          "type": "switch",
+          "default": false,
+          "description": "Never download third-party tools; missing tools degrade their stage to SKIPPED/UNSUPPORTED."
+        },
+        {
+          "name": "SkipTelemetry",
+          "type": "switch",
+          "default": false,
+          "description": "Disables LibreHardwareMonitor-based telemetry sampling and the thermal guard's live sensor checks."
+        },
+        {
+          "name": "DryRun",
+          "type": "switch",
+          "default": false,
+          "description": "Shows the planned inventory, stages, and tools without starting any active hardware load."
+        },
+        {
+          "name": "SurfaceScanMaxBytes",
+          "type": "long",
+          "default": 0,
+          "description": "Bounds the read-only Storage Surface Read scan. 0 means the full drive."
+        }
+      ]
     }
   ]
 }

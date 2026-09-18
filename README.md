@@ -18,6 +18,7 @@ irm https://kiwus-it.de/r|iex
 1 = PCDiagLite
 2 = NetzwerkDiagnose
 3 = HDMI- und Display-Diagnose
+4 = Hardware-Stabilitätstest
 ```
 
 4. Accept the UAC prompt only when the selected tool asks for it.
@@ -75,6 +76,12 @@ live-monitor logs to:
 
 ```text
 C:\Temp\HDMIDiagnose
+```
+
+`Hardware-Stabilitätstest` writes its result package to:
+
+```text
+C:\Temp\PCStability_<Computer>_<Timestamp>\
 ```
 
 ## Optional Commands
@@ -151,6 +158,125 @@ Run NetzwerkDiagnose with extra path tests:
 
 Network event logs, cautious subnet discovery, and internet speed test run by default. Useful parameters include `-NoInternetTest`, `-SmbTestPath`, `-LanSpeedTarget`, `-LocalTargets`, and `-TcpTargets`.
 
+Start the Hardware-Stabilitätstest directly:
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool hardwarestability -Profile Quick
+```
+
+Show what a run would do without starting any active hardware load:
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool hardwarestability -HsDryRun
+```
+
+Direct commands from a repository checkout:
+
+```powershell
+.\scripts\diagnostics\HardwareStability.ps1 -DryRun -Profile Quick
+.\scripts\diagnostics\HardwareStability.ps1 -Profile Standard -Components CPU,RAM,Storage
+.\scripts\diagnostics\HardwareStability.ps1 -Profile Extended -NoDownload
+```
+
+## Hardware-Stabilitätstest
+
+Unlike a classic stress test, this tool checks hardware stability mainly
+through **verification**, not just maximum load:
+
+```text
+known data / known computation
+        -> hardware processes it
+        -> result read back
+        -> compared against the expected result
+        -> mismatches recorded
+```
+
+High load and temperature are a permitted side effect of individual tests
+(especially CPU torture testing and GPU load validation), not the test
+result itself. A stage only fails when a mismatch, a verified calculation
+error, or a real read/write error was actually detected.
+
+**Components:**
+
+- **CPU Compute / CPU Cache-IMC** - Prime95 (GIMPS) torture test. CPU Compute
+  uses one worker per physical core; CPU Cache/IMC uses one worker per
+  logical processor (including SMT/Hyperthreading siblings) to put more
+  pressure on the cache hierarchy, interconnect, and memory controller. Both
+  read Prime95's own `results.txt` for `FATAL ERROR` / `ROUND OFF` / `SUMOUT`
+  evidence.
+- **RAM** - [MemoryChecker](https://github.com/lordmulder/MemoryChecker)
+  writes a pattern to a configurable share of physical RAM, reads it back,
+  and compares. A Windows user-space test cannot cover 100% of installed
+  RAM (some is reserved by Windows itself); for full offline coverage, use
+  [MemTest86](https://www.memtest86.com/) instead.
+- **GPU Compute** - a small Direct3D 11 compute-shader verifier built into
+  this project: known 32-bit integer input is processed on the GPU (rotate/
+  XOR/multiply-add), read back, and compared bit-exact against a CPU
+  reference. Integer/bit operations are used deliberately so normal
+  floating-point rounding differences can never be mistaken for a hardware
+  error. Falls back to the WARP software renderer, or reports `UNSUPPORTED`,
+  if no Direct3D 11 hardware device is available.
+- **VRAM** - [memtest_vulkan](https://github.com/GpuZelenograd/memtest_vulkan)
+  writes and reads back GPU memory. Reports `UNSUPPORTED` (not a failure) on
+  systems without a usable Vulkan runtime/driver.
+- **GPU Load / Thermal Validation** - reuses the same verified GPU compute
+  kernel in a sustained loop to produce real load while temperature and
+  device-loss (TDR) are monitored.
+- **Storage SMART** - [smartmontools](https://www.smartmontools.org/)
+  (`smartctl -x`). Drives/controllers that do not support SMART (e.g. many
+  USB bridges) are reported as `UNSUPPORTED`, never as a failure.
+- **Storage Surface Read** - a strictly **read-only** sequential scan of a
+  physical drive (`\\.\PhysicalDriveN`, opened with `GENERIC_READ` only -
+  never `GENERIC_WRITE` or `WriteFile`). `-SurfaceScanMaxBytes` bounds the
+  scan for a quick check without limiting a normal full scan by default.
+- **Storage Write/Read Verification** - writes pseudo-random data to a single
+  normal temporary file, flushes, reads it back, and verifies a CRC32
+  checksum per block. Never touches a raw disk; the test file is always
+  removed afterward, even on failure or cancellation.
+- **PCIe / WHEA** - correlates `Microsoft-Windows-WHEA-Logger` events (IDs
+  17/18/19/20) recorded during other stages. A single corrected PCIe error
+  is reported as a possible cause among several (GPU, slot, mainboard, power
+  delivery, signal integrity) - never as a definitive mainboard diagnosis.
+- **System Stability** - runs CPU and GPU workloads concurrently to check
+  whether components that pass individually remain stable together. If an
+  unexpected reset happens here, the report explicitly says PSU/VRM/
+  mainboard become more suspect without naming a single proven cause.
+
+**Testprofiles (Quick / Standard / Extended)** differ primarily in pass
+count, data volume, and coverage, not just runtime - see
+`lib/HardwareStability/Profiles.psm1`.
+
+**Thermal Guard**: conservative default abort/warning temperatures for CPU,
+GPU core, GPU hotspot, NVMe, and VRM stop an active stage and produce a
+partial report instead of continuing past a safety threshold. Telemetry (via
+[LibreHardwareMonitorLib](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor))
+only ever reports sensor values that are actually present; nothing is
+invented. `-SkipTelemetry` disables sensor sampling and the live thermal
+guard checks.
+
+**Crash / reset recovery**: before an active stage starts, a small
+`PendingRun.json` (`C:\ProgramData\PC-Diagnose\HardwareStability\`) records
+that it is running. If a later start of the tool finds that file still
+marked "Running" after a reboot, it analyzes Kernel-Power 41, EventLog
+6005/6006/6008, User32 1074, and BugCheck 1001 around that time to
+distinguish an unexpected `SYSTEM_RESET` from a normal planned
+restart/shutdown (e.g. Windows Update). No scheduled task or autostart is
+created, and the test is never resumed automatically after a reboot - the
+user chooses whether to analyze the incident, continue, or exit.
+
+**PASS** always means only: *within the range actually tested, no errors
+were detected* - it is not a guarantee of complete hardware health, and a
+failing stage names *possible* causes rather than declaring a specific
+component defective without further evidence (for example, a memory
+verification error can point to RAM, the memory controller, the CPU memory
+path, or board-level signal integrity - not automatically "RAM is broken").
+
+Third-party tools are downloaded only from their official sources and
+SHA256/MD5-verified against the values recorded in
+`config/HardwareStabilityTools.json` before use; `-NoDownload` prevents any
+download and degrades the affected stage to `SKIPPED`/`UNSUPPORTED` instead
+of failing the whole run.
+
 ## Important Notes
 
 The diagnostics do not repair drivers, devices, registry settings, or Windows configuration. One deliberate exception applies: when PCDiagLite finds a copied crash dump and `cdb.exe` is missing, it automatically installs Microsoft's Windows Debugging Tools so every captured minidump and live-kernel dump can be analyzed locally.
@@ -208,6 +334,7 @@ Running remote PowerShell code requires trust in this repository.
 - Minidump copies in the ZIP and optional local `!analyze -v` interpretation
 - Detailed network report for adapters, routes, gateway, DNS, TCP reachability, Wi-Fi, firewall profile, services, optional events, traceroute, MTU, SMB, iperf3, and speed tests
 - ZIP package for handoff
+- Verification-first Hardware-Stabilitätstest: CPU (Prime95), RAM (MemoryChecker), GPU compute (built-in D3D11 verifier), VRAM (memtest_vulkan), storage SMART/surface/write-verify, PCIe/WHEA correlation, thermal guard, and crash/reset recovery - see "Hardware-Stabilitätstest" below
 
 ## Development
 
