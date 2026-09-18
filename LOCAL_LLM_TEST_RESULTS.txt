@@ -1,0 +1,176 @@
+Hardware-Stabilitätstest — Test Results
+========================================
+Machine: X470-SERVER (Gigabyte B760M DS3H, Intel Core i5-14400, 32GB RAM,
+         Samsung SSD 970 EVO Plus 500GB, Intel UHD 730)
+Session: non-interactive, not elevated (no Administrator rights available in
+         this session - see docs/HARDWARE_STABILITY_STATE.md)
+
+Only tests that were actually executed are listed below, with the real
+command, timestamp, and outcome. Items only implemented but not run are
+marked BLOCKED in docs/HARDWARE_STABILITY_ACCEPTANCE.md, not listed as
+passed tests here.
+
+--------------------------------------------------------------------------
+FINAL FORMAL VALIDATION RUN
+--------------------------------------------------------------------------
+Timestamp : 2026-09-18T06:05:10Z - 2026-09-18T06:05:42Z (32s)
+Command   : pwsh -NoProfile -File tests/HardwareStability/Validate-HardwareStability.ps1
+ExitCode  : 0
+
+Gate results:
+HS-001 [PASS] 27 file(s) checked, 0 parse failures
+HS-002 [PASS] manifest.json valid JSON, all tool paths/dependencies exist
+HS-003 [PASS] "Hardware-Stabilitätstest" present in manifest.json
+HS-004 [PASS] Direct invocation via -File exits 0
+HS-005 [PASS] DryRun banner present in output
+HS-006 [PASS] DryRun created no PCStability_* result folders under C:\Temp
+HS-008..047 [PASS] Fixture suite exit code 0 (see below for the 40 individual assertions)
+HS-048 [PASS] tests/HDMIDiagnose.Tests.ps1 regression test still passes
+HS-049 [PASS] git diff --check clean
+HS-050 [PASS] no suspicious temp/download/test artifacts in git status
+Result: 10/10 gates PASS, exit code 0.
+
+--------------------------------------------------------------------------
+FIXTURE SUITE (part of the run above; individual assertions)
+--------------------------------------------------------------------------
+Command: pwsh -NoProfile -File tests/HardwareStability/HardwareStability.Fixtures.Tests.ps1
+Result : 40 passed, 0 failed, exit code 0.
+
+  HS-008 inventory returns a computer name .......................... PASS
+  HS-008 inventory returns physical RAM size ........................ PASS
+  HS-008 inventory returns at least one CPU ......................... PASS
+  HS-007 process runs correctly with a Unicode working directory ..... PASS
+  HS-009 RAM PASS fixture (exit code 0) => PASS ...................... PASS
+  HS-010 RAM Error fixture (exit code 1) => FAIL ..................... PASS
+  HS-011 Prime95 PASS fixture (no failure text) => PASS .............. PASS
+  HS-014 CPU_COMPUTE uses one worker per physical core (4) ........... PASS
+  HS-012 Prime95 FATAL ERROR fixture => FAIL ......................... PASS
+  HS-013 Prime95 ROUND OFF fixture => FAIL ........................... PASS
+  HS-014 CPU_CACHE_IMC uses logical-processor workers (8), distinct .. PASS
+  HS-015 GPU Compute real run completes PASS/UNSUPPORTED ............. PASS
+  HS-016 GPU Compute mismatch-detection fixture ...................... PASS
+  HS-020 VRAM PASS fixture => PASS ................................... PASS
+  HS-021 VRAM Error fixture ('Error found') => FAIL .................. PASS
+  HS-030 Storage Write/Read Verification PASSes ...................... PASS
+  HS-030 Test file removed after the run ............................. PASS
+  HS-031 Checksum comparison detects a single-byte difference ........ PASS
+  HS-027 RawDiskReader references GENERIC_READ ....................... PASS
+  HS-028 RawDiskReader never references GENERIC_WRITE ................ PASS
+  HS-029 RawDiskReader never calls WriteFile ......................... PASS
+  HS-029 RawDiskReader never uses FileAccess.Write ................... PASS
+  HS-032 WHEA 17 with PCIe text categorized as PCIe .................. PASS
+  HS-032 WHEA assessment makes no definitive mainboard claim ......... PASS
+  HS-033 WHEA CPU/cache-related event (ID 18) recognized ............. PASS
+  HS-034 PendingRun.json persisted before an active stage ............ PASS
+  HS-035 PendingRun + reboot + 41 + 6008 (no 1074) => SYSTEM_RESET ... PASS
+  HS-036 1074 + 6006 => not classified as a hardware crash ........... PASS
+  HS-037 BugCheck 1001 correctly distinguished => SYSTEM_RESET ....... PASS
+  HS-037 BugCheck code extracted from the event ...................... PASS
+  HS-039 Invoke-HsProcess reports TimedOut ............................ PASS
+  HS-039 Process actually stopped near the timeout, not left running . PASS
+  HS-040 Normal temperature => OK ..................................... PASS
+  HS-040 Temperature above warning threshold => WARNING .............. PASS
+  HS-041 Temperature above abort threshold => ABORT .................. PASS
+  HS-042 Partial (interrupted) report can still be generated ......... PASS
+  HS-043 HTML report is well-formed HTML .............................. PASS
+  HS-045 Coverage text appears in the HTML report ..................... PASS
+  HS-046 SYSTEM_RESET rendered as a prominent banner .................. PASS
+  HS-047 No unfounded definitive-defect claim in module text .......... PASS
+
+--------------------------------------------------------------------------
+REAL HARDWARE SMOKE TESTS (performed during implementation, prior to the
+formal validation run above; exact wall-clock timestamps as logged inline)
+--------------------------------------------------------------------------
+
+Tool downloads and hash verification (all 5 configured tools):
+  Command: Resolve-HsTool for memorychecker, prime95, memtest_vulkan,
+           smartmontools, librehardwaremonitor
+  Result : all 5 downloaded from their official HTTPS source and SHA256/MD5
+           verified successfully.
+
+RAM verification (real, 2% of physical RAM, 1 pass):
+  Command : Invoke-HsRamVerification ... -Passes 1 -PercentOfPhysicalRam 2
+  Result  : Status=PASS, ExitCode=0, VerificationErrors=0, Duration=1.67s
+  Tool output: "No errors have been detected during the test :-)"
+
+CPU torture test (real, Prime95 -t, ~20s):
+  Command : Invoke-HsCpuTortureTest -StageName CPU_COMPUTE -DurationMinutes 0.33
+  Result  : Status=PASS, Workers=10, real CPU load confirmed via
+            Process.TotalProcessorTime scaling across all logical processors,
+            process cleanly stopped after the configured duration.
+
+GPU compute verification (real, Direct3D 11 against Intel UHD 730):
+  Command : [PCDiagnose.HardwareStability.D3D11ComputeVerifier]::RunVerification()
+  Result  : Success=True, UsedWarp=False, FeatureLevel=0xB000, DeviceLost=False,
+            0 mismatches across runs up to 65536 elements; GPU load/thermal
+            loop ran 45 iterations in 5s with 0 mismatches.
+
+VRAM verification (real, memtest_vulkan):
+  Command : Invoke-HsVramVerification ...
+  Result  : Status=UNSUPPORTED ("The library failed to load" - no Vulkan
+            runtime installed on this machine). Correctly classified as
+            UNSUPPORTED, not FAIL.
+
+Storage SMART (real, both physical drives):
+  Command : Invoke-HsSmartQuery -DriveIndex 0   (Samsung SSD 970 EVO Plus)
+  Result  : Status=PASS, HealthStatus=PASSED, Temperature=52C,
+            Available Spare=100%, Percentage Used=8%
+  Command : Invoke-HsSmartQuery -DriveIndex 1   (USB Mass Storage Device)
+  Result  : Status=UNSUPPORTED (smartctl exit code 1, drive/controller does
+            not support SMART query) - correctly not FAIL.
+
+Storage Surface Read (real read loop against a 10MB test file, same native
+code path as the PhysicalDrive scanner; a real \\.\PhysicalDrive0 open
+correctly returned SKIPPED with "Zugriff verweigert" since this session is
+not elevated):
+  Result  : full successful read: 10 progress callbacks, 0 errors; cancel
+            path verified to stop after exactly 3 of 10 blocks when
+            requested.
+
+Storage Write/Read Verification (real, 32MB):
+  Command : Invoke-HsStorageWriteReadVerify -SizeMB 32
+  Result  : Status=PASS, BytesWritten=BytesVerified=33554432, Mismatches=0,
+            Duration=8.59s, test file removed afterward.
+
+chkdsk /scan (real, C: drive, non-elevated):
+  Result  : Status=SKIPPED ("chkdsk /scan requires Administrator rights") -
+            correct behavior for a non-elevated session.
+
+Bootstrap/launcher integration (real, simulated remote-fetch cache layout
+with structure-preserving dependency copy):
+  Result  : HardwareStability.ps1 -DryRun ran successfully against the
+            simulated flattened-with-structure cache, resolving all modules,
+            config, and native sources correctly.
+
+--------------------------------------------------------------------------
+BUGS FOUND AND FIXED DURING THIS IMPLEMENTATION (fix-retest cycle)
+--------------------------------------------------------------------------
+1. ProcessRunner.psm1: cross-module-instance process registry mismatch
+   under Set-StrictMode ("Eigenschaft ProcessId kann nicht gefunden werden").
+   Root cause: sibling modules each re-import ProcessRunner.psm1 -Force,
+   creating separate $script: scopes. Fixed by moving the registry to a
+   single $global: variable. Verified by re-running the fixture suite
+   (0 failures after the fix, previously failing at the RAM fixture step).
+2. GpuTests.psm1: same root cause via the shared $moduleDir variable name
+   inside Initialize-HsD3D11ComputeVerifier. Fixed by using $PSScriptRoot
+   directly. Verified by re-running the fixture suite.
+3. CpuTests.psm1: Prime95 monitoring loop checked process exit before
+   checking results.txt, so a fast-exiting fixture's failure evidence was
+   never read. Fixed by reordering the checks. Verified: HS-012/HS-013
+   fixtures now correctly report FAIL.
+
+--------------------------------------------------------------------------
+NOT EXECUTED (documented as BLOCKED in ACCEPTANCE.md, not claimed as tested)
+--------------------------------------------------------------------------
+- A real GPU TDR/device-lost event (HS-018/HS-019) was not forced on this
+  production machine.
+- A real PhysicalDrive read I/O error (HS-026) was not forced (would
+  require genuinely failing hardware).
+- A real Ctrl+C signal (HS-038) was not sent in this non-interactive
+  session; the equivalent CancelCheck/timeout cleanup path was tested for
+  real instead (HS-039).
+- A full elevated end-to-end run of HardwareStability.ps1 (all stages, real
+  ZIP result package) was not performed: this session cannot obtain
+  Administrator rights (Start-Process -Verb RunAs fails immediately with
+  "operation was cancelled by the user" - no one can approve the UAC prompt
+  on this remote session). DryRun was run end-to-end successfully instead.

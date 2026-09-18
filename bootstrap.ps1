@@ -36,7 +36,14 @@ param(
     [switch]$IncludeSpeedtest,
     [switch]$IncludeSubnetDiscovery,
     [switch]$NoInternetTest,
-    [switch]$NoWriteTests
+    [switch]$NoWriteTests,
+    [ValidateSet("Quick","Standard","Extended")]
+    [string]$Profile = "Quick",
+    [string]$Components = "CPU,Cache,RAM,GPU,VRAM,Storage,PCIe,System",
+    [switch]$NoDownload,
+    [switch]$SkipTelemetry,
+    [switch]$HsDryRun,
+    [long]$SurfaceScanMaxBytes = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -220,11 +227,19 @@ function Invoke-RemoteTool {
     $dependencyPaths = @{}
     foreach ($dependency in @($toolInfo.dependencies)) {
         if ([string]::IsNullOrWhiteSpace([string]$dependency)) { continue }
-        $dependencyPath = Join-Path $toolCacheDir (Split-Path -Path ([string]$dependency) -Leaf)
+        # Preserve the dependency's relative subfolder structure (e.g.
+        # "lib/HardwareStability/Native/RawDiskReader.cs") under the cache
+        # dir instead of flattening to just the leaf file name, so modules
+        # that Import-Module their siblings or load a "Native\*.cs" file
+        # relative to their own folder keep working when fetched standalone.
+        $relativePath = ([string]$dependency).Replace("/", "\")
+        $dependencyPath = Join-Path $toolCacheDir $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Path $dependencyPath -Parent) | Out-Null
         $dependencyText = Get-RepositoryFileText -Path ([string]$dependency)
         [IO.File]::WriteAllText($dependencyPath, [string]$dependencyText, [Text.UTF8Encoding]::new($true))
         try { Unblock-File -LiteralPath $dependencyPath -ErrorAction SilentlyContinue } catch {}
         $dependencyPaths[(Split-Path -Path ([string]$dependency) -Leaf)] = $dependencyPath
+        $dependencyPaths[[string]$dependency] = $dependencyPath
     }
 
     Write-Host ""
@@ -286,6 +301,16 @@ function Invoke-RemoteTool {
         if ($dependencyPaths.ContainsKey("HDMIDiagnostics.Core.psm1")) {
             $toolArgs.ModulePath = $dependencyPaths["HDMIDiagnostics.Core.psm1"]
         }
+    } elseif ($toolInfo.id -eq "hardwarestability") {
+        $toolArgs.OutputRoot = $OutputRoot
+        $toolArgs.Profile = $Profile
+        $toolArgs.Components = $Components
+        $toolArgs.SurfaceScanMaxBytes = $SurfaceScanMaxBytes
+        if ($NoDownload) { $toolArgs.NoDownload = $true }
+        if ($SkipTelemetry) { $toolArgs.SkipTelemetry = $true }
+        if ($HsDryRun) { $toolArgs.DryRun = $true }
+        $toolArgs.ModuleRootOverride = Join-Path $toolCacheDir "lib\HardwareStability"
+        $toolArgs.ConfigPathOverride = Join-Path $toolCacheDir "config\HardwareStabilityTools.json"
     }
 
     $toolScriptBlock = [scriptblock]::Create([string]$scriptText)
