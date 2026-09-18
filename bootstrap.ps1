@@ -53,7 +53,6 @@ $DaysBackWasProvided = $PSBoundParameters.ContainsKey("DaysBack") -or [bool]$Day
 $RepoOwner = "F1R3Burnout"
 $RepoName = "PC-Diagnose"
 $RawBase = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$Branch"
-$ApiBase = "https://api.github.com/repos/$RepoOwner/$RepoName/contents"
 $BootstrapUrl = "$RawBase/r"
 $ManifestUrl = "$RawBase/manifest.json"
 
@@ -96,12 +95,17 @@ function Get-RemoteText {
 function Get-RepositoryFileText {
     param([Parameter(Mandatory=$true)][string]$Path)
 
-    $escapedPath = ([string]$Path).TrimStart("/") -replace " ", "%20"
-    $escapedRef = [Uri]::EscapeDataString($Branch)
-    $response = Invoke-WebRequest -UseBasicParsing -Uri "$ApiBase/$escapedPath`?ref=$escapedRef"
-    $fileInfo = $response.Content | ConvertFrom-Json
-    $base64 = ([string]$fileInfo.content) -replace '\s', ''
-    return ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($base64))).TrimStart([char]0xFEFF)
+    # raw.githubusercontent.com, not the api.github.com "contents" endpoint:
+    # the Contents API used here previously counts against GitHub's
+    # unauthenticated REST rate limit (60 requests/hour per IP total, shared
+    # across every API endpoint), and a tool with many dependency files
+    # (hardwarestability alone fetches 19: the script plus 18 dependencies)
+    # exhausts that after only 2-3 runs - reproduced for real as
+    # "API rate limit exceeded" (HTTP 403). Raw content URLs are served from
+    # GitHub's CDN and are not subject to that same low limit.
+    $escapedSegments = (([string]$Path).TrimStart("/") -split "/") | ForEach-Object { [Uri]::EscapeDataString($_) }
+    $escapedPath = $escapedSegments -join "/"
+    return Get-RemoteText -Uri "$RawBase/$escapedPath"
 }
 
 function Get-Manifest {
