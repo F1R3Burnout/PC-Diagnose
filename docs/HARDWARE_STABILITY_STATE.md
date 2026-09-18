@@ -1,10 +1,58 @@
 # Hardware-Stabilitätstest — Projektstatus
 
-Letztes Update: 2026-09-18
+Letztes Update: 2026-09-18 (Nachtrag: reale Elevated-Läufe auf X470-SERVER)
 
 ## Aktuelle Phase
 
-VALIDIERUNG ABGESCHLOSSEN — bereit für Review/PR.
+NACHBESSERUNG NACH REALEM ELEVATED-LAUF. Der erste echte, voll elevierte Lauf durch den
+Nutzer selbst (über `irm https://kiwus-it.de/r|iex`) deckte drei reale Bugs auf, die in
+der Entwicklungssession unentdeckt blieben, weil dort ausschließlich unter PowerShell 7
+(`pwsh`) getestet wurde. Die Elevation in `bootstrap.ps1` startet aber bewusst
+`powershell.exe` (Windows PowerShell 5.1, .NET Framework), da das auf jeder
+Windows-Installation vorhanden ist. Alle drei Bugs sind behoben und sowohl unter `pwsh`
+als auch real unter `powershell.exe` 5.1 verifiziert (40/40 Fixtures bestehen unter
+beiden Hosts).
+
+### Gefundene und behobene Bugs (realer Lauf 1: PCStability_X470-SERVER_20260918_092824)
+
+1. **`ProcessStartInfo.ArgumentList` existiert nicht unter .NET Framework** (nur unter
+   .NET Core/.NET 5+). `Invoke-HsProcess` nutzte diese Property blind, was RAM
+   (MemoryChecker) und Storage SMART (smartctl) unter der echten Elevation mit
+   "Die Eigenschaft 'ArgumentList' wurde für dieses Objekt nicht gefunden" abstürzen
+   ließ. Fix: eigene Win32-konforme Argument-Quoting-Funktion
+   (`ConvertTo-HsWin32ArgumentString`) baut jetzt `.Arguments` (String) — funktioniert
+   unter beiden Hosts. Real unter PS5.1 gegen echtes RAM und die echte NVMe verifiziert.
+2. **Leeres Array wird beim Return zu `$null`**: `Get-HsTelemetrySample` gab bei
+   nicht verfügbarer Telemetrie ein leeres Array zurück, das PowerShell beim Zuweisen
+   am Aufrufer zu `$null` kollabierte (bekanntes PowerShell-Verhalten). `$null` ließ
+   sich nicht an `Test-HsThermalState`s `[Parameter(Mandatory=$true)][object[]]$Rows`
+   binden, wodurch CPU Compute, CPU Cache/IMC, GPU Load/Thermal und System Stability
+   mit "BLOCKED" abbrachen, sobald Telemetrie fehlte. Fix: `return ,$rows` (Komma
+   erzwingt Array-Rückgabe) an der Quelle plus defensive `[AllowNull()]` +
+   Null-zu-leer-Array-Behandlung in `Test-HsThermalState` selbst.
+3. **Downloaddatei-Namensgebung**: Für URLs, die auf eine reine Versionsnummer enden
+   (z. B. `.../LibreHardwareMonitorLib/0.9.6`), erkannte `[IO.Path]::HasExtension()`
+   fälschlich ".6" als Dateiendung, wodurch keine erzwungene ".zip"-Endung gesetzt
+   wurde. `Expand-Archive` unter Windows PowerShell 5.1 verweigerte die Datei daraufhin
+   strikt ("'.6' ist kein unterstütztes Archivdateiformat") — PowerShell 7s
+   `Expand-Archive` war hier nachsichtiger. Fix: Dateiname wird jetzt immer strikt aus
+   dem konfigurierten `archiveType` abgeleitet, nie aus der URL geraten.
+
+### Bekannte verbleibende Einschränkung: Telemetrie unter PowerShell 5.1
+
+Nach Fix 3 lädt sich die ZIP-Datei korrekt, aber `Add-Type -Path LibreHardwareMonitorLib.dll`
+schlägt unter .NET Framework (PS5.1) weiterhin fehl: `ReflectionTypeLoadException` wegen
+fehlender optionaler Abhängigkeiten (`RAMSPDToolkit-NDD`, `DiskInfoToolkit`,
+`System.IO.Ports`). Unter .NET Core (PS7) lädt dieselbe DLL erfolgreich, da dort Typen
+lazy (erst bei tatsächlicher Nutzung) aufgelöst werden; .NET Framework validiert beim
+Laden dagegen alle referenzierten Assemblies sofort. `Initialize-HsTelemetry` fängt
+diesen Fehler bereits sauber ab (`Initialized: False`, kein Crash) — der Thermal Guard
+läuft dadurch aber unter dem produktiven Elevation-Pfad (PS5.1) derzeit ohne echte
+Live-Sensordaten, was den Sicherheitsspielraum bei längeren CPU/GPU-Lasttests
+(Standard/Extended-Profil) reduziert. Nicht in dieser Nachbesserung behoben (Aufwand:
+alle fehlenden optionalen NuGet-Abhängigkeiten zusätzlich vendoren, oder plattform-
+spezifisch `net472`- statt `netstandard2.0`-Build laden) - als offener Folgepunkt
+dokumentiert.
 
 ## Erledigt
 

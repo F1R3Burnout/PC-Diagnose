@@ -164,15 +164,17 @@ $engineExitAction = Register-EngineEvent -SourceIdentifier ([System.Management.A
 
 function Get-HsTelemetrySampleForStage {
     param([string]$StageName)
-    if ($SkipTelemetry) { return @() }
-    return Get-HsTelemetrySample -Stage $StageName
+    # Leading commas: an empty array returned without one collapses to $null
+    # at the caller (see the matching fix/comment in Telemetry.psm1).
+    if ($SkipTelemetry) { return ,@() }
+    return ,(Get-HsTelemetrySample -Stage $StageName)
 }
 
 function Test-HsThermalAbortOrCancel {
     param([string]$StageName)
     if ($script:HsCancelRequested) { return $true }
     if ($SkipTelemetry) { return $false }
-    $rows = Get-HsTelemetrySample -Stage $StageName
+    $rows = @(Get-HsTelemetrySample -Stage $StageName)
     $state = Test-HsThermalState -Rows $rows -Thresholds $thermalDefaults
     if ($state.State -eq "ABORT") {
         Write-Progress2 "THERMAL ABORT: $($state.Reason)" "Red"
@@ -270,7 +272,7 @@ if (-not $SkipTelemetry) {
 }
 
 # Idle baseline (spec section 25)
-$idleRows = Get-HsTelemetrySampleForStage -StageName "IDLE_BASELINE"
+$idleRows = @(Get-HsTelemetrySampleForStage -StageName "IDLE_BASELINE")
 $idleRows | Export-Csv -Path (Join-Path $Dirs.Telemetry "IdleBaseline.csv") -NoTypeInformation -Encoding UTF8 -ErrorAction SilentlyContinue
 $idleState = if ($idleRows.Count -gt 0) { Test-HsThermalState -Rows $idleRows -Thresholds $thermalDefaults } else { [pscustomobject]@{ State = "OK" } }
 if ($idleState.State -eq "ABORT") {

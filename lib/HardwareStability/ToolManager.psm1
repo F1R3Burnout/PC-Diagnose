@@ -82,15 +82,19 @@ function Resolve-HsTool {
 
     $downloadUrl = [string]$entry.downloadUrl
     $archiveType = [string]$entry.archiveType
-    $fileName = [IO.Path]::GetFileName(([Uri]$downloadUrl).AbsolutePath)
     $extensionByType = @{ zip = ".zip"; exe = ".exe"; "nsis-installer" = ".exe"; nupkg = ".zip" }
-    if ([string]::IsNullOrWhiteSpace($fileName) -or -not [IO.Path]::HasExtension($fileName)) {
-        # Redirector URLs (e.g. SourceForge's "/download" auto-mirror link) don't end in a real
-        # file name. Force a correct extension so Start-Process / Expand-Archive can rely on it
-        # (Windows resolves how to launch a file by extension, not by content).
-        $forcedExtension = if ($extensionByType.ContainsKey($archiveType)) { $extensionByType[$archiveType] } else { ".bin" }
-        $fileName = "$ToolId$forcedExtension"
-    }
+    # Always name the downloaded file from the known archiveType rather than
+    # trying to infer/preserve an extension from the URL. Redirector URLs
+    # (e.g. SourceForge's "/download" auto-mirror link) don't end in a real
+    # file name at all, and a URL ending in a bare version number such as
+    # ".../LibreHardwareMonitorLib/0.9.6" is mis-detected by
+    # [IO.Path]::HasExtension() as "having" the extension ".6" - which then
+    # made Expand-Archive on Windows PowerShell 5.1 refuse the file outright
+    # ("'.6' ist kein unterstuetztes Archivdateiformat"), while PowerShell 7
+    # happened not to care. Always forcing the extension from archiveType
+    # sidesteps that entirely. See docs/HARDWARE_STABILITY_STATE.md.
+    $forcedExtension = if ($extensionByType.ContainsKey($archiveType)) { $extensionByType[$archiveType] } else { ".bin" }
+    $fileName = "$ToolId$forcedExtension"
     $downloadPath = Join-Path $toolDir $fileName
 
     try {

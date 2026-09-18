@@ -8,9 +8,15 @@ function Test-HsThermalState {
         sensor(s) responsible.
     #>
     param(
-        [Parameter(Mandatory=$true)][object[]]$Rows,
+        [AllowNull()][object[]]$Rows,
         [Parameter(Mandatory=$true)]$Thresholds
     )
+    # Defense in depth: a $null here (e.g. telemetry unavailable) must be
+    # treated as "no data", not a caller error - an empty array returned
+    # from a function collapses to $null at the call site under PowerShell's
+    # pipeline unwrapping, which broke every stage checking the thermal
+    # guard until this was caught (see docs/HARDWARE_STABILITY_STATE.md).
+    if ($null -eq $Rows) { $Rows = @() }
 
     $result = [pscustomobject]@{
         State  = "OK"

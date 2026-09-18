@@ -83,7 +83,14 @@ function Get-HsTelemetrySample {
     param([Parameter(Mandatory=$true)][string]$Stage)
 
     $rows = @()
-    if (-not $script:HsTelemetryAvailable -or $null -eq $script:HsComputer) { return $rows }
+    # The leading comma forces PowerShell to return this AS an array, even
+    # when it is empty: "return $rows" on an empty array is otherwise
+    # unwrapped to $null by the pipeline, which then fails to bind to a
+    # downstream [object[]] Mandatory parameter (observed for real: this
+    # collapsed to $null whenever telemetry was unavailable, breaking every
+    # stage that checked the thermal guard - see
+    # docs/HARDWARE_STABILITY_STATE.md).
+    if (-not $script:HsTelemetryAvailable -or $null -eq $script:HsComputer) { return ,$rows }
 
     $timestamp = Get-Date
     foreach ($hw in $script:HsComputer.Hardware) {
@@ -94,7 +101,7 @@ function Get-HsTelemetrySample {
             $rows += Get-HsHardwareSensorRows -Hardware $sub -Stage $Stage -Timestamp $timestamp
         }
     }
-    return $rows
+    return ,$rows
 }
 
 function Get-HsHardwareSensorRows {

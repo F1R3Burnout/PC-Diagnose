@@ -60,6 +60,64 @@ function Stop-HsAllTrackedProcesses {
     $global:HsProcessRegistryStore.Clear()
 }
 
+function ConvertTo-HsWin32ArgumentString {
+    <#
+    .SYNOPSIS
+        Builds a single Win32 command-line string from an argument array,
+        using the same quoting/escaping rules CommandLineToArgvW expects
+        (an argument is quoted only if it contains a space/tab/quote;
+        backslashes are doubled only when they immediately precede a quote
+        or the end of a quoted argument).
+
+    .DESCRIPTION
+        ProcessStartInfo.ArgumentList (which handles this automatically) is
+        a .NET Core-only member; it does not exist on .NET Framework's
+        ProcessStartInfo, which is what Windows PowerShell 5.1 uses. Since
+        this project's own elevation path launches "powershell.exe" (5.1),
+        not "pwsh.exe", Invoke-HsProcess must build .Arguments itself to
+        work under both hosts. Verified against a real Windows PowerShell
+        5.1 process during implementation - see
+        docs/HARDWARE_STABILITY_STATE.md.
+    #>
+    param([string[]]$Arguments)
+
+    $parts = @()
+    foreach ($arg in $Arguments) {
+        if ($null -eq $arg) { $arg = "" }
+        if ($arg.Length -gt 0 -and $arg -notmatch '[\s"]') {
+            $parts += $arg
+            continue
+        }
+
+        $sb = New-Object Text.StringBuilder
+        [void]$sb.Append('"')
+        $backslashCount = 0
+        foreach ($ch in $arg.ToCharArray()) {
+            if ($ch -eq '\') {
+                $backslashCount++
+                continue
+            }
+            if ($backslashCount -gt 0) {
+                $multiplier = if ($ch -eq '"') { 2 } else { 1 }
+                [void]$sb.Append('\' * ($backslashCount * $multiplier))
+                $backslashCount = 0
+            }
+            if ($ch -eq '"') {
+                [void]$sb.Append('\"')
+            } else {
+                [void]$sb.Append($ch)
+            }
+        }
+        if ($backslashCount -gt 0) {
+            [void]$sb.Append('\' * ($backslashCount * 2))
+        }
+        [void]$sb.Append('"')
+        $parts += $sb.ToString()
+    }
+
+    return ($parts -join " ")
+}
+
 function Invoke-HsProcess {
     <#
     .SYNOPSIS
@@ -93,7 +151,7 @@ function Invoke-HsProcess {
 
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = $FilePath
-    foreach ($arg in $ArgumentList) { [void]$psi.ArgumentList.Add($arg) }
+    $psi.Arguments = ConvertTo-HsWin32ArgumentString -Arguments $ArgumentList
     if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
