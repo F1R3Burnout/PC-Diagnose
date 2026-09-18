@@ -4,10 +4,18 @@ Status: `[PASS]` `[FAIL]` `[BLOCKED]` `[N/A]`. Automatisch geprüfte Gates laufe
 `tests/HardwareStability/Validate-HardwareStability.ps1` (Exitcode 0 bei letztem Lauf,
 siehe `LOCAL_LLM_TEST_RESULTS.txt`). Zuletzt aktualisiert: 2026-09-18.
 
+Zusätzlich bestätigt: ein vollständiger, real elevierter Quick-Profil-Lauf über den
+produktiven Weg (`irm .../r|iex` -> `bootstrap.ps1` -> UAC -> Windows PowerShell 5.1)
+endete mit **Overall: PASS** über CPU Compute, CPU Cache/IMC, RAM, GPU Compute,
+GPU Load/Thermal, Storage SMART, Storage Write/Read Verification, PCIe/WHEA und
+System Stability (VRAM korrekt UNSUPPORTED, Storage Surface Read korrekt SKIPPED im
+Quick-Profil). Siehe `docs/HARDWARE_STABILITY_STATE.md` für die dabei gefundenen und
+behobenen Bugs.
+
 HS-001 [PASS] Alle PowerShell-Dateien parsen erfolgreich. (automatisiert, Validate-Runner)
 HS-002 [PASS] manifest.json ist valides JSON. (automatisiert, Validate-Runner)
 HS-003 [PASS] Hardware-Stabilitätstest ist im Hauptmenü vorhanden. (automatisiert)
-HS-004 [PASS] Direktaufruf funktioniert. (automatisiert + real via -File getestet)
+HS-004 [PASS] Direktaufruf funktioniert. (automatisiert + real via -File getestet + realer eleviert Lauf über bootstrap.ps1/irm)
 HS-005 [PASS] DryRun funktioniert. (automatisiert + real getestet)
 HS-006 [PASS] DryRun erzeugt keine aktive Testlast. (automatisiert: keine PCStability_*-Ordner nach DryRun)
 HS-007 [PASS] Unicode-Ausgabepfade funktionieren. (Fixture: Invoke-HsProcess mit "Ünicode Test Öl"-Verzeichnis)

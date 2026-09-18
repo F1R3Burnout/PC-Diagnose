@@ -4,14 +4,51 @@ Letztes Update: 2026-09-18 (Nachtrag: reale Elevated-Läufe auf X470-SERVER)
 
 ## Aktuelle Phase
 
-NACHBESSERUNG NACH REALEM ELEVATED-LAUF. Der erste echte, voll elevierte Lauf durch den
-Nutzer selbst (über `irm https://kiwus-it.de/r|iex`) deckte drei reale Bugs auf, die in
-der Entwicklungssession unentdeckt blieben, weil dort ausschließlich unter PowerShell 7
-(`pwsh`) getestet wurde. Die Elevation in `bootstrap.ps1` startet aber bewusst
-`powershell.exe` (Windows PowerShell 5.1, .NET Framework), da das auf jeder
-Windows-Installation vorhanden ist. Alle drei Bugs sind behoben und sowohl unter `pwsh`
-als auch real unter `powershell.exe` 5.1 verifiziert (40/40 Fixtures bestehen unter
-beiden Hosts).
+ABGESCHLOSSEN UND REAL END-TO-END BESTÄTIGT. Der erste echte, voll elevierte Lauf durch
+den Nutzer selbst (über `irm .../r|iex`) deckte fünf reale Bugs auf, die in der
+Entwicklungssession unentdeckt blieben, weil dort ausschließlich unter PowerShell 7
+(`pwsh`) getestet wurde, während die Elevation in `bootstrap.ps1` bewusst
+`powershell.exe` (Windows PowerShell 5.1, .NET Framework) startet, da das auf jeder
+Windows-Installation vorhanden ist. Alle Bugs sind behoben. Ein vollständiger,
+elevierter Quick-Profil-Lauf auf X470-SERVER (Run `PCStability_X470-SERVER_20260918_132338`,
+~22 Minuten) endete mit **Overall: PASS** über alle Stages (CPU Compute, CPU Cache/IMC,
+RAM, GPU Compute, GPU Load/Thermal, Storage SMART, Storage Write/Read Verification,
+PCIe/WHEA, System Stability - VRAM korrekt UNSUPPORTED mangels Vulkan-Runtime, Storage
+Surface Read korrekt SKIPPED da im Quick-Profil deaktiviert). Damit ist der komplette
+Pfad einmal real durch die tatsächliche Produktionsumgebung (elevierte Windows
+PowerShell 5.1 via `bootstrap.ps1`) bestätigt, nicht nur durch Fixtures/pwsh.
+
+### Alle real gefundenen und behobenen Bugs (chronologisch)
+
+1. `ProcessStartInfo.ArgumentList` existiert nicht unter .NET Framework (RAM, SMART).
+2. Leeres Array wird bei `return` zu `$null`, Bindung an Mandatory-Parameter schlägt fehl
+   (CPU/GPU-Thermal-Check, System Stability).
+3. Downloaddatei-Namensgebung: URL endend auf Versionsnummer (`.../0.9.6`) wurde
+   fälschlich als "hat Endung .6" erkannt (Telemetrie-Download unter PS5.1).
+4. `$null`-Element wurde per `+=` in ein Telemetrie-Array injiziert, wenn ein
+   Hardware-Objekt keine Sensoren hatte (`Get-HsHardwareSensorRows`).
+5. Eigene, zu vorsichtige `@()`-Nachrüstung um bereits Komma-geschützte Funktionsaufrufe
+   verursachte doppelte Array-Verschachtelung (zwei separate Stellen: innerhalb
+   `Telemetry.psm1` und in `HardwareStability.ps1`s `Test-HsThermalAbortOrCancel`/
+   Idle-Baseline-Pfad).
+6. `bootstrap.ps1` nutzte die GitHub-REST-Contents-API (60 Anfragen/Stunde/IP) statt
+   `raw.githubusercontent.com` zum Laden jeder Datei - bei 19 Dateien pro
+   Hardwarestability-Lauf nach 2-3 Versuchen aufgebraucht ("API rate limit exceeded").
+7. `-EncodedCommand`-basierte Selbst-Elevation wurde von Windows Defenders ML-Heuristik
+   als "Trojan:Win32/Commando.A!ml" fehlklassifiziert (False Positive); auf eine
+   lesbare temporäre `.ps1`-Datei mit `-File` umgestellt.
+
+Alle Fixes wurden sowohl unter `pwsh` als auch real unter `powershell.exe` 5.1 verifiziert
+(40/40 Fixtures unter beiden Hosts), zusätzlich zum finalen echten Elevated-Gesamtlauf.
+
+### Bekannte, akzeptierte Restlimitierung
+
+Telemetrie (LibreHardwareMonitorLib) lädt unter Windows PowerShell 5.1 weiterhin nicht
+(fehlende optionale NuGet-Abhängigkeiten, .NET Framework validiert beim Laden strikter
+als .NET Core). Das führt zu `Telemetry available: False` im produktiven Elevation-Pfad,
+degradiert aber sauber (kein Crash, siehe die vorherigen Fixes) - der Thermal Guard hat
+dadurch aktuell keine echten Live-Temperaturen. Für Quick-Profil unkritisch; vor
+intensiverem Standard/Extended-Einsatz sollte das nachgezogen werden (siehe unten).
 
 ### Gefundene und behobene Bugs (realer Lauf 1: PCStability_X470-SERVER_20260918_092824)
 
@@ -172,7 +209,15 @@ PCDiagLites Restart-/Shutdown-Klassifikation aufbauen (analog zu
 
 ## Nächster Arbeitsschritt
 
-PR eröffnet: https://github.com/F1R3Burnout/PC-Diagnose/pull/1 (CI "syntax" grün).
-Von Nutzer/Reviewer: einmal `HardwareStability.ps1 -Profile Quick` eleviert auf einer
-Testmaschine ausführen, um den vollen orchestrierten Lauf (alle Stages, echtes Ergebnis-
-Package, ZIP) zu bestätigen, sowie PR-Review.
+Erledigt: PR #1 gemerged nach `main`, vollständiger elevierter Quick-Profil-Lauf auf
+echter Produktionshardware bestätigt PASS. Offene, freiwillige Folgepunkte:
+
+- Telemetrie unter Windows PowerShell 5.1 zum Laufen bringen (fehlende optionale
+  NuGet-Abhängigkeiten von LibreHardwareMonitorLib vendoren oder `net472`-Build
+  gezielt für PS5.1 laden), damit der Thermal Guard auch im produktiven
+  Elevation-Pfad echte Live-Temperaturen hat.
+- `kiwus-it.de/r` (Wix-Weiterleitung) zeigt zeitweise noch veraltete Inhalte -
+  vermutlich Client- oder Wix-seitiges Caching des 301/302-Redirects; nicht im
+  Code behebbar, siehe Chat-Verlauf für Diagnosehinweise.
+- Standard-/Extended-Profil-Läufe (deutlich länger) noch nicht real eleviert
+  durchgeführt - nur Quick verifiziert.
