@@ -61,6 +61,25 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 } catch {}
 
+# Persistent, append-only log for this launcher stage (menu, manifest fetch,
+# elevation, tool download). Console output alone is lost as soon as the
+# window closes, which made a real failure here (a false-positive antivirus
+# block of the elevation relaunch) hard to diagnose from a screenshot alone.
+# HardwareStability.ps1 and the other tools have their own, more detailed
+# per-run logs once they actually start (see their own output folders); this
+# file specifically covers everything before that point.
+$BootstrapLogDir = Join-Path $env:TEMP "PC-Diagnose"
+New-Item -ItemType Directory -Force -Path $BootstrapLogDir -ErrorAction SilentlyContinue | Out-Null
+$BootstrapLogPath = Join-Path $BootstrapLogDir "bootstrap.log"
+
+function Write-BootstrapLog {
+    param([string]$Text)
+    $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Text
+    try { $line | Out-File -FilePath $BootstrapLogPath -Encoding UTF8 -Append } catch {}
+}
+
+Write-BootstrapLog "=== bootstrap.ps1 started (Tool=$Tool, Branch=$Branch, PID=$PID) ==="
+
 function Test-IsAdmin {
     $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
@@ -124,13 +143,17 @@ function Start-ElevatedBootstrap {
     # signature without changing what actually runs.
     $elevatedScriptPath = Join-Path ([IO.Path]::GetTempPath()) ("PC-Diagnose-elevate-{0}.ps1" -f ([guid]::NewGuid().ToString("N")))
     [IO.File]::WriteAllText($elevatedScriptPath, $command, [Text.UTF8Encoding]::new($true))
+    Write-BootstrapLog "Elevation: writing relaunch script to $elevatedScriptPath for tool '$SelectedTool'"
     try {
         Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $elevatedScriptPath) -Verb RunAs | Out-Null
+        Write-BootstrapLog "Elevation: Start-Process -Verb RunAs returned without throwing (a UAC prompt may still be pending, or the elevated window may already be open)."
     } catch {
+        Write-BootstrapLog "Elevation FAILED: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
         Write-Host ""
         Write-Host "Could not open an elevated PowerShell window automatically: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "Open PowerShell as Administrator yourself (right-click Start -> 'Windows PowerShell (Admin)') and run:" -ForegroundColor Yellow
         Write-Host "  irm $BootstrapUrl | iex" -ForegroundColor Yellow
+        Write-Host "Log file for this attempt: $BootstrapLogPath" -ForegroundColor DarkGray
     }
 }
 
@@ -208,8 +231,10 @@ function Invoke-RemoteTool {
 
     $toolInfo = @($Manifest.tools | Where-Object { $_.id -eq $SelectedTool -or $_.name -eq $SelectedTool }) | Select-Object -First 1
     if (-not $toolInfo) {
+        Write-BootstrapLog "Tool not found: $SelectedTool"
         throw "Tool not found: $SelectedTool"
     }
+    Write-BootstrapLog "Resolved tool: id=$($toolInfo.id) name=$($toolInfo.name) requiresAdmin=$($toolInfo.requiresAdmin)"
 
     if ($toolInfo.id -eq "pcdiag") {
         $script:DaysBack = Read-DaysBackForTool -ToolId ([string]$toolInfo.id) -DefaultDays 0
@@ -234,6 +259,7 @@ function Invoke-RemoteTool {
     $scriptPath = Join-Path $toolCacheDir (Split-Path -Path ([string]$toolInfo.path) -Leaf)
     $scriptText = Get-RepositoryFileText -Path ([string]$toolInfo.path)
     [IO.File]::WriteAllText($scriptPath, [string]$scriptText, [Text.UTF8Encoding]::new($true))
+    Write-BootstrapLog "Fetched tool script $($toolInfo.path) -> $scriptPath ($($scriptText.Length) chars)"
     try {
         Unblock-File -LiteralPath $scriptPath -ErrorAction SilentlyContinue
     } catch {}
@@ -254,6 +280,9 @@ function Invoke-RemoteTool {
         try { Unblock-File -LiteralPath $dependencyPath -ErrorAction SilentlyContinue } catch {}
         $dependencyPaths[(Split-Path -Path ([string]$dependency) -Leaf)] = $dependencyPath
         $dependencyPaths[[string]$dependency] = $dependencyPath
+    }
+    if (@($toolInfo.dependencies).Count -gt 0) {
+        Write-BootstrapLog "Fetched $(@($toolInfo.dependencies).Count) dependency file(s) into $toolCacheDir"
     }
 
     Write-Host ""
@@ -327,19 +356,32 @@ function Invoke-RemoteTool {
         $toolArgs.ConfigPathOverride = Join-Path $toolCacheDir "config\HardwareStabilityTools.json"
     }
 
+    Write-BootstrapLog "Launching $($toolInfo.id) with args: $((@($toolArgs.Keys) | ForEach-Object { "$_=$($toolArgs[$_])" }) -join ', ')"
     $toolScriptBlock = [scriptblock]::Create([string]$scriptText)
     & $toolScriptBlock @toolArgs
 }
 
-$manifest = Get-Manifest
+try {
+    $manifest = Get-Manifest
+    Write-BootstrapLog "Fetched manifest.json: $(@($manifest.tools).Count) tool(s)"
 
-if ($Tool -eq "list") {
-    Show-ToolList -Manifest $manifest
-    return
+    if ($Tool -eq "list") {
+        Show-ToolList -Manifest $manifest
+        return
+    }
+
+    if ($Tool -eq "menu") {
+        $Tool = Select-ToolFromMenu -Manifest $manifest
+        Write-BootstrapLog "Menu selection: $Tool"
+    }
+
+    Invoke-RemoteTool -Manifest $manifest -SelectedTool $Tool
+    Write-BootstrapLog "=== bootstrap.ps1 finished normally ==="
+} catch {
+    Write-BootstrapLog "UNHANDLED ERROR: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+    Write-BootstrapLog ($_.ScriptStackTrace -join " | ")
+    Write-Host ""
+    Write-Host "PC-Diagnose failed to start: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Details were written to: $BootstrapLogPath" -ForegroundColor Yellow
+    throw
 }
-
-if ($Tool -eq "menu") {
-    $Tool = Select-ToolFromMenu -Manifest $manifest
-}
-
-Invoke-RemoteTool -Manifest $manifest -SelectedTool $Tool

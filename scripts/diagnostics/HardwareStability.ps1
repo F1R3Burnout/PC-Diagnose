@@ -59,6 +59,31 @@ $ErrorActionPreference = "Stop"
 $ToolName = "Hardware-Stabilitaetstest"
 $ToolVersion = "1.0"
 
+# Fallback crash log: written to whenever an error happens before the run's
+# own output folder (99_Runtime\runtime.log) exists yet - e.g. a module
+# failing to load, or an error while collecting the hardware inventory -
+# and appended to (not overwritten) by the trap below for any later
+# unhandled error too, so it always has the full picture in one place.
+$script:HsCrashLogPath = Join-Path $env:TEMP "PC-Diagnose\hardwarestability-crash.log"
+New-Item -ItemType Directory -Force -Path (Split-Path $script:HsCrashLogPath -Parent) -ErrorAction SilentlyContinue | Out-Null
+
+trap {
+    $errorText = "[{0}] UNHANDLED ERROR: {1}: {2}`n{3}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $_.Exception.GetType().FullName, $_.Exception.Message, ($_.ScriptStackTrace -join " | ")
+    Write-Host ""
+    Write-Host $errorText -ForegroundColor Red
+    try { $errorText | Out-File -FilePath $script:HsCrashLogPath -Encoding UTF8 -Append } catch {}
+    try {
+        if (Get-Variable -Name RuntimeLog -Scope Script -ErrorAction SilentlyContinue) {
+            $errorText | Out-File -FilePath $script:RuntimeLog -Encoding UTF8 -Append -ErrorAction SilentlyContinue
+        }
+    } catch {}
+    Write-Host "Crash log: $script:HsCrashLogPath" -ForegroundColor Yellow
+    if (Get-Variable -Name Out -Scope Script -ErrorAction SilentlyContinue) {
+        Write-Host "Run folder (if created): $script:Out" -ForegroundColor Yellow
+    }
+    break
+}
+
 # ---------------------------------------------------------------------------
 # Module loading
 # ---------------------------------------------------------------------------
@@ -166,6 +191,10 @@ function Test-HsThermalAbortOrCancel {
 Write-Progress2 "$ToolName $ToolVersion - profile $Profile" "Cyan"
 Write-Progress2 "Output folder: $Out" "Gray"
 Write-Progress2 "Components: $($selectedComponents -join ', ')" "Gray"
+if (-not $DryRun) {
+    Write-Progress2 "Log file for this run: $RuntimeLog" "Gray"
+    Write-Progress2 "Crash log (only written on an unhandled error): $script:HsCrashLogPath" "Gray"
+}
 
 $inventory = Get-HsHardwareInventory
 if (-not $DryRun) {
