@@ -31,7 +31,7 @@ HS-016 [PASS] GPU Compute intentional mismatch => FAIL. (Fixture: Test-HsGpuComp
 HS-017 [BLOCKED] GPU Compute Unsupported => UNSUPPORTED. (Code-Pfad implementiert - Initialize-HsD3D11ComputeVerifier's catch => Status UNSUPPORTED - und strukturell identisch zum real getesteten UNSUPPORTED-Pfad von VRAM/memtest_vulkan (HS-020/021-Umgebung), aber nicht selbst real ausgelöst, da auf dieser Maschine D3D11/Direct3D 11 durchgehend verfügbar war)
 HS-018 [BLOCKED] GPU Device Lost wird erkannt. (Code-Pfad implementiert und Review-geprüft: DXGI_ERROR_DEVICE_REMOVED-Behandlung in D3D11ComputeVerifier.cs; ein echter TDR wurde auf der produktiven Testmaschine bewusst nicht erzwungen)
 HS-019 [BLOCKED] GPU TDR wird erkannt. (siehe HS-018 - selber Codepfad/Grund)
-HS-020 [PASS] VRAM PASS => PASS. (Fixture-Exe)
+HS-020 [PASS] VRAM PASS => PASS. (Fixture-Exe + real: memtest_vulkan 6-Minuten-Lauf auf zweiter Testmaschine mit echtem Vulkan-Runtime, PASS)
 HS-021 [PASS] VRAM Error => FAIL. (Fixture-Exe mit "Error found")
 HS-022 [PASS] SMART Healthy wird korrekt ausgewertet. (real: Samsung SSD 970 EVO Plus, PASSED, 52°C, 8% used)
 HS-023 [PASS] SMART Unsupported => UNSUPPORTED und nicht FAIL. (real: USB Mass Storage Device auf PhysicalDrive1)

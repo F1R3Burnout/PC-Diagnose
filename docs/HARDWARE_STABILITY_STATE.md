@@ -18,6 +18,16 @@ Surface Read korrekt SKIPPED da im Quick-Profil deaktiviert). Damit ist der komp
 Pfad einmal real durch die tatsächliche Produktionsumgebung (elevierte Windows
 PowerShell 5.1 via `bootstrap.ps1`) bestätigt, nicht nur durch Fixtures/pwsh.
 
+**Zweite Maschine bestätigt (AMD X670E-Plattform, User "olive", Run
+`PCStability_X670E_20260918_132907`, ~28 Minuten):** ebenfalls **Overall: PASS**, und
+zusätzlich der erste reale Beleg für den VRAM-Pfad (`memtest_vulkan`, 6 Minuten, PASS,
+0 Fehler) sowie GPU Load/Thermal mit 1657 Iterationen - beides auf X470-SERVER mangels
+Vulkan-Runtime nie real auslösbar. HS-014 (CPU_COMPUTE 8 Worker vs. CPU_CACHE_IMC 16
+Worker) ebenfalls auf echter, anderer Hardware bestätigt. Storage SMART dort
+UNSUPPORTED (PhysicalDrive2, vermutlich USB/RAID-angebunden) statt PASS - korrektes
+Verhalten, keine Regression. Damit ist das Projekt auf zwei unterschiedlichen realen
+Systemen End-to-End validiert.
+
 ### Alle real gefundenen und behobenen Bugs (chronologisch)
 
 1. `ProcessStartInfo.ArgumentList` existiert nicht unter .NET Framework (RAM, SMART).
