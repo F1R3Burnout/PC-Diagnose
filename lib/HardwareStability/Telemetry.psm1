@@ -95,6 +95,14 @@ function Get-HsTelemetrySample {
     $timestamp = Get-Date
     foreach ($hw in $script:HsComputer.Hardware) {
         try { $hw.Update() } catch { continue }
+        # Deliberately NOT wrapped in @(...): Get-HsHardwareSensorRows already
+        # returns a clean array via its own leading comma. Wrapping an
+        # already-comma-protected function call in @() here double-nests it
+        # (the call's single pipeline object - the array itself - becomes
+        # the lone element of a new outer array), which silently produced a
+        # bad entry lacking any of the expected properties and crashed
+        # Test-HsThermalState. Verified with both forms during the fix - see
+        # docs/HARDWARE_STABILITY_STATE.md.
         $rows += Get-HsHardwareSensorRows -Hardware $hw -Stage $Stage -Timestamp $timestamp
         foreach ($sub in $hw.SubHardware) {
             try { $sub.Update() } catch { continue }
@@ -119,7 +127,15 @@ function Get-HsHardwareSensorRows {
             Value        = [math]::Round([double]$sensor.Value, 2)
         }
     }
-    return $rows
+    # Same leading-comma fix as Get-HsTelemetrySample: without it, a piece of
+    # hardware with zero populated sensors (common - e.g. a Motherboard
+    # object with no exposed sensors) makes this return $null instead of an
+    # empty array. The caller's "$rows += Get-HsHardwareSensorRows ..." then
+    # appends that $null as a literal element of the outer array (PowerShell
+    # treats a $null RHS of += as one item to add, not as "nothing"), which
+    # later crashed Test-HsThermalState's property access under
+    # Set-StrictMode when it iterated that null entry.
+    return ,$rows
 }
 
 function Get-HsPeakTemperature {

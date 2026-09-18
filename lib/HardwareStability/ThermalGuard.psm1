@@ -33,7 +33,12 @@ function Test-HsThermalState {
     )
 
     foreach ($check in $checks) {
-        $matching = @($Rows | Where-Object { & $check.Match $_ })
+        # The explicit $null -ne $_ guard is a deliberate final safety net:
+        # this exact class of bug (a $null element ending up inside what
+        # should be a clean array, from "$array += <function call that
+        # returned nothing>" elsewhere) has bitten this project more than
+        # once - see the Get-HsHardwareSensorRows fix in Telemetry.psm1.
+        $matching = @($Rows | Where-Object { $null -ne $_ -and (& $check.Match $_) })
         foreach ($row in $matching) {
             if ($row.Value -ge $check.Abort) {
                 $result.State = "ABORT"
