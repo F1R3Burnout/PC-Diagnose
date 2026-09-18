@@ -124,6 +124,7 @@ PCDiagLites Restart-/Shutdown-Klassifikation aufbauen (analog zu
 
 ## Nächster Arbeitsschritt
 
+PR eröffnet: https://github.com/F1R3Burnout/PC-Diagnose/pull/1 (CI "syntax" grün).
 Von Nutzer/Reviewer: einmal `HardwareStability.ps1 -Profile Quick` eleviert auf einer
 Testmaschine ausführen, um den vollen orchestrierten Lauf (alle Stages, echtes Ergebnis-
 Package, ZIP) zu bestätigen, sowie PR-Review.
