@@ -85,7 +85,7 @@
       "id": "hardwarestability",
       "name": "Hardware-Stabilitätstest",
       "category": "pc-test",
-      "description": "Prueft CPU, RAM, GPU/VRAM und Datentraeger durch Berechnungen und Ruecklesen mit Ergebnisvergleich.\n    Bei PowerShell-Skriptsperre: F fuer den einmaligen Start waehlen, falls angeboten.\n    Falls F fehlt: Strg+C druecken und diesen Befehl am PowerShell-Prompt eingeben:\n    powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -Command \"& ([scriptblock]::Create((irm 'https://kiwus-it.de/r'))) -Tool hardwarestability\"\n    Die Freigabe gilt nur fuer den neuen Prozess und seine Kindprozesse.",
+      "description": "Prueft CPU, RAM, GPU/VRAM und Datentraeger durch Berechnungen und Ruecklesen mit Ergebnisvergleich.\n    Bei Skriptsperre: der aktuelle Starter bietet F zur temporaeren Freigabe mit anschliessender Testauswahl.\n    Alternativ: Strg+C druecken und diesen Befehl am PowerShell-Prompt eingeben:\n    powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -Command \"irm https://kiwus-it.de/r | iex\"\n    Danach einen Test waehlen. Die Freigabe endet mit der Sitzung und ihren Kindprozessen.",
       "path": "scripts/diagnostics/HardwareStability.ps1",
       "dependencies": [
         "config/HardwareStabilityTools.json",

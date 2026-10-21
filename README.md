@@ -19,19 +19,21 @@ irm https://kiwus-it.de/r|iex
 2 = NetzwerkDiagnose
 3 = HDMI- und Display-Diagnose
 4 = Hardware-Stabilitätstest
-F = Hardware-Stabilitaetstest einmalig starten (eigener Prozess)
+F = PowerShell-Skripte temporaer zulassen, danach Test waehlen
+0 = Abbrechen
 ```
 
-If local PowerShell policy blocks unsigned modules, choose `F` for a one-time
-Hardware-Stabilitaetstest run. It launches only the selected test and its modules
-in a separate PowerShell process with `RemoteSigned`, then closes that process
-when the test finishes. This is a process setting, not a per-file allowlist; it
-also applies to child processes. CurrentUser and LocalMachine settings are not
-changed. A blocking MachinePolicy or UserPolicy is respected and reported.
-Choosing `4` under a local `Restricted` or `AllSigned` policy also offers this
-one-time start, a policy overview, or cancellation before any test begins.
-The hardware-test menu description also displays the complete one-time start
-command, including in older starters that do not yet have the `F` selection.
+Choose `F` to allow scripts temporarily and return to the test menu in a separate
+PowerShell process with `RemoteSigned`. No test starts until you select one of
+the numbered tools. The new menu shows that temporary permission is active and
+offers `0` to leave without running a test. The permission ends when the session
+and its child processes close. It is a process setting, not a per-file allowlist;
+CurrentUser and LocalMachine settings are not changed, and blocking group
+policies are respected. Admin tools still request UAC when needed.
+Direct tool selection under a local `Restricted` or `AllSigned` policy also
+offers one-time permission for that tool, a policy overview, or cancellation.
+The hardware-test menu description displays an alternative command that opens
+the full test menu with temporary permission, also readable in older starters.
 
 4. Accept the UAC prompt only when the selected tool asks for it.
 

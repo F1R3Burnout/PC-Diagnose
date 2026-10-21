@@ -24,6 +24,9 @@ New-Item -ItemType Directory -Path $testRoot | Out-Null
 $BootstrapLogDir = $testRoot
 $BootstrapLogPath = Join-Path $testRoot "bootstrap.log"
 $script:MockPolicies = @{ MachinePolicy = "Undefined"; UserPolicy = "Undefined"; Effective = "Restricted" }
+$TemporarySession = $false
+$Branch = "main"
+$BootstrapArguments = @{}
 
 try {
     function Get-ExecutionPolicy {
@@ -62,9 +65,15 @@ try {
 
     $manifest = [pscustomobject]@{ tools = @([pscustomobject]@{ id="hardwarestability"; name="Fixture"; requiresAdmin=$false; dependencies=@("Common.psm1") }) }
     $script:Answers.Enqueue("f")
-    Assert-True ((Select-ToolFromMenu -Manifest $manifest) -eq "hardwarestability-once") "F selects the one-time hardware test"
+    Assert-True ((Select-ToolFromMenu -Manifest $manifest) -eq "script-permission") "F opens script permission instead of selecting a test"
     $script:Answers.Enqueue("1")
     Assert-True ((Select-ToolFromMenu -Manifest $manifest) -eq "hardwarestability") "Existing numbered selections stay unchanged"
+    $script:Answers.Enqueue("0")
+    Assert-True ((Select-ToolFromMenu -Manifest $manifest) -eq "exit") "Zero leaves the menu without selecting a test"
+    $TemporarySession = $true
+    $menuText = Show-ToolList -Manifest $manifest 6>&1 | Out-String
+    Assert-True ($menuText -match "Temporaere Skriptfreigabe aktiv" -and $menuText -notmatch '\[F\]') "Temporary session shows active permission and does not offer another permission restart"
+    $TemporarySession = $false
 
     # Cancel before inventory, downloads, or UAC can begin.
     $script:Answers.Enqueue("0")
@@ -73,7 +82,12 @@ try {
 
     $manifest.tools[0] | Add-Member -NotePropertyName path -NotePropertyValue "scripts/diagnostics/HardwareStability.ps1"
     $manifest.tools[0].dependencies = @("lib/HardwareStability/Common.psm1", "config/HardwareStabilityTools.json")
-    function Get-RepositoryFileText { param([string]$Path) return "# Harmless launcher fixture: $Path" }
+    $script:MenuFixtureText = "# Harmless menu fixture"
+    function Get-RepositoryFileText {
+        param([string]$Path)
+        if ($Path -eq "r") { return $script:MenuFixtureText }
+        return "# Harmless launcher fixture: $Path"
+    }
     function Start-TemporaryToolProcess {
         param([string]$ScriptPath, [hashtable]$ToolArguments, [switch]$RequiresAdmin)
         $script:CapturedLaunch = @{ ScriptPath=$ScriptPath; Arguments=$ToolArguments }
@@ -96,7 +110,31 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $script:CapturedLaunch.Arguments.ModuleRootOverride "Common.psm1")) "Cached modules retain their directory structure"
         Assert-True (Test-Path -LiteralPath $script:CapturedLaunch.Arguments.ConfigPathOverride) "Cached configuration path is forwarded"
         Invoke-RemoteTool -Manifest $manifest -SelectedTool "hardwarestability-once"
-        Assert-True ($script:Answers.Count -eq 0) "Explicit F starts without asking twice"
+        Assert-True ($script:Answers.Count -eq 0) "Legacy direct one-time tool ID stays compatible"
+
+        $BootstrapArguments = @{ Tool="hardwarestability"; Profile="Extended"; Components="RAM"; NoDownload=$true; DnsTestNames=@("one.test", "two.test"); TemporaryScriptPermission=$true }
+        Start-TemporaryMenu
+        Assert-True ($script:CapturedLaunch.Arguments.Tool -eq "menu") "Permission action restarts at the menu, never at the previously selected test"
+        Assert-True ($script:CapturedLaunch.Arguments.TemporarySession -eq $true) "New menu knows permission is active"
+        Assert-True (-not $script:CapturedLaunch.Arguments.ContainsKey("TemporaryScriptPermission")) "Permission action removes the direct-start switch to avoid a restart loop"
+        Assert-True ($script:CapturedLaunch.Arguments.Profile -eq "Extended" -and $script:CapturedLaunch.Arguments.NoDownload -and $script:CapturedLaunch.Arguments.DnsTestNames.Count -eq 2) "Menu restart preserves options for all tools"
+        Assert-True (-not (Test-Path -LiteralPath $script:CapturedLaunch.ScriptPath)) "Temporary menu script is cleaned up"
+
+        # All regular tools can request temporary permission, not just hardware.
+        $TemporaryScriptPermission = $true
+        $DaysBackWasProvided = $true
+        $DaysBack = 3
+        $OutputPath = "fixture-network-output"
+        $LocalTargets = @("192.0.2.1")
+        $DnsTestNames = @("one.test", "two.test")
+        foreach ($toolId in @("pcdiag", "netdiag", "displaydiag")) {
+            $toolManifest = [pscustomobject]@{ tools = @([pscustomobject]@{ id=$toolId; name=$toolId; requiresAdmin=$false; path="scripts/$toolId.ps1"; dependencies=@() }) }
+            Invoke-RemoteTool -Manifest $toolManifest -SelectedTool $toolId
+            Assert-True ($script:CapturedLaunch.ScriptPath -like "*$toolId.ps1") "$toolId supports an explicit temporary start"
+            if ($toolId -eq "pcdiag") { Assert-True ($script:CapturedLaunch.Arguments.DaysBack -eq 3) "PC diagnostics keeps the chosen lookback" }
+            if ($toolId -eq "netdiag") { Assert-True ($script:CapturedLaunch.Arguments.LocalTargets[0] -eq "192.0.2.1") "Network diagnostics keeps target options" }
+        }
+        $TemporaryScriptPermission = $false
     } finally {
         $env:TEMP = $originalTemp
         # The fixture cache is rooted in the unique test directory above.
@@ -155,6 +193,31 @@ Import-Module -Name $ModulePath -Force
     }
     Assert-True $failureDetected "Child failure reaches the parent"
     Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Filter "run-once-*").Count -eq 0) "Runner files are removed after failure"
+
+    # Exercise the real separate menu process using a harmless menu fixture.
+    $showMenuFunction = $bootstrapAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Show-ToolList" }, $false)
+    $selectMenuFunction = $bootstrapAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Select-ToolFromMenu" }, $false)
+    $script:MenuFixtureText = @'
+param([string]$Tool, [switch]$TemporarySession, [string]$Branch, [string]$OutputPath)
+'@ + "`n" + $showMenuFunction.Extent.Text + "`n" + $selectMenuFunction.Extent.Text + "`n" + @'
+function Read-Host { param([string]$Prompt) return "0" }
+$manifest = [pscustomobject]@{ tools = @(
+    [pscustomobject]@{ id="pcdiag"; name="PC diagnostics"; requiresAdmin=$true; description="Fixture" },
+    [pscustomobject]@{ id="netdiag"; name="Network diagnostics"; requiresAdmin=$false; description="Fixture" },
+    [pscustomobject]@{ id="displaydiag"; name="Display diagnostics"; requiresAdmin=$false; description="Fixture" },
+    [pscustomobject]@{ id="hardwarestability"; name="Hardware test"; requiresAdmin=$true; description="Fixture" }
+) }
+$selected = Select-ToolFromMenu -Manifest $manifest
+@{ RequestedTool=$Tool; TemporarySession=[bool]$TemporarySession; Selection=$selected; Policy=[string](Get-ExecutionPolicy) } | Export-Clixml -LiteralPath $OutputPath
+'@
+    $BootstrapArguments = @{ OutputPath=(Join-Path $testRoot "menu-result.clixml") }
+    Start-TemporaryMenu
+    $menuResult = Import-Clixml -LiteralPath $BootstrapArguments.OutputPath
+    Assert-True ($menuResult.RequestedTool -eq "menu" -and $menuResult.TemporarySession) "Real child process opens the test selection with active permission"
+    Assert-True ($menuResult.Selection -eq "exit") "Leaving the temporary menu runs no test"
+    Assert-True ($menuResult.Policy -eq "RemoteSigned") "Temporary menu process uses RemoteSigned"
+    Assert-True ((Get-ExecutionPolicy -List | ConvertTo-Json -Compress) -ceq $policiesBefore) "Menu permission leaves parent and persistent policies unchanged"
+    Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Filter "menu-once-*").Count -eq 0) "Temporary menu file is removed"
 
     Assert-True ([IO.File]::ReadAllText($bootstrapPath) -ceq [IO.File]::ReadAllText((Join-Path $repoRoot "r"))) "bootstrap.ps1 and r stay synchronized"
     Write-Host "Bootstrap tests passed (no hardware load or persistent policy changes)." -ForegroundColor Green

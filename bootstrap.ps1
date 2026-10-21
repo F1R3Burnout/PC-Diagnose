@@ -44,12 +44,17 @@ param(
     [switch]$SkipTelemetry,
     [switch]$HsDryRun,
     [switch]$TemporaryScriptPermission,
+    [switch]$TemporarySession,
     [long]$SurfaceScanMaxBytes = 0
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $DaysBackWasProvided = $PSBoundParameters.ContainsKey("DaysBack") -or [bool]$DaysBackProvided
+$BootstrapArguments = @{}
+foreach ($entry in $PSBoundParameters.GetEnumerator()) {
+    $BootstrapArguments[$entry.Key] = if ($entry.Value -is [Management.Automation.SwitchParameter]) { [bool]$entry.Value } else { $entry.Value }
+}
 
 $RepoOwner = "F1R3Burnout"
 $RepoName = "PC-Diagnose"
@@ -257,12 +262,37 @@ try {
     }
 }
 
+function Start-TemporaryMenu {
+    $blockingPolicy = Get-BlockingScriptGroupPolicy
+    if ($blockingPolicy) {
+        throw "Eine Gruppenrichtlinie blockiert die Skriptausfuehrung ($blockingPolicy). Die temporaere Freigabe kann sie nicht uebersteuern."
+    }
+
+    $menuPath = Join-Path $BootstrapLogDir ("menu-once-{0}.ps1" -f ([guid]::NewGuid().ToString("N")))
+    try {
+        $menuText = Get-RepositoryFileText -Path "r"
+        [IO.File]::WriteAllText($menuPath, $menuText, [Text.UTF8Encoding]::new($true))
+        $menuArguments = @{} + $BootstrapArguments
+        $menuArguments.Tool = "menu"
+        $menuArguments.Branch = $Branch
+        $menuArguments.TemporarySession = $true
+        [void]$menuArguments.Remove("TemporaryScriptPermission")
+        Write-Host "Temporaere Skriptfreigabe wird geoeffnet. Danach bitte einen Test waehlen." -ForegroundColor Cyan
+        Start-TemporaryToolProcess -ScriptPath $menuPath -ToolArguments $menuArguments
+    } finally {
+        Remove-Item -LiteralPath $menuPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Show-ToolList {
     param([Parameter(Mandatory=$true)]$Manifest)
 
     Write-Host ""
     Write-Host "PC-Diagnose Tools" -ForegroundColor Cyan
     Write-Host "=================" -ForegroundColor Cyan
+    if ($TemporarySession) {
+        Write-Host "Temporaere Skriptfreigabe aktiv. Jetzt den gewuenschten Test waehlen." -ForegroundColor Green
+    }
     Write-Host ""
 
     $i = 1
@@ -274,10 +304,11 @@ function Show-ToolList {
         $i++
     }
 
-    if (@($Manifest.tools | Where-Object id -eq "hardwarestability").Count -gt 0) {
-        Write-Host "[F] Hardware-Stabilitaetstest einmalig starten (eigener Prozess)" -ForegroundColor Yellow
-        Write-Host "    RemoteSigned nur fuer neuen Prozess und Kindprozesse; keine Datei-Whitelist." -ForegroundColor Gray
+    if (-not $TemporarySession) {
+        Write-Host "[F] PowerShell-Skripte temporaer zulassen, danach Test waehlen" -ForegroundColor Yellow
+        Write-Host "    Eigene Sitzung mit RemoteSigned; keine dauerhafte Richtlinienaenderung." -ForegroundColor Gray
     }
+    Write-Host "[0] Abbrechen" -ForegroundColor Gray
 
     Write-Host ""
 }
@@ -292,8 +323,9 @@ function Select-ToolFromMenu {
         throw "No selection entered."
     }
 
-    if ($selection.Trim() -eq "F" -and @($Manifest.tools | Where-Object id -eq "hardwarestability").Count -gt 0) {
-        return "hardwarestability-once"
+    if ($selection.Trim() -eq "0") { return "exit" }
+    if ($selection.Trim() -eq "F" -and -not $TemporarySession) {
+        return "script-permission"
     }
 
     $number = 0
@@ -350,21 +382,15 @@ function Invoke-RemoteTool {
     }
     Write-BootstrapLog "Resolved tool: id=$($toolInfo.id) name=$($toolInfo.name) requiresAdmin=$($toolInfo.requiresAdmin)"
 
-    if ($TemporaryScriptPermission -and $toolInfo.id -ne "hardwarestability") {
-        throw "TemporaryScriptPermission ist nur fuer den Hardware-Stabilitaetstest vorgesehen."
+    $blockingPolicy = Get-BlockingScriptGroupPolicy
+    if ($blockingPolicy) {
+        throw "Eine Gruppenrichtlinie blockiert die Skriptausfuehrung ($blockingPolicy). Bitte eine signierte Version bzw. die zustaendige Administration verwenden."
     }
-
-    if ($toolInfo.id -eq "hardwarestability") {
-        $blockingPolicy = Get-BlockingScriptGroupPolicy
-        if ($blockingPolicy) {
-            throw "Eine Gruppenrichtlinie blockiert die Skriptausfuehrung ($blockingPolicy). Bitte eine signierte Version bzw. die zustaendige Administration verwenden."
-        }
-        if (-not $TemporaryScriptPermission -and (Get-ExecutionPolicy) -in @("Restricted", "AllSigned")) {
-            $TemporaryScriptPermission = Read-TemporaryScriptPermission -ToolName ([string]$toolInfo.name)
-            if (-not $TemporaryScriptPermission) {
-                Write-BootstrapLog "User cancelled the one-time tool start"
-                return
-            }
+    if (-not $TemporaryScriptPermission -and (Get-ExecutionPolicy) -in @("Restricted", "AllSigned")) {
+        $TemporaryScriptPermission = Read-TemporaryScriptPermission -ToolName ([string]$toolInfo.name)
+        if (-not $TemporaryScriptPermission) {
+            Write-BootstrapLog "User cancelled the one-time tool start"
+            return
         }
     }
 
@@ -379,10 +405,11 @@ function Invoke-RemoteTool {
 
         Write-Host ""
         Write-Host "$($toolInfo.name) requires Administrator rights. Opening UAC..." -ForegroundColor Yellow
-        if (-not $TemporaryScriptPermission) {
+        if (-not $TemporaryScriptPermission -and -not $TemporarySession) {
             Start-ElevatedBootstrap -SelectedTool ([string]$toolInfo.id)
             return
         }
+        $TemporaryScriptPermission = $true
     }
 
     $toolUri = "$RawBase/$($toolInfo.path)"
@@ -500,6 +527,9 @@ function Invoke-RemoteTool {
 }
 
 try {
+    if ($TemporarySession -and (Get-ExecutionPolicy) -in @("Restricted", "AllSigned")) {
+        throw "Die temporaere Skriptfreigabe ist in dieser Sitzung nicht aktiv. Bitte im Hauptmenue F waehlen."
+    }
     $manifest = Get-Manifest
     Write-BootstrapLog "Fetched manifest.json: $(@($manifest.tools).Count) tool(s)"
 
@@ -509,8 +539,14 @@ try {
     }
 
     if ($Tool -eq "menu") {
-        $Tool = Select-ToolFromMenu -Manifest $manifest
+        $Tool = if ($TemporaryScriptPermission) { "script-permission" } else { Select-ToolFromMenu -Manifest $manifest }
         Write-BootstrapLog "Menu selection: $Tool"
+    }
+
+    if ($Tool -eq "exit") { return }
+    if ($Tool -eq "script-permission") {
+        Start-TemporaryMenu
+        return
     }
 
     Invoke-RemoteTool -Manifest $manifest -SelectedTool $Tool
