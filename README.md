@@ -30,6 +30,8 @@ also applies to child processes. CurrentUser and LocalMachine settings are not
 changed. A blocking MachinePolicy or UserPolicy is respected and reported.
 Choosing `4` under a local `Restricted` or `AllSigned` policy also offers this
 one-time start, a policy overview, or cancellation before any test begins.
+The hardware-test menu description also displays the complete one-time start
+command, including in older starters that do not yet have the `F` selection.
 
 4. Accept the UAC prompt only when the selected tool asks for it.
 

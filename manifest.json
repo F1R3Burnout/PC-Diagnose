@@ -85,7 +85,7 @@
       "id": "hardwarestability",
       "name": "Hardware-Stabilitätstest",
       "category": "pc-test",
-      "description": "Verification-first hardware stability testing: known data/computation is processed by CPU, RAM, GPU, VRAM, and storage, then read back and compared against the expected result. High load/temperature are permitted side effects of individual tests, not the test result itself.",
+      "description": "Prueft CPU, RAM, GPU/VRAM und Datentraeger durch Berechnungen und Ruecklesen mit Ergebnisvergleich.\n    Bei PowerShell-Skriptsperre: F fuer den einmaligen Start waehlen, falls angeboten.\n    Falls F fehlt: Strg+C druecken und diesen Befehl am PowerShell-Prompt eingeben:\n    powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -Command \"& ([scriptblock]::Create((irm 'https://kiwus-it.de/r'))) -Tool hardwarestability\"\n    Die Freigabe gilt nur fuer den neuen Prozess und seine Kindprozesse.",
       "path": "scripts/diagnostics/HardwareStability.ps1",
       "dependencies": [
         "config/HardwareStabilityTools.json",
