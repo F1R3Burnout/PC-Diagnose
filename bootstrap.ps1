@@ -43,6 +43,7 @@ param(
     [switch]$NoDownload,
     [switch]$SkipTelemetry,
     [switch]$HsDryRun,
+    [switch]$TemporaryScriptPermission,
     [long]$SurfaceScanMaxBytes = 0
 )
 
@@ -161,6 +162,101 @@ function Start-ElevatedBootstrap {
     }
 }
 
+function Get-BlockingScriptGroupPolicy {
+    foreach ($scope in @("MachinePolicy", "UserPolicy")) {
+        $policy = [string](Get-ExecutionPolicy -Scope $scope)
+        if ($policy -eq "Undefined") { continue }
+        if ($policy -in @("Restricted", "AllSigned")) {
+            return "${scope}: $policy"
+        }
+        # The first configured group policy has precedence over lower scopes.
+        return $null
+    }
+    return $null
+}
+
+function Read-TemporaryScriptPermission {
+    param([Parameter(Mandatory=$true)][string]$ToolName)
+
+    Write-Host ""
+    Write-Host "PowerShell blockiert lokale Skripte: $(Get-ExecutionPolicy)" -ForegroundColor Yellow
+    Write-Host "[1] $ToolName einmalig in eigenem Prozess starten"
+    Write-Host "[2] Aktuelle Richtlinien anzeigen"
+    Write-Host "[0] Abbrechen"
+    Write-Host "RemoteSigned gilt nur fuer diesen Prozess und seine Kindprozesse, nicht als Datei-Whitelist." -ForegroundColor Gray
+    Write-Host "Die dauerhaften Richtlinien werden nicht geaendert." -ForegroundColor Gray
+
+    while ($true) {
+        $choice = Read-Host "Auswahl [0]"
+        switch ($choice.Trim()) {
+            "1" { return $true }
+            "2" { Get-ExecutionPolicy -List | Format-Table -AutoSize | Out-Host }
+            { $_ -in @("", "0") } { return $false }
+            default { Write-Host "Bitte 1, 2 oder 0 eingeben." -ForegroundColor Yellow }
+        }
+    }
+}
+
+function Start-TemporaryToolProcess {
+    param(
+        [Parameter(Mandatory=$true)][string]$ScriptPath,
+        [Parameter(Mandatory=$true)][hashtable]$ToolArguments,
+        [switch]$RequiresAdmin
+    )
+
+    $blockingPolicy = Get-BlockingScriptGroupPolicy
+    if ($blockingPolicy) {
+        throw "Eine Gruppenrichtlinie blockiert die Skriptausfuehrung ($blockingPolicy). Ein einmaliger Start kann sie nicht uebersteuern."
+    }
+
+    $invocationId = [guid]::NewGuid().ToString("N")
+    $runnerPath = Join-Path $BootstrapLogDir "run-once-$invocationId.ps1"
+    $argumentsPath = Join-Path $BootstrapLogDir "run-once-$invocationId.clixml"
+    $runnerText = @'
+param([Parameter(Mandatory=$true)][string]$ArgumentsPath)
+$ErrorActionPreference = "Stop"
+try {
+    if ((Get-ExecutionPolicy) -in @("Restricted", "AllSigned")) {
+        throw "PowerShell blockiert den einmaligen Start weiterhin. Bitte Get-ExecutionPolicy -List pruefen."
+    }
+    $invocation = Import-Clixml -LiteralPath $ArgumentsPath
+    $toolArguments = $invocation.Arguments
+    & $invocation.ScriptPath @toolArguments
+} catch {
+    Write-Error $_ -ErrorAction Continue
+    exit 1
+}
+'@
+
+    try {
+        # Serialize values rather than embedding paths or user arguments in code.
+        @{ ScriptPath = $ScriptPath; Arguments = $ToolArguments } |
+            Export-Clixml -LiteralPath $argumentsPath -Depth 10
+        [IO.File]::WriteAllText($runnerPath, $runnerText, [Text.UTF8Encoding]::new($true))
+        $executable = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
+        $startArguments = @{
+            FilePath = Join-Path $PSHOME $executable
+            ArgumentList = @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File", ('"{0}"' -f $runnerPath), "-ArgumentsPath", ('"{0}"' -f $argumentsPath))
+            Wait = $true
+            PassThru = $true
+        }
+        if ($RequiresAdmin -and -not (Test-IsAdmin)) {
+            $startArguments.Verb = "RunAs"
+        } else {
+            $startArguments.NoNewWindow = $true
+        }
+
+        Write-Host "Einmaliger Start in eigenem PowerShell-Prozess (RemoteSigned)." -ForegroundColor Cyan
+        Write-BootstrapLog "One-time tool start: $ScriptPath; Process=RemoteSigned; persistent execution policies unchanged"
+        $process = Start-Process @startArguments
+        if ($process.ExitCode -ne 0) {
+            throw "Der einmalige Tool-Start wurde mit Exitcode $($process.ExitCode) beendet."
+        }
+    } finally {
+        Remove-Item -LiteralPath $runnerPath, $argumentsPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Show-ToolList {
     param([Parameter(Mandatory=$true)]$Manifest)
 
@@ -178,6 +274,11 @@ function Show-ToolList {
         $i++
     }
 
+    if (@($Manifest.tools | Where-Object id -eq "hardwarestability").Count -gt 0) {
+        Write-Host "[F] Hardware-Stabilitaetstest einmalig starten (eigener Prozess)" -ForegroundColor Yellow
+        Write-Host "    RemoteSigned nur fuer neuen Prozess und Kindprozesse; keine Datei-Whitelist." -ForegroundColor Gray
+    }
+
     Write-Host ""
 }
 
@@ -189,6 +290,10 @@ function Select-ToolFromMenu {
 
     if ([string]::IsNullOrWhiteSpace($selection)) {
         throw "No selection entered."
+    }
+
+    if ($selection.Trim() -eq "F" -and @($Manifest.tools | Where-Object id -eq "hardwarestability").Count -gt 0) {
+        return "hardwarestability-once"
     }
 
     $number = 0
@@ -233,12 +338,35 @@ function Invoke-RemoteTool {
         [Parameter(Mandatory=$true)][string]$SelectedTool
     )
 
+    if ($SelectedTool -eq "hardwarestability-once") {
+        $SelectedTool = "hardwarestability"
+        $TemporaryScriptPermission = $true
+    }
+
     $toolInfo = @($Manifest.tools | Where-Object { $_.id -eq $SelectedTool -or $_.name -eq $SelectedTool }) | Select-Object -First 1
     if (-not $toolInfo) {
         Write-BootstrapLog "Tool not found: $SelectedTool"
         throw "Tool not found: $SelectedTool"
     }
     Write-BootstrapLog "Resolved tool: id=$($toolInfo.id) name=$($toolInfo.name) requiresAdmin=$($toolInfo.requiresAdmin)"
+
+    if ($TemporaryScriptPermission -and $toolInfo.id -ne "hardwarestability") {
+        throw "TemporaryScriptPermission ist nur fuer den Hardware-Stabilitaetstest vorgesehen."
+    }
+
+    if ($toolInfo.id -eq "hardwarestability") {
+        $blockingPolicy = Get-BlockingScriptGroupPolicy
+        if ($blockingPolicy) {
+            throw "Eine Gruppenrichtlinie blockiert die Skriptausfuehrung ($blockingPolicy). Bitte eine signierte Version bzw. die zustaendige Administration verwenden."
+        }
+        if (-not $TemporaryScriptPermission -and (Get-ExecutionPolicy) -in @("Restricted", "AllSigned")) {
+            $TemporaryScriptPermission = Read-TemporaryScriptPermission -ToolName ([string]$toolInfo.name)
+            if (-not $TemporaryScriptPermission) {
+                Write-BootstrapLog "User cancelled the one-time tool start"
+                return
+            }
+        }
+    }
 
     if ($toolInfo.id -eq "pcdiag") {
         $script:DaysBack = Read-DaysBackForTool -ToolId ([string]$toolInfo.id) -DefaultDays 0
@@ -251,8 +379,10 @@ function Invoke-RemoteTool {
 
         Write-Host ""
         Write-Host "$($toolInfo.name) requires Administrator rights. Opening UAC..." -ForegroundColor Yellow
-        Start-ElevatedBootstrap -SelectedTool ([string]$toolInfo.id)
-        return
+        if (-not $TemporaryScriptPermission) {
+            Start-ElevatedBootstrap -SelectedTool ([string]$toolInfo.id)
+            return
+        }
     }
 
     $toolUri = "$RawBase/$($toolInfo.path)"
@@ -361,6 +491,10 @@ function Invoke-RemoteTool {
     }
 
     Write-BootstrapLog "Launching $($toolInfo.id) with args: $((@($toolArgs.Keys) | ForEach-Object { "$_=$($toolArgs[$_])" }) -join ', ')"
+    if ($TemporaryScriptPermission) {
+        Start-TemporaryToolProcess -ScriptPath $scriptPath -ToolArguments $toolArgs -RequiresAdmin:([bool]$toolInfo.requiresAdmin)
+        return
+    }
     $toolScriptBlock = [scriptblock]::Create([string]$scriptText)
     & $toolScriptBlock @toolArgs
 }

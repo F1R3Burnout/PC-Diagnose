@@ -29,6 +29,10 @@ jobs:
             Write-Host "OK $($file.FullName)"
           }
 
+      - name: Test one-time launcher (no hardware load)
+        shell: powershell
+        run: .\tests\Bootstrap.Tests.ps1
+
       - name: Validate manifest JSON
         shell: pwsh
         run: |

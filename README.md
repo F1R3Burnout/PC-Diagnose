@@ -19,7 +19,17 @@ irm https://kiwus-it.de/r|iex
 2 = NetzwerkDiagnose
 3 = HDMI- und Display-Diagnose
 4 = Hardware-Stabilitätstest
+F = Hardware-Stabilitaetstest einmalig starten (eigener Prozess)
 ```
+
+If local PowerShell policy blocks unsigned modules, choose `F` for a one-time
+Hardware-Stabilitaetstest run. It launches only the selected test and its modules
+in a separate PowerShell process with `RemoteSigned`, then closes that process
+when the test finishes. This is a process setting, not a per-file allowlist; it
+also applies to child processes. CurrentUser and LocalMachine settings are not
+changed. A blocking MachinePolicy or UserPolicy is respected and reported.
+Choosing `4` under a local `Restricted` or `AllSigned` policy also offers this
+one-time start, a policy overview, or cancellation before any test begins.
 
 4. Accept the UAC prompt only when the selected tool asks for it.
 
