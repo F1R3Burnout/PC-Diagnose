@@ -114,6 +114,8 @@ function Invoke-HsCpuTortureTest {
     $foundPatterns = @()
     $peakTemp = $null
     $cancelled = $false
+    $exitedEarly = $false
+    $earlyExitCode = $null
 
     try {
         while ([datetime]::Now -lt $deadline) {
@@ -141,7 +143,14 @@ function Invoke-HsCpuTortureTest {
             if ($foundPatterns.Count -gt 0) { break }
 
             if ($processHasExited) {
-                Add-Content -LiteralPath $logPath -Value "Process exited early with code $($process.ExitCode)."
+                $earlyExitCode = try { $process.ExitCode } catch { $null }
+                Add-Content -LiteralPath $logPath -Value "Process exited early with code $earlyExitCode."
+                # Exiting before the planned duration means the torture test
+                # did not run for the tested range - that must never be
+                # reported as PASS (a crashed or blocked prime95.exe would
+                # otherwise look like a clean result). Exiting only after the
+                # deadline was reached is a normal end of the run.
+                if ([datetime]::Now -lt $deadline) { $exitedEarly = $true }
                 break
             }
 
@@ -170,9 +179,13 @@ function Invoke-HsCpuTortureTest {
         $result.Status = "INTERRUPTED"
         $result.Reason = "$StageName was cancelled (Ctrl+C or thermal abort) after $([math]::Round($result.DurationSeconds,1))s."
     } elseif ($result.FailurePatterns.Count -gt 0) {
+        # Verified failure evidence always wins, even if the process then exited.
         $result.Status = "FAIL"
         $label = if ($StageName -eq "CPU_COMPUTE") { "Verified CPU calculation error" } else { "Cache/memory-path workload error" }
         $result.Reason = "$label occurred ($($result.FailurePatterns -join ', ')). CPU core stability, voltage, BIOS settings, or related platform stability should be investigated."
+    } elseif ($exitedEarly) {
+        $result.Status = "BLOCKED"
+        $result.Reason = "Prime95 exited after $([math]::Round($result.DurationSeconds,1))s (exit code $earlyExitCode) before the planned $DurationMinutes minute(s) were reached and without logging a calculation error. The planned test range was not covered, so no PASS can be given. Check whether antivirus, missing permissions, or an instant crash stopped prime95.exe."
     } else {
         $result.Status = "PASS"
         $note = if (Test-Path -LiteralPath $resultsPath) {

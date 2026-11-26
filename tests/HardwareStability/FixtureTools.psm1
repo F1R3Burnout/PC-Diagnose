@@ -72,7 +72,7 @@ function New-HsFakePrime95 {
         results.txt containing the given failure text into its own working
         directory (matching where the real tool logs), then exits.
     #>
-    param([Parameter(Mandatory=$true)][string]$Path, [string]$FailureText = "")
+    param([Parameter(Mandatory=$true)][string]$Path, [string]$FailureText = "", [int]$RunMilliseconds = 2500)
     if ($FailureText -match '["\r\n]') { throw "FailureText must not contain quotes or newlines (fixture generator keeps this simple)." }
     $literal = if ($FailureText) { '"' + $FailureText + '"' } else { "null" }
     $src = @'
@@ -86,12 +86,12 @@ class FakePrime95 {
         if (!string.IsNullOrEmpty(failureText)) {
             File.WriteAllText("results.txt", failureText + Environment.NewLine);
         }
-        Thread.Sleep(2000);
+        Thread.Sleep(Math.Max(0, __RUN_MS__ - 500));
         return 0;
     }
 }
 '@
-    $src = $src.Replace("__FAILURE_TEXT__", $literal)
+    $src = $src.Replace("__FAILURE_TEXT__", $literal).Replace("__RUN_MS__", [string]$RunMilliseconds)
     New-HsFixtureExe -CSharpSource $src -OutputPath $Path
 }
 

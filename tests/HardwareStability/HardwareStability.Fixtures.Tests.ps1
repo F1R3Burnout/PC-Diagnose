@@ -19,6 +19,7 @@ Import-Module (Join-Path $LibRoot "MemoryTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "GpuTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "StorageWriteVerify.psm1") -Force
 Import-Module (Join-Path $LibRoot "Reporting.psm1") -Force
+Import-Module (Join-Path $LibRoot "Telemetry.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "FixtureTools.psm1") -Force
 
 $script:PassCount = 0
@@ -66,7 +67,9 @@ Assert-True ($ramFail.Status -eq "FAIL") "HS-010 RAM Error fixture (exit code 1)
 
 Write-Host "`n=== HS-011 / HS-012 / HS-013 / HS-014 Prime95 fixtures ===" -ForegroundColor Cyan
 $p95Cache = Join-Path $FixtureCache "prime95"
-New-HsFakePrime95 -Path (Join-Path $p95Cache "prime95.exe") -FailureText ""
+# Runs longer than the 3 s test duration, so the harness stops it at the
+# deadline - the normal end of a clean torture test.
+New-HsFakePrime95 -Path (Join-Path $p95Cache "prime95.exe") -FailureText "" -RunMilliseconds 30000
 $cpuPass = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "cpu_pass_out") -DurationMinutes 0.05 -LogicalProcessors 8 -PhysicalCores 4 -NoDownload
 Assert-True ($cpuPass.Status -eq "PASS") "HS-011 Prime95 PASS fixture (no failure text) => PASS"
 Assert-True ($cpuPass.Workers -eq 4) "HS-014 CPU_COMPUTE uses one worker per physical core (4)"
@@ -81,6 +84,45 @@ New-HsFakePrime95 -Path (Join-Path $p95Cache "prime95.exe") -FailureText "ROUND 
 $cpuRoundoff = Invoke-HsCpuTortureTest -StageName "CPU_CACHE_IMC" -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "cpu_roundoff_out") -DurationMinutes 0.1 -LogicalProcessors 8 -PhysicalCores 4 -NoDownload
 Assert-True ($cpuRoundoff.Status -eq "FAIL") "HS-013 Prime95 ROUND OFF fixture => FAIL"
 Assert-True ($cpuRoundoff.Workers -eq 8) "HS-014 CPU_CACHE_IMC uses one worker per logical processor (8), distinct from CPU_COMPUTE (4)"
+
+Remove-Item -Recurse -Force $p95Cache -ErrorAction SilentlyContinue
+New-HsFakePrime95 -Path (Join-Path $p95Cache "prime95.exe") -FailureText "" -RunMilliseconds 1000
+$cpuEarly = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "cpu_early_out") -DurationMinutes 0.25 -LogicalProcessors 8 -PhysicalCores 4 -NoDownload
+Assert-True ($cpuEarly.Status -eq "BLOCKED") "HS-051 Prime95 exiting before the planned duration without errors => BLOCKED, never PASS (got $($cpuEarly.Status))"
+
+Write-Host "`n=== HS-052 / HS-053 Tool integrity checks ===" -ForegroundColor Cyan
+$nugetBase64 = "NXcNYlWoXe5cz9sb8Huo6x2dCZVYkhwKtgE00n/MoI8V4ZI/7/t+EI5bOhQFlZfFjjqM8+U6prjU/aARt7H/tA=="
+Assert-True ((ConvertTo-HsHexHash -Value $nugetBase64 -ByteLength 64) -eq "35770d6255a85dee5ccfdb1bf07ba8eb1d9d099558921c0ab60134d27fcca08f15e1923feffb7e108e5b3a14059597c58e3a8cf3e53aa6b8d4fda011b7b1ffb4") "HS-052 NuGet base64 SHA512 is converted to the matching hex digest"
+Assert-True ((ConvertTo-HsHexHash -Value ("35770d6255a85dee5ccfdb1bf07ba8eb1d9d099558921c0ab60134d27fcca08f15e1923feffb7e108e5b3a14059597c58e3a8cf3e53aa6b8d4fda011b7b1ffb4".ToUpperInvariant()) -ByteLength 64) -eq "35770d6255a85dee5ccfdb1bf07ba8eb1d9d099558921c0ab60134d27fcca08f15e1923feffb7e108e5b3a14059597c58e3a8cf3e53aa6b8d4fda011b7b1ffb4") "HS-052 Hex SHA512 is accepted case-insensitively"
+Assert-True ((ConvertTo-HsHexHash -Value "not-a-hash" -ByteLength 64) -eq "") "HS-052 Malformed hash never yields a comparable digest"
+Assert-True ((ConvertTo-HsHexHash -Value "AAAA" -ByteLength 64) -eq "") "HS-052 Base64 of the wrong length is rejected"
+$noHashConfig = [pscustomobject]@{ tools = [pscustomobject]@{ nohash = [pscustomobject]@{
+    version = "1"; license = "test"; executable = "nohash.exe"; archiveType = "exe"; downloadUrl = "https://example.invalid/nohash.exe" } } }
+$noHash = Resolve-HsTool -ToolId "nohash" -ToolConfig $noHashConfig -ToolCacheRoot (Join-Path $FixtureCache "nohash_cache")
+Assert-True ((-not $noHash.Available) -and $noHash.Reason -match "No integrity hash") "HS-053 A tool without any configured hash is never downloaded (fail closed)"
+$realConfig = Get-HsToolConfig -ConfigPath $ConfigPath
+$unhashed = @($realConfig.tools.PSObject.Properties | Where-Object {
+    $t = $_.Value
+    [string]::IsNullOrWhiteSpace([string](Get-HsPropertyOrDefault -InputObject $t -Name "sha256")) -and
+    [string]::IsNullOrWhiteSpace([string](Get-HsPropertyOrDefault -InputObject $t -Name "sha512")) -and
+    [string]::IsNullOrWhiteSpace([string](Get-HsPropertyOrDefault -InputObject $t -Name "md5"))
+} | ForEach-Object { $_.Name })
+Assert-True ($unhashed.Count -eq 0) "HS-053 Every configured third-party tool has an integrity hash ($($unhashed -join ', '))"
+$lhmEntry = $realConfig.tools.librehardwaremonitor
+$missingDeps = @(@($lhmEntry.desktopDependencies) | Where-Object { -not ($realConfig.tools.PSObject.Properties.Name -contains $_) })
+Assert-True ([string]$lhmEntry.executableDesktop -match "\\net472\\" -and $missingDeps.Count -eq 0) "HS-053 PS 5.1 telemetry uses the net472 build and every desktop dependency is defined ($($missingDeps -join ', '))"
+
+Write-Host "`n=== HS-054 Telemetry status reporting ===" -ForegroundColor Cyan
+$pawnStatus = Get-HsPawnIoStatus
+Assert-True ($pawnStatus.Installed -is [bool]) "HS-054 PawnIO detection returns a boolean without throwing"
+$noCpuStatus = New-HsTelemetryStatus
+$noCpuStatus.Initialized = $true
+$noCpuStatus.GpuTemperatureAvailable = $true
+$noCpuStatus.Notes = @("No CPU temperature: test <note>")
+$card = New-HsTelemetryHtmlCard -TelemetryStatus $noCpuStatus
+Assert-True ($card -match "CPU temperature:</strong> no" -and $card -match "test &lt;note&gt;") "HS-054 Report states a missing CPU temperature and HTML-encodes notes"
+$skippedCard = New-HsTelemetryHtmlCard -TelemetrySkipped
+Assert-True ($skippedCard -match "SkipTelemetry") "HS-054 Report states that telemetry was disabled"
 
 Write-Host "`n=== HS-015 / HS-016 / HS-018 / HS-019 GPU Compute ===" -ForegroundColor Cyan
 $gpuPass = Invoke-HsGpuComputeVerification -ElementCount 1024 -Iterations 1
