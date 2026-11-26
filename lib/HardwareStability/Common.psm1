@@ -108,16 +108,25 @@ function Format-HsDuration {
 function Write-HsStageProgress {
     <#
     .SYNOPSIS
-        Live console progress for the running stage (child bar under the
-        overall bar). Throttled to a few updates per second so tight loops
-        (surface scan, write/verify) are not slowed down by rendering.
+        Live console progress for the running stage, throttled to a few
+        updates per second so tight loops (surface scan, write/verify) are not
+        slowed down by rendering.
 
     .DESCRIPTION
+        Uses ONE progress record (Id 1). The run position ("Komponente 2 von
+        8") is part of the activity text via $global:HsProgressContext, and
+        the bar itself shows the stage's own progress. An earlier version drew
+        the stage as a child record (-ParentId) under an overall record; on a
+        real Windows PowerShell 5.1 console only the overall bar appeared and
+        sat at 0% for the whole stage, so nothing visibly moved.
+
+        Every 10% a plain line is also written, so progress stays visible in
+        the scrollback and in hosts that do not draw progress bars.
+
         $ProgressPreference is set locally on purpose: the launcher sets it to
         SilentlyContinue globally (to keep Invoke-WebRequest fast), which would
-        otherwise hide every bar. Pass -Percent -1 when no real percentage is
-        known; the bar then only shows the status text instead of a guessed
-        value.
+        otherwise hide the bar. Pass -Percent -1 when no real percentage is
+        known; then only the status text is shown, never a guessed value.
     #>
     param(
         [Parameter(Mandatory=$true)][string]$Activity,
@@ -129,14 +138,32 @@ function Write-HsStageProgress {
     )
     $ProgressPreference = "Continue"
     try {
+        $context = [string](Get-Variable -Name HsProgressContext -Scope Global -ValueOnly -ErrorAction SilentlyContinue)
+        $fullActivity = if ($context) { "${context}: $Activity" } else { $Activity }
+
         if ($Completed) {
-            Write-Progress -Id 2 -ParentId 1 -Activity $Activity -Completed
+            # Inside a run the next stage simply replaces the record; outside
+            # a run (direct calls, tests) the bar is removed.
+            if (-not $context) { Write-Progress -Id 1 -Activity $fullActivity -Completed }
+            $global:HsProgressMilestone = $null
             return
         }
+
+        if ($Percent -ge 0) {
+            $step = [int][math]::Floor([math]::Min(100, $Percent) / 10)
+            $milestone = Get-Variable -Name HsProgressMilestone -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+            if ($null -eq $milestone -or $milestone.Activity -ne $fullActivity) {
+                $global:HsProgressMilestone = @{ Activity = $fullActivity; Step = $step }
+            } elseif ($step -gt $milestone.Step) {
+                $milestone.Step = $step
+                Write-Host ("    {0}: {1}% - {2}" -f $Activity, ($step * 10), $Status) -ForegroundColor DarkGray
+            }
+        }
+
         $now = [datetime]::UtcNow
         if (-not $Force -and ($now - $script:HsProgressLastRender).TotalMilliseconds -lt 250) { return }
         $script:HsProgressLastRender = $now
-        $progressArgs = @{ Id = 2; ParentId = 1; Activity = $Activity; Status = $(if ($Status) { $Status } else { " " }) }
+        $progressArgs = @{ Id = 1; Activity = $fullActivity; Status = $(if ($Status) { $Status } else { " " }) }
         if ($Percent -ge 0) { $progressArgs.PercentComplete = [int][math]::Min(100, [math]::Max(0, [math]::Floor($Percent))) }
         if ($SecondsRemaining -ge 0) { $progressArgs.SecondsRemaining = [int][math]::Ceiling($SecondsRemaining) }
         Write-Progress @progressArgs
@@ -146,23 +173,28 @@ function Write-HsStageProgress {
 }
 
 function Write-HsOverallProgress {
-    <# Top-level bar: which component of the run is active. #>
+    <#
+        Sets the run position shown in front of every stage's progress text
+        (e.g. "Hardware-Stabilitaetstest (Extended (Lang)), Komponente 1 von 8")
+        and shows the stage as started. -Completed clears it at the end.
+    #>
     param(
         [Parameter(Mandatory=$true)][string]$Activity,
         [string]$Status = "",
-        [double]$Percent = -1,
+        [string]$Stage = "",
         [switch]$Completed
     )
     $ProgressPreference = "Continue"
     try {
         if ($Completed) {
-            Write-Progress -Id 2 -ParentId 1 -Activity $Activity -Completed
+            $global:HsProgressContext = $null
+            $global:HsProgressMilestone = $null
             Write-Progress -Id 1 -Activity $Activity -Completed
             return
         }
-        $progressArgs = @{ Id = 1; Activity = $Activity; Status = $(if ($Status) { $Status } else { " " }) }
-        if ($Percent -ge 0) { $progressArgs.PercentComplete = [int][math]::Min(100, [math]::Max(0, [math]::Floor($Percent))) }
-        Write-Progress @progressArgs
+        $global:HsProgressContext = if ($Status) { "$Activity, $Status" } else { $Activity }
+        $stageText = if ($Stage) { "${global:HsProgressContext}: $Stage" } else { $global:HsProgressContext }
+        Write-Progress -Id 1 -Activity $stageText -Status "wird gestartet ..."
     } catch {}
 }
 

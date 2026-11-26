@@ -403,7 +403,7 @@ function Invoke-HsStageWrapper {
     [void]$script:HsStages.Add($stage)
     Start-HsStage $stage
     Write-Progress2 "START: $Component" "Cyan"
-    Write-HsOverallProgress -Activity $script:HsOverallActivity -Status "$($script:HsOverallStatus) - $Component" -Percent $script:HsOverallPercent
+    Write-HsOverallProgress -Activity $script:HsOverallActivity -Status $script:HsOverallStatus -Stage $Component
 
     if ($idleState.State -eq "ABORT") {
         Complete-HsStage $stage -Status "THERMAL_ABORT" -Assessment "Configured safety threshold was already reached before this stage's load began."
@@ -473,7 +473,6 @@ function Invoke-HsComponentStages {
     foreach ($key in $keys) {
         $keyIndex++
         $script:HsOverallStatus = "Komponente $keyIndex von $($keys.Count)"
-        $script:HsOverallPercent = 100.0 * ($keyIndex - 1) / [math]::Max(1, $keys.Count)
 
         switch ($key) {
             "CPU" {

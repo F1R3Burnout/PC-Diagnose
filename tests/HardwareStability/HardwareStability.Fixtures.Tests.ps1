@@ -141,6 +141,40 @@ New-HsFakePrime95 -Path (Join-Path $p95Cache "prime95.exe") -FailureText "" -Run
 $cpuEarly = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "cpu_early_out") -DurationMinutes 0.25 -LogicalProcessors 8 -PhysicalCores 4 -NoDownload
 Assert-True ($cpuEarly.Status -eq "BLOCKED") "HS-051 Prime95 exiting before the planned duration without errors => BLOCKED, never PASS (got $($cpuEarly.Status))"
 
+Write-Host "`n=== HS-061 Console progress is emitted and fills ===" -ForegroundColor Cyan
+# Runs a stage in a separate runspace and collects its progress records, with
+# the global ProgressPreference set to SilentlyContinue exactly like the
+# launcher does. Rendering itself is the console's job and cannot be tested
+# here; this proves the records exist, are not suppressed, use ONE top-level
+# bar (no -ParentId child that a console may not show) and actually advance.
+Remove-Item -Recurse -Force $p95Cache -ErrorAction SilentlyContinue
+New-HsFakePrime95 -Path (Join-Path $p95Cache "prime95.exe") -FailureText "" -RunMilliseconds 30000
+$progressRunspace = [powershell]::Create()
+try {
+    [void]$progressRunspace.AddScript({
+        param($libRoot, $cacheRoot, $configPath)
+        $global:ProgressPreference = "SilentlyContinue"
+        Import-Module (Join-Path $libRoot "Common.psm1") -Force
+        Import-Module (Join-Path $libRoot "CpuTests.psm1") -Force
+        Write-HsOverallProgress -Activity "Fixture" -Status "Komponente 1 von 1" -Stage "CPU Compute"
+        $r = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $configPath -ToolCacheRoot $cacheRoot `
+            -OutputDirectory (Join-Path $cacheRoot "cpu_progress_out") -DurationMinutes 0.1 -LogicalProcessors 2 -PhysicalCores 1 -NoDownload
+        Write-HsOverallProgress -Activity "Fixture" -Completed
+        $r.Status
+    }).AddArgument([string]$LibRoot).AddArgument([string]$FixtureCache).AddArgument([string]$ConfigPath)
+    $progressStatus = @($progressRunspace.Invoke())
+    $progressRecords = @($progressRunspace.Streams.Progress)
+} finally {
+    $progressRunspace.Dispose()
+}
+$filled = @($progressRecords | Where-Object { $_.PercentComplete -ge 0 -and $_.Activity -match "Fixture, Komponente 1 von 1: " })
+$percentValues = @($filled | ForEach-Object { $_.PercentComplete })
+Assert-True ($progressStatus -contains "PASS") "HS-061 Stage still PASSes while reporting progress (got $($progressStatus -join ','))"
+Assert-True ($filled.Count -ge 3) "HS-061 Progress records are emitted despite a global SilentlyContinue ($($filled.Count) record(s) with a percentage)"
+Assert-True (@($progressRecords | Where-Object { $_.ParentActivityId -ge 0 }).Count -eq 0) "HS-061 Only one top-level bar is used (no child records)"
+Assert-True ($percentValues.Count -ge 2 -and $percentValues[-1] -gt $percentValues[0]) "HS-061 The bar fills over time ($($percentValues -join ' -> ')%)"
+Assert-True (@($filled | Where-Object { $_.StatusDescription -match "\d+:\d\d von \d+:\d\d" }).Count -ge 1) "HS-061 Status shows elapsed and planned time"
+
 Write-Host "`n=== HS-052 / HS-053 Tool integrity checks ===" -ForegroundColor Cyan
 $nugetBase64 = "NXcNYlWoXe5cz9sb8Huo6x2dCZVYkhwKtgE00n/MoI8V4ZI/7/t+EI5bOhQFlZfFjjqM8+U6prjU/aARt7H/tA=="
 Assert-True ((ConvertTo-HsHexHash -Value $nugetBase64 -ByteLength 64) -eq "35770d6255a85dee5ccfdb1bf07ba8eb1d9d099558921c0ab60134d27fcca08f15e1923feffb7e108e5b3a14059597c58e3a8cf3e53aa6b8d4fda011b7b1ffb4") "HS-052 NuGet base64 SHA512 is converted to the matching hex digest"

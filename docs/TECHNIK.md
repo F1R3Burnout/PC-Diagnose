@@ -218,8 +218,10 @@ of the write/verify check, surface scan, SMART self-test type - see
 `lib/HardwareStability/Profiles.psm1`. `-Profile` still selects one directly;
 `-NoPrompt` never asks (Quick when no profile is given).
 
-**Live progress**: every stage shows a progress bar under an overall bar
-("Komponente n von m"). Real percentages where the work is countable
+**Live progress**: one progress bar at the top of the console, labelled
+with the run position ("Hardware-Stabilitaetstest (Extended (Lang)),
+Komponente 1 von 8: CPU Compute"); the bar itself fills with the running
+stage's progress, and every 10% a plain line is also written. Real percentages where the work is countable
 (surface scan in bytes with MB/s and remaining time, write/verify in MB, RAM
 passes and write/read phases parsed from MemoryChecker, SMART self-test as
 reported by the drive, GPU compute iterations); elapsed against planned time

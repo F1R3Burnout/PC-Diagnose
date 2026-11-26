@@ -8,7 +8,10 @@ Letztes Update: 2026-11-26 (Telemetrie unter PS 5.1, Review-Fixes, PCDiagLite-Te
   geschätzten Minuten der Lastphasen. Der Starter erzwingt nicht mehr Quick und
   reicht Profil/Komponenten/Optionen jetzt auch über die UAC-Erhöhung weiter
   (gingen vorher verloren).
-- Fortschritt: Gesamtbalken + Balken je Phase (echte Prozente für Surface-Scan,
+- Fortschritt: ein Balken, der sich mit der laufenden Phase füllt; die Position
+  im Lauf ("Komponente 1 von 8") steht im Balkentitel, alle 10 % zusätzlich eine
+  Textzeile. (Erste Version mit Unterbalken: auf einer echten PS-5.1-Konsole war
+  nur der Gesamtbalken bei 0 % sichtbar.) Echte Prozente für Surface-Scan,
   Schreib-/Lesetest, RAM-Durchläufe, SMART-Selbsttest, GPU Compute; Zeitanteil
   für Prime95, VRAM, GPU-Last, Systemtest).
 - System Stability belastet jetzt CPU + GPU + RAM gleichzeitig.
