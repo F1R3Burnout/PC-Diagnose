@@ -14,6 +14,20 @@ function Assert-True {
     if (-not $Condition) { throw "Assertion failed: $Message" }
 }
 
+# "irm https://kiwus-it.de/r | iex" runs the launcher's param block as code:
+# every parameter becomes a variable WITH its validation attributes, and its
+# default value is validated too (unlike a normal script call). A default
+# outside a [ValidateSet] then aborts every start before anything happens.
+# Only the param block is evaluated here - no download, no menu.
+$paramBlockText = $bootstrapAst.ParamBlock.Extent.Text
+$iexError = $null
+try {
+    & { Invoke-Expression $paramBlockText } | Out-Null
+} catch {
+    $iexError = $_.Exception.Message
+}
+Assert-True ($null -eq $iexError) "Launcher param block survives 'irm | iex' with its default values ($iexError)"
+
 # Load launcher functions without downloading tools or running active tests.
 foreach ($definition in $bootstrapAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($definition.Extent.Text))

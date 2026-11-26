@@ -37,8 +37,10 @@ param(
     [switch]$IncludeSubnetDiscovery,
     [switch]$NoInternetTest,
     [switch]$NoWriteTests,
-    # Empty = the hardware test asks for Kurz/Mittel/Lang itself.
-    [ValidateSet("Quick","Standard","Extended")]
+    # Empty = the hardware test asks for Kurz/Mittel/Lang itself. Checked
+    # below instead of with [ValidateSet]: "irm ... | iex" turns this param
+    # block into variable declarations, and PowerShell then validates the
+    # DEFAULT value too - an empty default with ValidateSet aborts every start.
     [string]$Profile = "",
     [string]$Components = "CPU,Cache,RAM,GPU,VRAM,Storage,PCIe,System",
     [switch]$NoDownload,
@@ -51,6 +53,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+if ($Profile -and $Profile -notin @("Quick", "Standard", "Extended")) {
+    throw "Unbekanntes Profil '$Profile'. Erlaubt: Quick (Kurz), Standard (Mittel), Extended (Lang) oder leer fuer die Auswahl beim Start."
+}
 $DaysBackWasProvided = $PSBoundParameters.ContainsKey("DaysBack") -or [bool]$DaysBackProvided
 $BootstrapArguments = @{}
 foreach ($entry in $PSBoundParameters.GetEnumerator()) {

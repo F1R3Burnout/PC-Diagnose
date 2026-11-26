@@ -53,7 +53,8 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("Quick","Standard","Extended")]
+    # No [ValidateSet] with an empty default (it breaks when the param block
+    # is run as code, e.g. via Invoke-Expression); validated below instead.
     [string]$Profile = "",
 
     [string]$Components = "CPU,Cache,RAM,GPU,VRAM,Storage,PCIe,System",
@@ -75,6 +76,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($Profile -and $Profile -notin @("Quick", "Standard", "Extended")) {
+    throw "Unknown profile '$Profile'. Use Quick (Kurz), Standard (Mittel), Extended (Lang), or omit it to choose at start."
+}
 $ToolName = "Hardware-Stabilitaetstest"
 $ToolVersion = "1.0"
 
@@ -179,8 +183,6 @@ if (-not $Profile) {
     if ($DryRun -or -not (Test-HsInteractiveConsole)) {
         $Profile = "Quick"
     } else {
-        # Not assigned to $Profile directly: the parameter keeps its
-        # ValidateSet, so assigning "" (cancel) would throw.
         $chosenProfile = Select-HsProfileInteractive
         if (-not $chosenProfile) {
             Write-Host "Abgebrochen - es wurde kein Test gestartet." -ForegroundColor Yellow
