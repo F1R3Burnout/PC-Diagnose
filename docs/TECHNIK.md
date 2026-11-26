@@ -251,6 +251,20 @@ same report as "(Retest n, x min)"; they add evidence and never replace the
 original result. PCIe/WHEA is not offered because it only reads past event
 log entries. Unattended: `-RetestComponents "Cache,RAM" -RetestMinutes 30`.
 
+**PawnIO driver**: CPU temperature and motherboard/VRM sensors need the
+signed PawnIO driver. If it is missing, an interactive run asks once at start
+whether to install it ([J/n]); `-InstallPawnIO` installs it without asking,
+`-NoDriverInstall` never offers it. The official installer (2.2.0) is
+SHA256-verified against the winget-pkgs manifest, must have a valid
+Authenticode signature, and is run with the publisher's silent switches
+(`-install -silent`). It stays installed and can be removed via Windows
+"Apps" (PawnIO). If Windows asks for a restart, CPU temperatures are
+available from the next run. Everything else the hardware test needs
+(Prime95, MemoryChecker, memtest_vulkan, smartmontools,
+LibreHardwareMonitorLib and its .NET Framework libraries) is downloaded
+and hash-verified automatically; the Vulkan runtime for the VRAM test comes
+with the graphics driver.
+
 **Thermal Guard**: conservative default abort/warning temperatures for CPU,
 GPU core, GPU hotspot, NVMe, and VRM stop an active stage and produce a
 partial report instead of continuing past a safety threshold. Telemetry (via

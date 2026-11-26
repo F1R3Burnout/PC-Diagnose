@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [string]$ToolCacheRoot = "",
-    [switch]$RequireCpuTemperature
+    [switch]$RequireCpuTemperature,
+    # Installs the PawnIO kernel driver first. Only for machines where that is
+    # wanted (e.g. a throwaway CI runner) - it stays installed.
+    [switch]$InstallPawnIO
 )
 
 # Smoke test for the telemetry load path on the CURRENT host (run it once under
@@ -22,7 +25,15 @@ Import-Module (Join-Path $libRoot "ToolManager.psm1") -Force
 Import-Module (Join-Path $libRoot "Telemetry.psm1") -Force
 
 $failures = @()
-$ok = Initialize-HsTelemetry -ConfigPath $configPath -ToolCacheRoot $ToolCacheRoot
+$installNote = ""
+if ($InstallPawnIO) {
+    $install = Install-HsPawnIo -ConfigPath $configPath -ToolCacheRoot $ToolCacheRoot
+    $install | Format-List | Out-String | Write-Host
+    $installNote = $install.Message
+    if (-not $install.Installed) { $failures += "PawnIO installation failed: $($install.Message)" }
+    if (-not (Get-HsPawnIoStatus).Installed) { $failures += "PawnIO is not registered after installation" }
+}
+$ok = Initialize-HsTelemetry -ConfigPath $configPath -ToolCacheRoot $ToolCacheRoot -PawnIoInstallNote $installNote
 $status = Get-HsTelemetryStatus
 $status | ConvertTo-Json -Depth 4 | Write-Host
 

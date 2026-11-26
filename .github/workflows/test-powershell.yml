@@ -72,6 +72,10 @@ jobs:
         shell: pwsh
         run: .\tests\HardwareStability\Telemetry.Smoke.ps1 -ToolCacheRoot "$env:RUNNER_TEMP\telemetry-pwsh"
 
+      - name: PawnIO driver install (throwaway runner) and telemetry with it (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\tests\HardwareStability\Telemetry.Smoke.ps1 -InstallPawnIO -ToolCacheRoot "$env:RUNNER_TEMP\telemetry-pawnio"
+
   hardware-stability-fixtures:
     runs-on: windows-latest
 

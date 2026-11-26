@@ -120,6 +120,81 @@ function Get-HsPawnIoStatus {
     }
 }
 
+function Install-HsPawnIo {
+    <#
+    .SYNOPSIS
+        Installs the PawnIO driver (needed by LibreHardwareMonitor for CPU
+        temperature and motherboard/VRM sensors) from its official release.
+
+    .DESCRIPTION
+        Only called after the user agreed (or with -InstallPawnIO). The
+        installer is hash-verified by ToolManager and must additionally carry
+        a valid Authenticode signature before it is executed. Uses the
+        publisher's silent switches ("-install -silent"). Must run BEFORE
+        telemetry is initialized: LibreHardwareMonitor reads the PawnIO
+        registration once when it first touches the driver.
+        Returns a status object; never throws.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$ConfigPath,
+        [Parameter(Mandatory=$true)][string]$ToolCacheRoot,
+        [switch]$NoDownload
+    )
+
+    $result = [pscustomobject]@{
+        Installed       = $false
+        AlreadyPresent  = $false
+        RebootRequired  = $false
+        ExitCode        = $null
+        Version         = ""
+        Message         = ""
+    }
+
+    $before = Get-HsPawnIoStatus
+    if ($before.Installed) {
+        $result.Installed = $true
+        $result.AlreadyPresent = $true
+        $result.Version = $before.Version
+        $result.Message = "PawnIO $($before.Version) is already installed."
+        return $result
+    }
+
+    try {
+        $cfg = Get-HsToolConfig -ConfigPath $ConfigPath
+        $tool = Resolve-HsTool -ToolId "pawnio" -ToolConfig $cfg -ToolCacheRoot $ToolCacheRoot -NoDownload:$NoDownload
+        if (-not $tool.Available) {
+            $result.Message = "PawnIO installer not available: $($tool.Reason)"
+            return $result
+        }
+
+        $signature = Get-AuthenticodeSignature -FilePath $tool.ExecutablePath
+        if ($signature.Status -ne "Valid") {
+            $result.Message = "PawnIO installer signature is not valid ($($signature.Status)) - not executed."
+            return $result
+        }
+
+        $process = Start-Process -FilePath $tool.ExecutablePath -ArgumentList @("-install", "-silent") -Wait -PassThru -WindowStyle Hidden
+        $result.ExitCode = $process.ExitCode
+        # 0 = success; 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) = installed, the
+        # driver becomes usable after a restart (PawnIO 2.2.0 release notes).
+        if ($process.ExitCode -eq 3010) { $result.RebootRequired = $true }
+
+        $after = Get-HsPawnIoStatus
+        $result.Installed = $after.Installed
+        $result.Version = $after.Version
+        if ($after.Installed -and $result.RebootRequired) {
+            $result.Message = "PawnIO $($after.Version) installed; Windows needs a restart before the driver can be used (CPU temperature available from the next run)."
+        } elseif ($after.Installed) {
+            $result.Message = "PawnIO $($after.Version) installed (signature: $($signature.SignerCertificate.Subject))."
+        } else {
+            $result.Message = "PawnIO installer finished with exit code $($process.ExitCode) but PawnIO is not registered."
+        }
+    } catch {
+        $result.Message = "PawnIO installation failed: $($_.Exception.Message)"
+    }
+    return $result
+}
+
 function New-HsTelemetryStatus {
     $isDesktop = ([string]$PSVersionTable.PSEdition -ne "Core")
     return [pscustomobject]@{
@@ -129,6 +204,7 @@ function New-HsTelemetryStatus {
         LibraryPath             = ""
         PawnIoInstalled         = $false
         PawnIoVersion           = ""
+        PawnIoInstallNote       = ""
         HardwareCount           = 0
         SensorValueCount        = 0
         CpuTemperatureAvailable = $false
@@ -233,12 +309,17 @@ function Initialize-HsTelemetry {
     param(
         [Parameter(Mandatory=$true)][string]$ConfigPath,
         [Parameter(Mandatory=$true)][string]$ToolCacheRoot,
-        [switch]$NoDownload
+        [switch]$NoDownload,
+        [string]$PawnIoInstallNote = ""
     )
 
     if ($script:HsTelemetryAvailable) { return $true }
 
     $script:HsTelemetryStatus = New-HsTelemetryStatus
+    if ($PawnIoInstallNote) {
+        $script:HsTelemetryStatus.PawnIoInstallNote = $PawnIoInstallNote
+        Add-HsTelemetryNote $PawnIoInstallNote
+    }
     $pawnIo = Get-HsPawnIoStatus
     $script:HsTelemetryStatus.PawnIoInstalled = $pawnIo.Installed
     $script:HsTelemetryStatus.PawnIoVersion = $pawnIo.Version

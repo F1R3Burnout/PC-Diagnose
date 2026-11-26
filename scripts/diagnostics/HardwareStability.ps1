@@ -46,6 +46,13 @@
 .PARAMETER RetestMinutes
     Duration per component for -RetestComponents (default 10).
 
+.PARAMETER InstallPawnIO
+    Installs the PawnIO driver (CPU temperature) without asking if it is
+    missing. Without it, an interactive run asks once at start.
+
+.PARAMETER NoDriverInstall
+    Never installs or offers the PawnIO driver.
+
 .PARAMETER MaxStageMinutes
     Caps every time-bound stage (and switches RAM to a time-bound run) for
     quick smoke checks. Results then only cover that shortened range.
@@ -70,6 +77,8 @@ param(
     [string]$RetestComponents = "",
     [double]$RetestMinutes = 0,
     [double]$MaxStageMinutes = 0,
+    [switch]$InstallPawnIO,
+    [switch]$NoDriverInstall,
 
     [string]$ModuleRootOverride = "",
     [string]$ConfigPathOverride = ""
@@ -364,9 +373,33 @@ if ($pending -and [string]$pending.Status -eq "Running") {
 # Telemetry
 # ---------------------------------------------------------------------------
 
+# PawnIO: the driver LibreHardwareMonitor needs for CPU temperature. It is a
+# kernel driver, so it is only installed after the user agrees (or with
+# -InstallPawnIO) - and before telemetry starts, which reads it only once.
+$pawnIoInstallNote = ""
+if (-not $SkipTelemetry -and -not $NoDriverInstall -and -not (Get-HsPawnIoStatus).Installed) {
+    $installDriver = [bool]$InstallPawnIO
+    if (-not $installDriver -and (Test-HsInteractiveConsole)) {
+        Write-Host ""
+        Write-Host "CPU-Temperatur: Dafuer braucht die Sensorbibliothek den Treiber PawnIO" -ForegroundColor Cyan
+        Write-Host "(signiert, offizielle Version von https://pawnio.eu). Ohne ihn kann der Test die" -ForegroundColor Cyan
+        Write-Host "CPU-Temperatur weder anzeigen noch bei Ueberhitzung abbrechen." -ForegroundColor Cyan
+        Write-Host "Der Treiber bleibt danach installiert und kann unter Windows 'Apps' (PawnIO) entfernt werden." -ForegroundColor DarkGray
+        $installDriver = ((Read-HsChoice -Prompt "PawnIO jetzt installieren? [J/n]" -Allowed @("j","J","n","N","ja","nein") -Default "j") -match '^(?i)j')
+    }
+    if ($installDriver) {
+        Write-Progress2 "Installing PawnIO driver..." "Cyan"
+        $pawnIoInstall = Install-HsPawnIo -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -NoDownload:$NoDownload
+        $pawnIoInstallNote = $pawnIoInstall.Message
+        Write-Progress2 "PawnIO: $($pawnIoInstall.Message)" $(if ($pawnIoInstall.Installed -and -not $pawnIoInstall.RebootRequired) { "Green" } else { "Yellow" })
+    } else {
+        $pawnIoInstallNote = "PawnIO installation was declined; CPU temperature is not available in this run."
+    }
+}
+
 if (-not $SkipTelemetry) {
     Write-Progress2 "Initializing telemetry (LibreHardwareMonitor)..." "Cyan"
-    $telemetryOk = Initialize-HsTelemetry -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -NoDownload:$NoDownload
+    $telemetryOk = Initialize-HsTelemetry -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -NoDownload:$NoDownload -PawnIoInstallNote $pawnIoInstallNote
     Write-Progress2 "Telemetry available: $telemetryOk" "Gray"
     $telemetryStatus = Get-HsTelemetryStatus
     if ($null -ne $telemetryStatus) {
