@@ -35,6 +35,9 @@ if ($runDir.Count -eq 0) {
     $stages = @(Import-Csv -LiteralPath (Join-Path $run "00_TestStages.csv"))
     Write-Host ""
     $stages | Format-Table Status, Component, Coverage -AutoSize | Out-String -Width 220 | Write-Host
+    foreach ($stage in @($stages | Where-Object { $_.Status -ne "PASS" })) {
+        Write-Host ("{0} {1}: {2}" -f $stage.Status, $stage.Component, $stage.Assessment) -ForegroundColor Yellow
+    }
     $unhandled = @($stages | Where-Object { [string]$_.Assessment -match "unexpected error" })
     foreach ($stage in $unhandled) { $failures += "Unhandled script error in '$($stage.Component)': $($stage.Assessment)" }
     $retests = @($stages | Where-Object { [string]$_.Component -match "\(Retest 1" })
