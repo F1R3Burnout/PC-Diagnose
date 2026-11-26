@@ -351,6 +351,12 @@ function Get-HsHardwareSensorRows {
     $rows = @()
     foreach ($sensor in $Hardware.Sensors) {
         if ($null -eq $sensor.Value) { continue }
+        # A temperature of 0 C or below is not a reading: without the PawnIO
+        # driver LibreHardwareMonitor still lists e.g. "Core (Tctl/Tdie)" with
+        # the value 0 (observed on a real Windows PowerShell 5.1 run). Keeping
+        # it would report a "peak temperature" of 0 and make the report claim
+        # CPU temperature monitoring that does not exist.
+        if ([string]$sensor.SensorType -eq "Temperature" -and [double]$sensor.Value -le 0) { continue }
         $rows += [pscustomobject]@{
             Timestamp    = $Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff")
             Stage        = $Stage
