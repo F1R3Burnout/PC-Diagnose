@@ -2,7 +2,7 @@
 
 Status: `[PASS]` `[FAIL]` `[BLOCKED]` `[N/A]`. Automatisch geprüfte Gates laufen über
 `tests/HardwareStability/Validate-HardwareStability.ps1` (Exitcode 0 bei letztem Lauf,
-siehe `LOCAL_LLM_TEST_RESULTS.txt`). Zuletzt aktualisiert: 2026-09-18.
+siehe `docs/history/HARDWARE_STABILITY_TEST_RESULTS_2026-09.txt`). Zuletzt aktualisiert: 2026-09-18.
 
 Zusätzlich bestätigt: ein vollständiger, real elevierter Quick-Profil-Lauf über den
 produktiven Weg (`irm .../r|iex` -> `bootstrap.ps1` -> UAC -> Windows PowerShell 5.1)

@@ -237,8 +237,10 @@ error, or a real read/write error was actually detected.
   kernel in a sustained loop to produce real load while temperature and
   device-loss (TDR) are monitored.
 - **Storage SMART** - [smartmontools](https://www.smartmontools.org/)
-  (`smartctl -x`). Drives/controllers that do not support SMART (e.g. many
-  USB bridges) are reported as `UNSUPPORTED`, never as a failure.
+  (`smartctl -x`) on every physical disk, the Windows disk first; the SMART
+  self-test and the surface scan use the Windows disk. Drives/controllers
+  that do not support SMART (e.g. many USB bridges) are reported as
+  `UNSUPPORTED`, never as a failure.
 - **Storage Surface Read** - a strictly **read-only** sequential scan of a
   physical drive (`\\.\PhysicalDriveN`, opened with `GENERIC_READ` only -
   never `GENERIC_WRITE` or `WriteFile`). `-SurfaceScanMaxBytes` bounds the
@@ -266,7 +268,12 @@ partial report instead of continuing past a safety threshold. Telemetry (via
 [LibreHardwareMonitorLib](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor))
 only ever reports sensor values that are actually present; nothing is
 invented. `-SkipTelemetry` disables sensor sampling and the live thermal
-guard checks.
+guard checks. Under Windows PowerShell 5.1 (the elevated default) the
+library's .NET Framework build is loaded together with its hash-verified
+NuGet dependencies. CPU temperature and motherboard/VRM sensors additionally
+require the separately installed [PawnIO](https://pawnio.eu) driver; the tool
+never installs a driver. The report's "Temperature monitoring" section states
+which temperatures the thermal guard could actually see.
 
 **Crash / reset recovery**: before an active stage starts, a small
 `PendingRun.json` (`C:\ProgramData\PC-Diagnose\HardwareStability\`) records
@@ -353,5 +360,14 @@ Running remote PowerShell code requires trust in this repository.
 ## Development
 
 Add tools under `scripts/` and register them in `manifest.json`.
+
+Tests (no hardware load unless noted):
+
+```powershell
+.\tests\Bootstrap.Tests.ps1                      # launcher, Windows PowerShell 5.1
+.\tests\PCDiagLite.RestartShutdown.Tests.ps1     # PCDiagLite restart/shutdown classification
+.\tests\HDMIDiagnose.Tests.ps1                   # display diagnostics core
+.\tests\HardwareStability\Validate-HardwareStability.ps1   # gates + fixtures under pwsh and powershell.exe (short real GPU/disk checks)
+```
 
 The menu is generated from `manifest.json`, so the Wix redirect only needs to point to the short starter once.
