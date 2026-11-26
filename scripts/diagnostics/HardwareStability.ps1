@@ -273,7 +273,18 @@ if (-not $SkipTelemetry) {
     Write-Progress2 "Initializing telemetry (LibreHardwareMonitor)..." "Cyan"
     $telemetryOk = Initialize-HsTelemetry -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -NoDownload:$NoDownload
     Write-Progress2 "Telemetry available: $telemetryOk" "Gray"
+    $telemetryStatus = Get-HsTelemetryStatus
+    if ($null -ne $telemetryStatus) {
+        Write-Progress2 ("Telemetry host: {0}, library build: {1}, CPU temperature: {2}, GPU temperature: {3}, PawnIO: {4}" -f `
+            $telemetryStatus.HostEdition, $telemetryStatus.LibraryBuild, $telemetryStatus.CpuTemperatureAvailable, `
+            $telemetryStatus.GpuTemperatureAvailable, $(if ($telemetryStatus.PawnIoInstalled) { $telemetryStatus.PawnIoVersion } else { "not installed" })) "Gray"
+        foreach ($note in @($telemetryStatus.Notes)) { Write-Progress2 "Telemetry: $note" "Yellow" }
+        try {
+            $telemetryStatus | ConvertTo-Json -Depth 4 | Out-File (Join-Path $Dirs.Telemetry "TelemetryStatus.json") -Encoding UTF8
+        } catch {}
+    }
 } else {
+    $telemetryStatus = $null
     Write-Progress2 "Telemetry sampling disabled (-SkipTelemetry)." "Gray"
 }
 
@@ -527,7 +538,8 @@ $systemResetInfo = [pscustomobject]@{ Classification = "NONE"; Notes = "" }
 
 Unregister-Event -SourceIdentifier $engineExitAction.Name -ErrorAction SilentlyContinue
 
-$html = New-HsHtmlReport -Stages @($script:HsStages) -Inventory $inventory -Profile $Profile -RunId $RunId -SystemResetInfo $systemResetInfo
+$html = New-HsHtmlReport -Stages @($script:HsStages) -Inventory $inventory -Profile $Profile -RunId $RunId -SystemResetInfo $systemResetInfo `
+    -TelemetryStatus $telemetryStatus -TelemetrySkipped:$SkipTelemetry
 [IO.File]::WriteAllText((Join-Path $Out "00_Result.html"), $html, [Text.UTF8Encoding]::new($false))
 (New-HsSummaryText -Stages @($script:HsStages)) | Out-File (Join-Path $Out "00_Summary.txt") -Encoding UTF8
 Export-HsStagesCsv -Stages @($script:HsStages) -Path (Join-Path $Out "00_TestStages.csv")
