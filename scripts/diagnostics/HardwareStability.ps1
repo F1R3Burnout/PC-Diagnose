@@ -127,7 +127,7 @@ foreach ($module in @(
     "Common.psm1","ProcessRunner.psm1","ToolManager.psm1","Profiles.psm1",
     "Inventory.psm1","Telemetry.psm1","ThermalGuard.psm1","EventCorrelation.psm1",
     "CrashRecovery.psm1","CpuTests.psm1","MemoryTests.psm1","GpuTests.psm1",
-    "StorageTests.psm1","StorageSurface.psm1","StorageWriteVerify.psm1","Reporting.psm1"
+    "StorageTests.psm1","StorageSurface.psm1","StorageWriteVerify.psm1","StorageBackground.psm1","Reporting.psm1"
 )) {
     Import-Module (Join-Path $ModuleRoot $module) -Force
 }
@@ -245,6 +245,11 @@ if (-not $DryRun) {
 $RuntimeLog = Join-Path $Dirs.Runtime "runtime.log"
 $script:HsCancelRequested = $false
 $script:HsStages = New-Object System.Collections.ArrayList
+# Storage checks running in the background (StorageBackground.psm1) and the
+# SMART self-test started at the beginning of a component run.
+$script:HsStorageBackground = $null
+$script:HsStorageBackgroundError = ""
+$script:HsSelfTestRun = $null
 
 function Write-Progress2 {
     param([string]$Text, [string]$Color = "Gray")
@@ -477,7 +482,10 @@ function Invoke-HsStageWrapper {
         return $stage
     }
 
-    Set-HsPendingRun -RunId $RunId -ResultDirectory $Out -Profile $Profile -Stage $StageName `
+    # The pending-run marker names the background storage checks too: if the
+    # PC resets during a GPU stage, they were running at the same time.
+    $pendingStage = if ($script:HsStorageBackground -and -not $script:HsStorageBackground.Closed) { "$StageName + STORAGE (parallel)" } else { $StageName }
+    Set-HsPendingRun -RunId $RunId -ResultDirectory $Out -Profile $Profile -Stage $pendingStage `
         -ExpectedEnd ([datetime]::Now.AddMinutes(60)) -Status "Running" | Out-Null
 
     $script:HsThermalAbortReason = ""
@@ -560,6 +568,46 @@ function Get-HsStagePlan {
         }
         if ($key -eq "PCIe") { [void]$plan.Add([pscustomobject]@{ Stage = "PCIE_WHEA"; Seconds = 5; Unknown = "" }) }
         if ($key -eq "System") { [void]$plan.Add([pscustomobject]@{ Stage = "SYSTEM_STABILITY"; Seconds = [double]$StageProfile.SystemStabilityMinutes * 60; Unknown = "" }) }
+    }
+
+    # Storage parts that already ran in the background are mostly done when
+    # the Storage stages are reached: the SMART self-test runs from the start
+    # of the run, surface scan and write/verify during the GPU stages. Only
+    # what is left after that time is still to wait for.
+    $storageAt = -1
+    for ($i = 0; $i -lt $plan.Count; $i++) { if ($plan[$i].Stage -eq "STORAGE_SMART") { $storageAt = $i; break } }
+    if ($storageAt -ge 0) {
+        $before = 0.0
+        $gpuBudget = 0.0
+        for ($i = 0; $i -lt $storageAt; $i++) {
+            if ($plan[$i].Seconds -gt 0) {
+                $before += $plan[$i].Seconds
+                if ($plan[$i].Stage -in @("GPU_COMPUTE","VRAM","GPU_LOAD_THERMAL")) { $gpuBudget += $plan[$i].Seconds }
+            }
+        }
+        $surfaceUnknown = $false
+        foreach ($entry in $plan) {
+            switch ($entry.Stage) {
+                "STORAGE_SMART_SELFTEST" {
+                    if ($entry.Seconds -ge 0) { $entry.Seconds = [math]::Max(5, $entry.Seconds - $before) }
+                }
+                "STORAGE_SURFACE" {
+                    if ($entry.Seconds -lt 0) { $surfaceUnknown = $true }
+                    else {
+                        $left = [math]::Max(0, $entry.Seconds - $gpuBudget)
+                        $gpuBudget -= ($entry.Seconds - $left)
+                        $entry.Seconds = $left
+                    }
+                }
+                "STORAGE_WRITE_VERIFY" {
+                    if (-not $surfaceUnknown) {
+                        $left = [math]::Max(1, $entry.Seconds - $gpuBudget)
+                        $gpuBudget = [math]::Max(0, $gpuBudget - $entry.Seconds)
+                        $entry.Seconds = $left
+                    }
+                }
+            }
+        }
     }
     return ,$plan
 }
@@ -652,6 +700,81 @@ function Get-HsTemperatureLine {
     return $line
 }
 
+function Start-HsEarlySmartSelfTest {
+    <#
+        Starts the SMART self-test on the Windows disk at the beginning of
+        the run. It runs inside the drive (no CPU/RAM/GPU use), so it can run
+        alongside every stage; the Storage stage only collects the result.
+    #>
+    param([Parameter(Mandatory=$true)]$StageProfile)
+    $disk = @($inventory.PhysicalDisks) | Select-Object -First 1
+    if (-not $disk) { return $null }
+    $index = [int]($disk.DeviceId -replace '[^0-9]','')
+    Write-Progress2 "SMART-Selbsttest ($($StageProfile.SmartSelfTest)) auf $($disk.DeviceId) wird gestartet - er laeuft im Laufwerk selbst, ohne CPU, RAM oder GPU zu belasten." "Gray"
+    try {
+        $run = Start-HsSmartSelfTestRun -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $index `
+            -TestType $StageProfile.SmartSelfTest -NoDownload:$NoDownload
+    } catch {
+        $run = [pscustomobject]@{ Started = $false; Status = "BLOCKED"; Reason = "Could not start the SMART self-test: $($_.Exception.Message)"; DriveIndex = $index; TestType = $StageProfile.SmartSelfTest; StartedAt = $null; ToolPath = "" }
+    }
+    if (-not $run.Started) { Write-Progress2 "SMART-Selbsttest nicht gestartet: $($run.Reason)" "Yellow" }
+    return $run
+}
+
+function Start-HsParallelStorageChecks {
+    <#
+        Starts surface scan and write/read verification in the background
+        (StorageBackground.psm1). Called before the first GPU stage, or at
+        the Storage stage itself when no GPU stage is part of the run.
+    #>
+    param([Parameter(Mandatory=$true)]$StageProfile, [string]$StageSuffix = "", [switch]$DuringGpu)
+    $disk = @($inventory.PhysicalDisks) | Select-Object -First 1
+    $index = if ($disk) { [int]($disk.DeviceId -replace '[^0-9]','') } else { -1 }
+    $diskName = if ($disk) { $disk.DeviceId } else { "-" }
+    $maxBytes = if ($SurfaceScanMaxBytes -gt 0) { $SurfaceScanMaxBytes } else { [long]$StageProfile.SurfaceScanMaxBytes }
+    $maxSeconds = [int][math]::Round([double]$StageProfile.SurfaceScanMaxMinutes * 60)
+    $surfaceEnabled = [bool]($disk -and $StageProfile.SurfaceScanEnabled)
+    try {
+        $script:HsStorageBackground = Start-HsStorageBackgroundChecks -ModuleRoot $ModuleRoot -SurfaceEnabled $surfaceEnabled -DriveIndex $index `
+            -SurfaceMaxBytes $maxBytes -SurfaceMaxSeconds $maxSeconds -SurfaceLabel "Surface-Scan $diskName$StageSuffix (nur lesen)" `
+            -WriteVerifyDirectory (Join-Path $env:TEMP "PC-Diagnose_HS_WriteVerify") -WriteVerifySizeMB ([int]$StageProfile.StorageWriteVerifyMB) `
+            -WriteVerifyLabel "Schreib-/Lesepruefung$StageSuffix" -DuringGpu:$DuringGpu
+    } catch {
+        # Never let the background start take the run down; the Storage
+        # stages try again and report BLOCKED if it still fails.
+        $script:HsStorageBackground = $null
+        $script:HsStorageBackgroundError = $_.Exception.Message
+        Write-Progress2 "Storage-Pruefung konnte nicht im Hintergrund gestartet werden: $($_.Exception.Message)" "Yellow"
+        return
+    }
+    $script:HsStorageBackground | Add-Member -NotePropertyName DiskName -NotePropertyValue $diskName -Force
+    $parts = @()
+    if ($surfaceEnabled) { $parts += "Surface-Scan $diskName" }
+    $parts += "Schreib-/Lesepruefung"
+    if ($DuringGpu) {
+        Write-Progress2 "Parallel gestartet: $($parts -join ' + ') laufen waehrend der GPU-Tests; das Ergebnis folgt bei den Storage-Stufen." "Cyan"
+        $global:HsParallelStatusProvider = { Get-HsParallelStorageStatusText }
+    }
+}
+
+function Get-HsParallelStorageStatusText {
+    <# Short text for the progress line of the running stage; writes a log line every 10 %. #>
+    $handle = $script:HsStorageBackground
+    if (-not $handle -or $handle.Closed) { return "" }
+    $status = Get-HsStorageBackgroundStatus -Handle $handle
+    if ($status.Milestone) { Write-Progress2 "    Parallel: $($status.Milestone)" "DarkGray" }
+    return $status.ShortText
+}
+
+function Set-HsStageTimes {
+    <# Stage timing for parts that ran in the background: their real start and end, not the collection time. #>
+    param([Parameter(Mandatory=$true)]$Stage, $Started, $Ended)
+    if ($null -eq $Started) { return }
+    $Stage.Started = [datetime]$Started
+    if ($null -ne $Ended) { $Stage.Ended = [datetime]$Ended }
+    if ($Stage.Ended) { $Stage.Duration = ($Stage.Ended - $Stage.Started).ToString() }
+}
+
 function Invoke-HsComponentStages {
     <#
     .SYNOPSIS
@@ -683,9 +806,23 @@ function Invoke-HsComponentStages {
     $script:HsOverallActivity = $OverallActivity
     $keyIndex = 0
 
+    # Storage runs partly in parallel (see StorageBackground.psm1): the SMART
+    # self-test from the start, surface scan + write/verify from the first GPU
+    # stage on. CPU, Cache and RAM keep the machine to themselves.
+    $storageSelected = $keys -contains "Storage"
+    $parallelStartKey = @($keys | Where-Object { $_ -in @("GPU","VRAM","VRAMMemory","GPULoad") }) | Select-Object -First 1
+    $script:HsSelfTestRun = $null
+    $script:HsStorageBackground = $null
+    if ($storageSelected) { $script:HsSelfTestRun = Start-HsEarlySmartSelfTest -StageProfile $StageProfile }
+
+    try {
     foreach ($key in $keys) {
         $keyIndex++
         $script:HsOverallStatus = "Komponente $keyIndex von $($keys.Count)"
+
+        if ($storageSelected -and $key -eq $parallelStartKey -and -not $script:HsStorageBackground) {
+            Start-HsParallelStorageChecks -StageProfile $StageProfile -StageSuffix $StageSuffix -DuringGpu
+        }
 
         switch ($key) {
             "CPU" {
@@ -815,41 +952,89 @@ function Invoke-HsComponentStages {
                 } | Out-Null
 
                 $smartStage = $script:HsStages[$script:HsStages.Count - 1]
-                if ($smartRunSelfTest -and $smartStage.Status -in @("PASS","WARNING")) {
+                $selfTestRun = $script:HsSelfTestRun
+                if ($smartRunSelfTest -and ($smartStage.Status -in @("PASS","WARNING") -or ($selfTestRun -and $selfTestRun.Started))) {
                     Invoke-HsStageWrapper -StageName "STORAGE_SMART_SELFTEST" -Component "Storage SMART Self-Test ($($smartDisk.DeviceId))$StageSuffix" -Tool "smartctl" -Action {
                         param($innerStage)
-                        $selfTest = Start-HsSmartSelfTest -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $smartIndex `
-                            -TestType $StageProfile.SmartSelfTest -NoDownload:$NoDownload -ProgressLabel "SMART-Selbsttest $($smartDisk.DeviceId)$StageSuffix"
+                        if (-not $selfTestRun) {
+                            $selfTestRun = Start-HsSmartSelfTestRun -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $smartIndex `
+                                -TestType $StageProfile.SmartSelfTest -NoDownload:$NoDownload
+                        }
+                        if ($selfTestRun.Started) {
+                            $innerStage.Started = [datetime]$selfTestRun.StartedAt
+                            Add-HsNote -Stage $innerStage -Note "Started at $(([datetime]$selfTestRun.StartedAt).ToString('HH:mm:ss')) at the beginning of the run; it runs inside the drive while the other stages load CPU, RAM and GPU."
+                        }
+                        $selfTest = Wait-HsSmartSelfTestResult -Run $selfTestRun -ProgressLabel "SMART-Selbsttest $($smartDisk.DeviceId)$StageSuffix"
                         Complete-HsStage $innerStage -Status $selfTest.Status -Assessment $selfTest.Reason
                     } | Out-Null
                 }
             }
+            $script:HsSelfTestRun = $null
+
+            # Surface scan and write/read verification ran in the background
+            # during the GPU stages (or start now if there were none); here
+            # their results are collected, waiting for what is still running.
+            if (-not $script:HsStorageBackground) {
+                Start-HsParallelStorageChecks -StageProfile $StageProfile -StageSuffix $StageSuffix
+            }
+            $global:HsParallelStatusProvider = $null
+            $storageRun = $script:HsStorageBackground
+            if (-not $storageRun) {
+                foreach ($blocked in @(@("STORAGE_SURFACE","Storage Surface Read"), @("STORAGE_WRITE_VERIFY","Storage Write/Read Verification"))) {
+                    Invoke-HsStageWrapper -StageName $blocked[0] -Component "$($blocked[1])$StageSuffix" -Action {
+                        param($stage)
+                        Complete-HsStage $stage -Status "BLOCKED" -Assessment "The storage check could not be started: $script:HsStorageBackgroundError"
+                    } | Out-Null
+                }
+                continue
+            }
+            $parallelNote = if ($storageRun.DuringGpu) { "Ran in the background during the GPU stages (started $(([datetime]$storageRun.StartedAt).ToString('HH:mm:ss')))." } else { "" }
 
             Invoke-HsStageWrapper -StageName "STORAGE_SURFACE" -Component "Storage Surface Read$StageSuffix" -Action {
                 param($stage)
-                $disk = @($inventory.PhysicalDisks) | Select-Object -First 1
-                if (-not $disk -or -not $StageProfile.SurfaceScanEnabled) {
+                if (-not $storageRun.Settings.SurfaceEnabled) {
                     Complete-HsStage $stage -Status "SKIPPED" -Assessment "Surface scan disabled for this profile or no disk found."
                     return
                 }
-                $index = [int]($disk.DeviceId -replace '[^0-9]','')
-                $maxBytes = if ($SurfaceScanMaxBytes -gt 0) { $SurfaceScanMaxBytes } else { $StageProfile.SurfaceScanMaxBytes }
-                $maxSeconds = [int][math]::Round([double]$StageProfile.SurfaceScanMaxMinutes * 60)
-                $r = Invoke-HsStorageSurfaceScan -DriveIndex $index -MaxBytes $maxBytes -MaxSeconds $maxSeconds `
-                    -CancelCheck { Test-HsThermalAbortOrCancel -StageName "STORAGE_SURFACE" } -ProgressLabel "Surface-Scan $($disk.DeviceId)$StageSuffix (nur lesen)"
-                $stage.Coverage = "$($disk.DeviceId) (Windows disk first): $([math]::Round($r.BytesRead/1GB,2)) / $([math]::Round($r.TotalBytes/1GB,2)) GB read"
+                Wait-HsStorageBackgroundChecks -Handle $storageRun -Until Surface -ProgressLabel "$($storageRun.Settings.SurfaceLabel)" `
+                    -CancelCheck { Test-HsThermalAbortOrCancel -StageName "STORAGE_SURFACE" }
+                $r = $storageRun.Sync.Surface
+                if ($null -eq $r) {
+                    $why = if ($storageRun.Sync.SurfaceError) { $storageRun.Sync.SurfaceError } elseif ($storageRun.Sync.Error) { $storageRun.Sync.Error } else { "no result was returned" }
+                    $noResultStatus = if ($script:HsThermalAbortReason -or $storageRun.Sync.Cancel) { "INTERRUPTED" } else { "BLOCKED" }
+                    Complete-HsStage $stage -Status $noResultStatus -Assessment "Surface scan did not complete: $why"
+                    return
+                }
+                $stage.Coverage = "$($storageRun.DiskName) (Windows disk first): $([math]::Round($r.BytesRead/1GB,2)) / $([math]::Round($r.TotalBytes/1GB,2)) GB read"
                 $stage.ErrorCount = $r.Errors.Count
+                if ($parallelNote) { Add-HsNote -Stage $stage -Note $parallelNote }
                 Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                Set-HsStageTimes -Stage $stage -Started $storageRun.Sync.SurfaceStarted -Ended $storageRun.Sync.SurfaceEnded
             } | Out-Null
 
             Invoke-HsStageWrapper -StageName "STORAGE_WRITE_VERIFY" -Component "Storage Write/Read Verification$StageSuffix" -Action {
                 param($stage)
-                $r = Invoke-HsStorageWriteReadVerify -Directory (Join-Path $env:TEMP "PC-Diagnose_HS_WriteVerify") -SizeMB $StageProfile.StorageWriteVerifyMB `
-                    -ProgressLabel "Schreib-/Lesepruefung$StageSuffix"
+                Wait-HsStorageBackgroundChecks -Handle $storageRun -Until All -ProgressLabel "$($storageRun.Settings.WriteVerifyLabel)" `
+                    -CancelCheck { Test-HsThermalAbortOrCancel -StageName "STORAGE_WRITE_VERIFY" }
+                $final = Complete-HsStorageBackgroundChecks -Handle $storageRun
+                $r = $final.WriteVerify
+                if ($null -eq $r) {
+                    if ($storageRun.Sync.Cancel) {
+                        Complete-HsStage $stage -Status "SKIPPED" -Assessment "Not run: the storage checks were stopped before the write/read verification began (thermal guard or cancel)."
+                    } else {
+                        $why = if ($final.WriteError) { $final.WriteError } else { "no result was returned" }
+                        Complete-HsStage $stage -Status "BLOCKED" -Assessment "Write/read verification did not complete: $why"
+                    }
+                    return
+                }
                 $stage.Coverage = "$([math]::Round($r.BytesVerified/1MB,1)) MB written/read/verified"
                 $stage.ErrorCount = $r.Mismatches
+                if ($parallelNote) { Add-HsNote -Stage $stage -Note $parallelNote }
                 Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                Set-HsStageTimes -Stage $stage -Started $final.WriteStarted -Ended $final.WriteEnded
             } | Out-Null
+            Complete-HsStorageBackgroundChecks -Handle $storageRun -TimeoutSeconds 10 | Out-Null
+            $script:HsStorageBackground = $null
         }
 
         if ($key -eq "PCIe") {
@@ -959,6 +1144,17 @@ function Invoke-HsComponentStages {
                 }
             } | Out-Null
         }
+    }
+
+    } finally {
+        # Ctrl+C or an unexpected error: background storage checks must not
+        # keep reading the disk after the run ended.
+        $global:HsParallelStatusProvider = $null
+        if ($script:HsStorageBackground) {
+            Complete-HsStorageBackgroundChecks -Handle $script:HsStorageBackground -TimeoutSeconds 10 | Out-Null
+            $script:HsStorageBackground = $null
+        }
+        $script:HsSelfTestRun = $null
     }
 
     Write-HsOverallProgress -Activity $OverallActivity -Completed

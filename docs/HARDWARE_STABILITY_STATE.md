@@ -2,6 +2,31 @@
 
 Letztes Update: 2026-11-26 (Telemetrie unter PS 5.1, Review-Fixes, PCDiagLite-Tests)
 
+## Nachtrag 2026-11-26 (4) — Storage parallel zu den GPU-Tests
+
+Ziel: kürzere Laufzeit, ohne die Zuordnung eines Fehlers zu verwischen.
+
+- CPU, Cache und RAM laufen weiter isoliert (Platten-I/O kostet CPU-Zeit, der
+  Datei-Cache kostet RAM).
+- SMART-Selbsttest der Windows-Platte startet zu Beginn des Laufs
+  (`Start-HsSmartSelfTestRun`), die Storage-Stufe holt nur das Ergebnis ab
+  (`Wait-HsSmartSelfTestResult`). `Start-HsSmartSelfTest` bleibt als
+  Start+Warten-Wrapper erhalten.
+- Surface-Scan + Schreib-/Lesepruefung laufen ab der ersten GPU-Stufe in einem
+  Runspace desselben Prozesses (`lib/HardwareStability/StorageBackground.psm1`):
+  kein zweiter powershell.exe, gleiches Admin-Token, endet mit dem Fenster,
+  kooperativer Abbruch über ein synchronisiertes Flag (der native Leser lässt
+  sich nicht per `Stop()` unterbrechen). Fortschritt bleibt im Stream des
+  Runspace und wird als "Parallel: ..." neben den Temperaturen angezeigt.
+- Die Schreib-/Lesepruefung hat jetzt `-CancelCheck` (abgebrochen =
+  INTERRUPTED statt FAIL, Testdatei wird gelöscht).
+- Restzeit ("Gesamt noch") zieht die parallel bereits gelaufene Zeit ab.
+- Pending-Run-Marker nennt "+ STORAGE (parallel)", falls während einer
+  GPU-Stufe ein Reset passiert.
+- Tests: HS-063 (Fixture: Hintergrundlauf, Abbruch, Fortschrittszeile,
+  statische Prüfung "nur ab GPU-Stufe"), EndToEnd prüft "Parallel gestartet"
+  und dass Surface/Schreib-Lese-Ergebnisse ankommen.
+
 ## Nachtrag 2026-11-26 (3) — erster realer Standard-Lauf (DESKTOP-DITMECS)
 
 Ryzen 7 5700X, RX 6700, B450 GAMING X (IT8686E), WD SN570 + SATA-SSD, PS 5.1.

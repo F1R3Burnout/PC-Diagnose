@@ -57,6 +57,7 @@ function Invoke-HsStorageWriteReadVerify {
         [int]$SizeMB = 256,
         [int]$BlockSizeBytes = 4MB,
         [int]$Seed = 12345,
+        [scriptblock]$CancelCheck = { $false },
         [string]$ProgressLabel = "Schreib-/Lesepruefung (Testdatei)"
     )
 
@@ -77,6 +78,7 @@ function Invoke-HsStorageWriteReadVerify {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     try {
         $totalBytes = [int64]$SizeMB * 1MB
+        $cancelled = $false
         $random = New-Object Random($Seed)
         $blockChecksums = New-Object System.Collections.Generic.List[uint32]
 
@@ -84,6 +86,7 @@ function Invoke-HsStorageWriteReadVerify {
         try {
             $written = [int64]0
             while ($written -lt $totalBytes) {
+                if (& $CancelCheck) { $cancelled = $true; break }
                 $thisBlockSize = [int][math]::Min($BlockSizeBytes, $totalBytes - $written)
                 $buffer = New-Object byte[] $thisBlockSize
                 $random.NextBytes($buffer)
@@ -97,6 +100,11 @@ function Invoke-HsStorageWriteReadVerify {
             $stream.Dispose()
         }
         $result.BytesWritten = $written
+        if ($cancelled) {
+            $result.Status = "INTERRUPTED"
+            $result.Reason = "Write/read verification was cancelled after $([math]::Round($written/1MB,1)) of $SizeMB MB had been written; nothing was compared."
+            return $result
+        }
 
         $readStream = [IO.File]::Open($testFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         try {
@@ -104,6 +112,7 @@ function Invoke-HsStorageWriteReadVerify {
             $mismatches = 0
             $blockIndex = 0
             while ($verified -lt $totalBytes) {
+                if (& $CancelCheck) { $cancelled = $true; break }
                 $thisBlockSize = [int][math]::Min($BlockSizeBytes, $totalBytes - $verified)
                 $buffer = New-Object byte[] $thisBlockSize
                 $readCount = 0
@@ -128,12 +137,20 @@ function Invoke-HsStorageWriteReadVerify {
         $result.Mismatches = $mismatches
 
         if ($mismatches -gt 0) {
+            # Mismatches already found count even if the check was stopped.
             $result.Status = "FAIL"
             $result.Reason = "$mismatches of $($blockChecksums.Count) block(s) failed checksum verification after write+read-back."
+        } elseif ($cancelled) {
+            $result.Status = "INTERRUPTED"
+            $result.Reason = "Write/read verification was cancelled after $([math]::Round($verified/1MB,1)) of $SizeMB MB had been compared (0 mismatches so far)."
         } else {
             $result.Status = "PASS"
             $result.Reason = "$($blockChecksums.Count) block(s) ($([math]::Round($totalBytes/1MB,1)) MB) written, read back, and checksum-verified with 0 mismatches."
         }
+    } catch [System.Management.Automation.PipelineStoppedException] {
+        # Stopped from outside (Ctrl+C, background runspace stopped) - not a data error.
+        $result.Status = "INTERRUPTED"
+        $result.Reason = "Write/read verification was stopped before it finished."
     } catch {
         $result.Status = "FAIL"
         $result.Reason = "Write/read verification failed: $($_.Exception.Message)"

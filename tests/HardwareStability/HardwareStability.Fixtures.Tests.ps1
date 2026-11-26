@@ -18,6 +18,7 @@ Import-Module (Join-Path $LibRoot "CpuTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "MemoryTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "GpuTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "StorageWriteVerify.psm1") -Force
+Import-Module (Join-Path $LibRoot "StorageBackground.psm1") -Force
 Import-Module (Join-Path $LibRoot "StorageTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "Reporting.psm1") -Force
 Import-Module (Join-Path $LibRoot "Telemetry.psm1") -Force
@@ -203,6 +204,76 @@ $ramMax = Get-HsMaxRamPercent
 Assert-True ($ramMax.Percent -ge 10 -and $ramMax.Percent -le 90 -and $ramMax.TotalMB -gt 0) "HS-062 RAM share is sized from the available memory ($($ramMax.Percent)% of $($ramMax.TotalMB) MB, $($ramMax.FreeMB) MB available)"
 $ramMaxSystem = Get-HsMaxRamPercent -ExtraReserveMB 1536
 Assert-True ($ramMaxSystem.Percent -le $ramMax.Percent) "HS-062 The combined test keeps extra headroom for Prime95 and the GPU load"
+
+Write-Host "`n=== HS-063 Storage checks in the background (parallel to the GPU stages) ===" -ForegroundColor Cyan
+# Write/read verification stops cleanly when asked to: INTERRUPTED, not a
+# false FAIL, and the test file is gone.
+$wvCancelled = Invoke-HsStorageWriteReadVerify -Directory (Join-Path $FixtureCache "writeverify_cancel") -SizeMB 16 -CancelCheck { $true }
+Assert-True ($wvCancelled.Status -eq "INTERRUPTED" -and -not (Test-Path -LiteralPath $wvCancelled.TestFilePath)) "HS-063 A cancelled write/read verification is INTERRUPTED (not FAIL) and leaves no test file (got $($wvCancelled.Status))"
+
+# Full background run: surface scan of disk 0 (only with admin rights, as in
+# the real run) followed by write/verify, in a runspace of this process.
+$isAdmin = $false
+try { $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch {}
+$bgDir = Join-Path $FixtureCache "bg_writeverify"
+$bg = Start-HsStorageBackgroundChecks -ModuleRoot $LibRoot -SurfaceEnabled $isAdmin -DriveIndex 0 -SurfaceMaxBytes 64MB `
+    -SurfaceLabel "Fixture Surface" -WriteVerifyDirectory $bgDir -WriteVerifySizeMB 64 -WriteVerifyLabel "Fixture WriteVerify"
+$bgStartShort = (Get-HsStorageBackgroundStatus -Handle $bg).ShortText
+$bgDeadline = (Get-Date).AddSeconds(120)
+$bgPhases = New-Object System.Collections.ArrayList
+while ((Get-Date) -lt $bgDeadline) {
+    $bgStatus = Get-HsStorageBackgroundStatus -Handle $bg
+    if ($bgPhases.Count -eq 0 -or $bgPhases[$bgPhases.Count - 1] -ne $bgStatus.Phase) { [void]$bgPhases.Add($bgStatus.Phase) }
+    if ($bgStatus.Phase -eq "Done") { break }
+    Start-Sleep -Milliseconds 100
+}
+$bgDoneStatus = Get-HsStorageBackgroundStatus -Handle $bg
+$bgLastRecord = $bg.LastProgress
+$bgResult = Complete-HsStorageBackgroundChecks -Handle $bg -TimeoutSeconds 10
+Assert-True ($bgStartShort -like "Parallel: *") "HS-063 The background status yields a short text for the progress line ($bgStartShort)"
+Assert-True ($bgDoneStatus.Phase -eq "Done" -and $bgDoneStatus.ShortText -eq "Parallel: Storage-Pruefung fertig") "HS-063 The background checks finish within 120 s (phases: $($bgPhases -join ' -> '))"
+Assert-True ($null -ne $bgResult.WriteVerify -and $bgResult.WriteVerify.Status -eq "PASS" -and -not $bgResult.Error) "HS-063 Write/read verification in the background PASSes (got $(if ($bgResult.WriteVerify) { $bgResult.WriteVerify.Status } else { 'no result' }) $($bgResult.Error) $($bgResult.WriteError))"
+Assert-True ($bgResult.WriteStarted -is [datetime] -and $bgResult.WriteEnded -ge $bgResult.WriteStarted) "HS-063 Start and end of the background part are recorded for the report"
+Assert-True ($null -ne $bgLastRecord -and $bgLastRecord.Activity -eq "Fixture WriteVerify" -and $bgLastRecord.PercentComplete -ge 50) "HS-063 Background progress stays in the runspace's own stream and is read from there (last: $(if ($bgLastRecord) { "$($bgLastRecord.Activity) $($bgLastRecord.PercentComplete)%" } else { 'none' }))"
+if ($isAdmin) {
+    Assert-True ($null -ne $bgResult.Surface -and $bgResult.Surface.Status -eq "PASS" -and $bgResult.Surface.BytesRead -ge 64MB) "HS-063 Surface scan of PhysicalDrive0 runs in the background runspace (got $(if ($bgResult.Surface) { "$($bgResult.Surface.Status): $($bgResult.Surface.Reason)" } else { "no result: $($bgResult.SurfaceError)" }))"
+} else {
+    Assert-True ($null -eq $bgResult.Surface -and $bgPhases -notcontains "Surface") "HS-063 Without a surface scan the background goes straight to write/read verification"
+}
+Assert-True (@(Get-ChildItem -LiteralPath $bgDir -Filter "*.tmp" -ErrorAction SilentlyContinue).Count -eq 0) "HS-063 No test file is left behind by the background run"
+Assert-True ($bg.Closed -and $null -ne (Complete-HsStorageBackgroundChecks -Handle $bg)) "HS-063 Completing twice is harmless (finally block after the Storage stage)"
+
+# Cancel right after the start (Ctrl+C / thermal guard): ends quickly without a false FAIL.
+$bgCancelDir = Join-Path $FixtureCache "bg_cancel"
+$bgCancel = Start-HsStorageBackgroundChecks -ModuleRoot $LibRoot -SurfaceEnabled $false -WriteVerifyDirectory $bgCancelDir -WriteVerifySizeMB 4096 -WriteVerifyLabel "Fixture Cancel"
+$bgCancelWatch = [Diagnostics.Stopwatch]::StartNew()
+$bgCancelResult = Complete-HsStorageBackgroundChecks -Handle $bgCancel -TimeoutSeconds 30
+$bgCancelWatch.Stop()
+Assert-True ($bgCancelResult.Stopped -and $bgCancelWatch.Elapsed.TotalSeconds -lt 30) "HS-063 A running background check stops on request ($([math]::Round($bgCancelWatch.Elapsed.TotalSeconds,1)) s)"
+Assert-True ($null -eq $bgCancelResult.WriteVerify -or $bgCancelResult.WriteVerify.Status -eq "INTERRUPTED") "HS-063 A stopped background check reports no result or INTERRUPTED, never FAIL (got $(if ($bgCancelResult.WriteVerify) { $bgCancelResult.WriteVerify.Status } else { 'no result' }))"
+Assert-True (@(Get-ChildItem -LiteralPath $bgCancelDir -Filter "*.tmp" -ErrorAction SilentlyContinue).Count -eq 0) "HS-063 A stopped background check leaves no test file"
+
+# The running stage shows the background state next to the temperatures.
+$opRunspace = [powershell]::Create()
+try {
+    [void]$opRunspace.AddScript({
+        param($libRoot)
+        Import-Module (Join-Path $libRoot "Common.psm1") -Force
+        $global:HsTemperatureProvider = { "Temperaturen: CPU 50 C" }
+        $global:HsParallelStatusProvider = { "Parallel: Surface-Scan 37 %" }
+        Write-HsStageProgress -Activity "Fixture" -Status "laeuft" -Percent 10 -Force
+    }).AddArgument([string]$LibRoot)
+    [void]$opRunspace.Invoke()
+    $opRecords = @($opRunspace.Streams.Progress)
+} finally {
+    $opRunspace.Dispose()
+}
+Assert-True (@($opRecords | Where-Object { $_.CurrentOperation -eq "Temperaturen: CPU 50 C | Parallel: Surface-Scan 37 %" }).Count -ge 1) "HS-063 The progress line shows temperatures and the parallel storage check together"
+
+# Only the GPU stages share the machine with the storage checks; CPU, Cache
+# and RAM stay isolated (static check of the main script).
+$mainScriptText = Get-Content -Raw (Join-Path $RepoRoot "scripts\diagnostics\HardwareStability.ps1")
+Assert-True ($mainScriptText -match '\$parallelStartKey = @\(\$keys \| Where-Object \{ \$_ -in @\("GPU","VRAM","VRAMMemory","GPULoad"\) \}\)') "HS-063 Background storage checks start only at a GPU stage, never next to CPU, Cache or RAM"
 
 Write-Host "`n=== HS-052 / HS-053 Tool integrity checks ===" -ForegroundColor Cyan
 $nugetBase64 = "NXcNYlWoXe5cz9sb8Huo6x2dCZVYkhwKtgE00n/MoI8V4ZI/7/t+EI5bOhQFlZfFjjqM8+U6prjU/aARt7H/tA=="

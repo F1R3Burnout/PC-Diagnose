@@ -104,6 +104,7 @@
         "lib/HardwareStability/StorageTests.psm1",
         "lib/HardwareStability/StorageSurface.psm1",
         "lib/HardwareStability/StorageWriteVerify.psm1",
+        "lib/HardwareStability/StorageBackground.psm1",
         "lib/HardwareStability/Reporting.psm1",
         "lib/HardwareStability/Native/RawDiskReader.cs",
         "lib/HardwareStability/Native/D3D11ComputeVerifier.cs"

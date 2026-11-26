@@ -48,6 +48,14 @@ if ($runDir.Count -eq 0) {
     if ($Components -match "System" -and ($system.Count -eq 0 -or [string]$system[0].Coverage -notmatch "RAM:")) { $failures += "System stability did not include the RAM load" }
     $runtimeLog = Get-Content -Raw -LiteralPath (Join-Path $run "99_Runtime\runtime.log") -ErrorAction SilentlyContinue
     if ($runtimeLog -match "Temperature display failed") { $failures += "Temperature display threw during the run (see runtime.log)" }
+    # Surface scan and write/verify run in a background runspace during the
+    # GPU stages; their results must still arrive at the Storage stages.
+    if ($Components -match "GPU" -and $Components -match "Storage" -and [string]$runtimeLog -notmatch "Parallel gestartet") { $failures += "The storage checks were not started in parallel with the GPU stages" }
+    foreach ($stage in @($stages | Where-Object { $_.StageName -in @("STORAGE_SURFACE","STORAGE_WRITE_VERIFY") -and [string]$_.Assessment -match "did not complete" })) {
+        $failures += "Background storage check returned no result in '$($stage.Component)': $($stage.Assessment)"
+    }
+    $writeVerify = @($stages | Where-Object { $_.StageName -eq "STORAGE_WRITE_VERIFY" })
+    if ($Components -match "Storage" -and ($writeVerify.Count -eq 0 -or @($writeVerify | Where-Object { $_.Status -ne "PASS" }).Count -gt 0)) { $failures += "Write/read verification did not PASS in every round ($(@($writeVerify | ForEach-Object { $_.Status }) -join ', '))" }
     $html = Get-Content -Raw -LiteralPath (Join-Path $run "00_Result.html")
     if ($html -notmatch "Temperature monitoring") { $failures += "Report lacks the temperature monitoring section" }
 }

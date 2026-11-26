@@ -133,72 +133,100 @@ function Get-HsSmartSelfTestProgress {
     return [pscustomobject]@{ InProgress = $inProgress; PercentDone = $percentDone }
 }
 
-function Start-HsSmartSelfTest {
+function Start-HsSmartSelfTestRun {
     <#
     .SYNOPSIS
-        Starts a SMART short or extended self-test and polls until it
-        completes instead of using a fixed sleep (spec section 18).
+        Starts a SMART short or extended self-test and returns at once. The
+        test runs inside the drive (no CPU/RAM use), so the hardware test
+        starts it at the very beginning and collects the result with
+        Wait-HsSmartSelfTestResult once the storage stages are reached.
     #>
     param(
         [Parameter(Mandatory=$true)][string]$ConfigPath,
         [Parameter(Mandatory=$true)][string]$ToolCacheRoot,
         [Parameter(Mandatory=$true)][int]$DriveIndex,
         [Parameter(Mandatory=$true)][ValidateSet("Short","Extended")][string]$TestType,
-        [int]$MaxWaitMinutes = 0,
-        [switch]$NoDownload,
-        [string]$ProgressLabel = "SMART-Selbsttest"
+        [switch]$NoDownload
     )
 
-    # Short tests take about 2 minutes; an extended test takes from several
-    # minutes (NVMe) to hours (HDD) - 5 minutes could never be enough there.
-    if ($MaxWaitMinutes -le 0) { $MaxWaitMinutes = if ($TestType -eq "Short") { 5 } else { 120 } }
-
-    $result = [pscustomobject]@{
-        Status  = "SKIPPED"
-        Reason  = ""
-        RawOutput = ""
+    $run = [pscustomobject]@{
+        Started     = $false
+        Status      = "SKIPPED"
+        Reason      = ""
+        DriveIndex  = $DriveIndex
+        TestType    = $TestType
+        StartedAt   = $null
+        ToolPath    = ""
     }
 
     $cfg = Get-HsToolConfig -ConfigPath $ConfigPath
     $tool = Resolve-HsTool -ToolId "smartmontools" -ToolConfig $cfg -ToolCacheRoot $ToolCacheRoot -NoDownload:$NoDownload
     if (-not $tool.Available) {
-        $result.Reason = "smartctl not available: $($tool.Reason)"
-        return $result
+        $run.Reason = "smartctl not available: $($tool.Reason)"
+        return $run
     }
+    $run.ToolPath = $tool.ExecutablePath
 
     $testArg = if ($TestType -eq "Short") { "short" } else { "long" }
     $start = Invoke-HsProcess -FilePath $tool.ExecutablePath -ArgumentList @("-t", $testArg, "/dev/pd$DriveIndex") -TimeoutSeconds 30 -Stage "STORAGE_SMART_SELFTEST"
     if ($start.ExitCode -band 0x03) {
-        $result.Status = "UNSUPPORTED"
-        $result.Reason = "Could not start SMART $TestType self-test (exit code $($start.ExitCode))."
-        return $result
+        $run.Status = "UNSUPPORTED"
+        $run.Reason = "Could not start SMART $TestType self-test (exit code $($start.ExitCode))."
+        return $run
     }
     if (-not (Test-HsSmartSelfTestStarted -SmartOutput $start.StdOut)) {
-        $firstLines = (($start.StdOut -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 3) -join " / "
-        $result.Status = "UNSUPPORTED"
-        $result.Reason = "Drive/controller does not appear to support self-tests (smartctl: $firstLines)."
-        return $result
+        $lastLines = (($start.StdOut -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 3) -join " / "
+        $run.Status = "UNSUPPORTED"
+        $run.Reason = "Drive/controller does not appear to support self-tests (smartctl: $lastLines)."
+        return $run
     }
+    $run.Started = $true
+    $run.Status = "RUNNING"
+    $run.StartedAt = Get-Date
+    return $run
+}
 
+function Wait-HsSmartSelfTestResult {
+    <#
+    .SYNOPSIS
+        Polls a self-test started with Start-HsSmartSelfTestRun until it is
+        finished (instead of a fixed sleep, spec section 18) and judges it.
+        A test that was started at the beginning of the run has usually
+        finished by the time the Storage stages are reached, so there is
+        nothing left to wait for; otherwise this waits at most MaxWaitMinutes.
+    #>
+    param(
+        [Parameter(Mandatory=$true)]$Run,
+        [int]$MaxWaitMinutes = 0,
+        [string]$ProgressLabel = "SMART-Selbsttest"
+    )
+
+    $result = [pscustomobject]@{
+        Status    = $Run.Status
+        Reason    = $Run.Reason
+        RawOutput = ""
+    }
+    if (-not $Run.Started) { return $result }
+
+    # Short tests take about 2 minutes; an extended test takes from several
+    # minutes (NVMe) to hours (HDD) - 5 minutes could never be enough there.
+    if ($MaxWaitMinutes -le 0) { $MaxWaitMinutes = if ($Run.TestType -eq "Short") { 5 } else { 120 } }
     $deadline = [datetime]::Now.AddMinutes($MaxWaitMinutes)
-    $waitWatch = [Diagnostics.Stopwatch]::StartNew()
     $lastOutput = ""
     $percentDone = -1
     try {
-        while ([datetime]::Now -lt $deadline) {
+        while ($true) {
+            $poll = Invoke-HsProcess -FilePath $Run.ToolPath -ArgumentList @("-a", "/dev/pd$($Run.DriveIndex)") -TimeoutSeconds 30 -Stage "STORAGE_SMART_SELFTEST"
+            $lastOutput = $poll.StdOut
+            $progress = Get-HsSmartSelfTestProgress -SmartOutput $lastOutput
+            if (-not $progress.InProgress -or [datetime]::Now -ge $deadline) { break }
+            $percentDone = $progress.PercentDone
             for ($wait = 0; $wait -lt 15 -and [datetime]::Now -lt $deadline; $wait++) {
                 Start-Sleep -Seconds 1
                 $statusText = if ($percentDone -ge 0) { "$percentDone % erledigt" } else { "laeuft" }
-                Write-HsStageProgress -Activity $ProgressLabel -Status "$TestType, $statusText, seit $(Format-HsDuration $waitWatch.Elapsed.TotalSeconds)" -Percent $percentDone
+                $elapsed = ([datetime]::Now - [datetime]$Run.StartedAt).TotalSeconds
+                Write-HsStageProgress -Activity $ProgressLabel -Status "$($Run.TestType), $statusText, seit $(Format-HsDuration $elapsed)" -Percent $percentDone
             }
-            $poll = Invoke-HsProcess -FilePath $tool.ExecutablePath -ArgumentList @("-a", "/dev/pd$DriveIndex") -TimeoutSeconds 30 -Stage "STORAGE_SMART_SELFTEST"
-            $lastOutput = $poll.StdOut
-            $progress = Get-HsSmartSelfTestProgress -SmartOutput $lastOutput
-            if ($progress.InProgress) {
-                $percentDone = $progress.PercentDone
-                continue
-            }
-            break
         }
     } finally {
         Write-HsStageProgress -Activity $ProgressLabel -Completed
@@ -212,21 +240,40 @@ function Start-HsSmartSelfTest {
     $verdictText = [string]$lastOutput
     $newestEntry = [regex]::Match([string]$lastOutput, '(?im)^\s*(?:#\s*1|0)\s+(?:Short|Extended|Offline|Conveyance)\b.*$')
     if ($newestEntry.Success) { $verdictText = $newestEntry.Value }
+    $testType = $Run.TestType
     if ($stillRunning) {
         $result.Status = "WARNING"
-        $result.Reason = "SMART $TestType self-test did not finish within $MaxWaitMinutes minute(s) (still in progress)."
+        $result.Reason = "SMART $testType self-test was still in progress $([math]::Round(([datetime]::Now - [datetime]$Run.StartedAt).TotalMinutes)) minute(s) after its start (waited up to $MaxWaitMinutes minute(s) for it)."
     } elseif ($verdictText -match "(?i)completed without error") {
         $result.Status = "PASS"
-        $result.Reason = "SMART $TestType self-test completed without error."
+        $result.Reason = "SMART $testType self-test completed without error."
     } elseif ($verdictText -match "(?i)completed.*read failure|completed.*error|failed") {
         $result.Status = "FAIL"
-        $result.Reason = "SMART $TestType self-test reported a failure."
+        $result.Reason = "SMART $testType self-test reported a failure."
     } else {
         $result.Status = "WARNING"
-        $result.Reason = "SMART $TestType self-test status could not be conclusively determined."
+        $result.Reason = "SMART $testType self-test status could not be conclusively determined."
     }
-
     return $result
+}
+
+function Start-HsSmartSelfTest {
+    <#
+    .SYNOPSIS
+        Starts a SMART self-test and waits for its result (start + wait in
+        one call).
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$ConfigPath,
+        [Parameter(Mandatory=$true)][string]$ToolCacheRoot,
+        [Parameter(Mandatory=$true)][int]$DriveIndex,
+        [Parameter(Mandatory=$true)][ValidateSet("Short","Extended")][string]$TestType,
+        [int]$MaxWaitMinutes = 0,
+        [switch]$NoDownload,
+        [string]$ProgressLabel = "SMART-Selbsttest"
+    )
+    $run = Start-HsSmartSelfTestRun -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $DriveIndex -TestType $TestType -NoDownload:$NoDownload
+    return Wait-HsSmartSelfTestResult -Run $run -MaxWaitMinutes $MaxWaitMinutes -ProgressLabel $ProgressLabel
 }
 
 function Invoke-HsChkdskScan {

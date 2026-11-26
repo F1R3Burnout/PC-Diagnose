@@ -198,16 +198,25 @@ function Write-HsStageProgress {
             }
         }
 
+        # Checks running in the background next to this stage (storage scan
+        # during the GPU stages), supplied by the main script as a short text.
+        $parallelText = ""
+        $parallelProvider = Get-Variable -Name HsParallelStatusProvider -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+        if ($parallelProvider) {
+            try { $parallelText = [string](& $parallelProvider) } catch { $parallelText = "" }
+        }
+        $operationLine = (@($temperatureLine, $parallelText) | Where-Object { $_ }) -join " | "
+
         if ($writeMilestone) {
             $line = "    {0}: {1}% - {2}" -f $Activity, ($step * 10), $statusText
-            if ($temperatureLine) { $line = "$line | $temperatureLine" }
+            if ($operationLine) { $line = "$line | $operationLine" }
             Write-Host $line -ForegroundColor DarkGray
         }
 
         $progressArgs = @{ Id = 1; Activity = $fullActivity; Status = $(if ($statusText) { $statusText } else { " " }) }
         if ($Percent -ge 0) { $progressArgs.PercentComplete = [int][math]::Min(100, [math]::Max(0, [math]::Floor($Percent))) }
         if ($SecondsRemaining -ge 0) { $progressArgs.SecondsRemaining = [int][math]::Ceiling($SecondsRemaining) }
-        if ($temperatureLine) { $progressArgs.CurrentOperation = $temperatureLine }
+        if ($operationLine) { $progressArgs.CurrentOperation = $operationLine }
         Write-Progress @progressArgs
     } catch {
         # Progress output is a convenience only and must never fail a stage.

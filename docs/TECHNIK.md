@@ -186,7 +186,8 @@ error, or a real read/write error was actually detected.
   systems without a usable Vulkan runtime/driver.
 - **GPU Load / Thermal Validation** - full GPU load: a heavy integer
   kernel (1M threads, each looping a calibrated number of rounds so one
-  dispatch takes about 150 ms - far below the 2 s TDR limit) runs back to
+  dispatch takes about 60 ms, halved again if one takes over 400 ms - far
+  below the 2 s TDR limit) runs back to
   back on one device; every third dispatch a rotating sample of results is
   compared bit-exactly with the CPU reference. Temperature and device loss
   (TDR) are monitored. Falls back to the light verification loop if the
@@ -240,6 +241,27 @@ disk via smartctl (every 30 s). Real percentages where the work is countable
 passes and write/read phases parsed from MemoryChecker, SMART self-test as
 reported by the drive, GPU compute iterations); elapsed against planned time
 for the time-bound stages (Prime95, VRAM, GPU load, combined test).
+
+**What runs in parallel**: CPU Compute, CPU Cache/IMC and RAM always run
+alone, so an error there points at that component (disk I/O would take CPU
+time and the file cache would take memory). The storage checks only load the
+disk and its controller and therefore run next to other stages:
+
+- the SMART self-test of the Windows disk is started at the beginning of the
+  run - it runs inside the drive - and the Storage stage only collects its
+  result (waiting only if it is still running);
+- surface scan and write/read verification start with the first GPU stage
+  (GPU Compute, VRAM, GPU load) in a background runspace of the same
+  process and are collected at the Storage stages; whatever is not finished
+  by then is waited for there. Without a GPU stage they start at the
+  Storage stage as before.
+
+While they run, the line under the bar shows them next to the temperatures
+("Parallel: Surface-Scan 37 %"), and every 10% a line is written to the run
+log. The report keeps their real start/end time and notes "Ran in the
+background during the GPU stages". A thermal abort or Ctrl+C stops them
+cooperatively; a stopped check is INTERRUPTED/SKIPPED, never FAIL. The
+remaining-time estimate subtracts the time they already got in parallel.
 
 **Targeted retest**: after the run, every noticeable stage (FAIL, WARNING,
 BLOCKED, INTERRUPTED, THERMAL_ABORT) is listed and the tool asks whether to
