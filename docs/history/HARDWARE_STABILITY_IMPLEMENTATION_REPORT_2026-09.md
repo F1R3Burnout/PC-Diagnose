@@ -51,8 +51,8 @@ tests/HardwareStability/Validate-HardwareStability.ps1
 docs/HARDWARE_STABILITY_SPEC.md
 docs/HARDWARE_STABILITY_STATE.md
 docs/HARDWARE_STABILITY_ACCEPTANCE.md
-LOCAL_LLM_IMPLEMENTATION_REPORT.md (this file)
-LOCAL_LLM_TEST_RESULTS.txt
+docs/history/HARDWARE_STABILITY_IMPLEMENTATION_REPORT_2026-09.md (this file, originally LOCAL_LLM_IMPLEMENTATION_REPORT.md)
+docs/history/HARDWARE_STABILITY_TEST_RESULTS_2026-09.txt
 ```
 
 ### Geänderte Dateien
@@ -140,7 +140,7 @@ User32 1074, BugCheck 1001.
 ## 8. Fixture-Ergebnisse
 
 `tests/HardwareStability/HardwareStability.Fixtures.Tests.ps1`: **40/40 Assertions PASS**
-(letzter Lauf siehe `LOCAL_LLM_TEST_RESULTS.txt`).
+(letzter Lauf siehe `HARDWARE_STABILITY_TEST_RESULTS_2026-09.txt`).
 
 `tests/HardwareStability/Validate-HardwareStability.ps1`: **10/10 Gates PASS, Exitcode 0**.
 
@@ -181,5 +181,5 @@ Parallelarchitektur mit an PCDiagLite angelehnter, aber unabhängiger Logik in
 
 ## 13. git status / git diff --check
 
-Siehe `LOCAL_LLM_TEST_RESULTS.txt` für den finalen `git status` und
+Siehe `HARDWARE_STABILITY_TEST_RESULTS_2026-09.txt` für den finalen `git status` und
 `git diff --check`-Output vor dem Commit.

@@ -1,6 +1,57 @@
 # Hardware-Stabilitätstest — Projektstatus
 
-Letztes Update: 2026-09-18 (Nachtrag: reale Elevated-Läufe auf X470-SERVER)
+Letztes Update: 2026-11-26 (Telemetrie unter PS 5.1, Review-Fixes, PCDiagLite-Tests)
+
+## Nachtrag 2026-11-26 — Branch `feature/telemetry-ps51-pcdiaglite-tests`
+
+Status: implementiert, **noch nicht real auf Windows verifiziert** (die
+Entwicklungsumgebung hatte kein PowerShell). CI prüft Parse und die neuen
+PCDiagLite-Tests; Fixture-Suite und ein elevierter Quick-Lauf unter
+`powershell.exe` 5.1 stehen noch aus.
+
+### Telemetrie unter Windows PowerShell 5.1
+
+- Ursache des alten Fehlers: `Add-Type -Path` ruft `Assembly.GetTypes()` auf und
+  scheitert unter .NET Framework an jeder fehlenden optionalen Abhängigkeit.
+- Neu: unter PS 5.1 wird der `net472`-Build per `[Reflection.Assembly]::LoadFrom`
+  geladen; seine .NET-Framework-Abhängigkeiten (System.Memory, System.Buffers,
+  System.Numerics.Vectors, System.Runtime.CompilerServices.Unsafe,
+  System.Threading.AccessControl, System.Security.AccessControl,
+  System.Security.Principal.Windows) kommen als eigene Einträge in
+  `config/HardwareStabilityTools.json`, geprüft gegen den von nuget.org
+  veröffentlichten SHA512-Pakethash. Ein kleiner C#-AssemblyResolve-Handler
+  ersetzt die fehlenden Binding-Redirects und protokolliert, was trotzdem fehlt.
+- PowerShell 7 bleibt unverändert beim `netstandard2.0`-Build mit `Add-Type`.
+- **Wichtig:** LibreHardwareMonitor ab 0.9.5 liest CPU-Temperatur und alle
+  Mainboard-/VRM-Sensoren nur über den separat zu installierenden
+  **PawnIO-Treiber**. Ohne PawnIO gibt es auch mit funktionierender Bibliothek
+  keine CPU-Temperatur (GPU-Temperaturen über die Herstellertreiber dagegen
+  schon). Das Tool installiert bewusst keinen Treiber, sondern meldet es im
+  Report-Abschnitt "Temperature monitoring" und in
+  `02_Telemetry\TelemetryStatus.json`.
+
+### Review-Fixes
+
+- Prime95, das sich vor Ablauf der geplanten Dauer ohne Fehler beendet, ergab
+  PASS - jetzt BLOCKED.
+- System Stability ergab PASS, auch wenn Prime95 übersprungen wurde oder die
+  GPU-Last nicht lief - jetzt nur noch PASS, wenn beide Teile PASS sind.
+  Das CPU-Log überschreibt nicht mehr das der CPU-Compute-Stage.
+- Storage SMART lief nur auf der zuerst aufgezählten Platte (auf der X670E ein
+  USB-Laufwerk, die NVMe blieb ungeprüft). Jetzt alle Platten, Windows-Platte
+  zuerst; Self-Test und Surface Scan auf der Windows-Platte.
+- Tool-Downloads ohne konfigurierten Hash werden verweigert (vorher
+  ungeprüft akzeptiert).
+- Validate-Runner führt die Fixture-Suite zusätzlich unter `powershell.exe` 5.1 aus.
+
+### PCDiagLite-Regressionstests
+
+`tests/PCDiagLite.RestartShutdown.Tests.ps1` lädt nur die reinen
+Hilfsfunktionen aus `PCDiagLite.ps1` (per AST, ohne das Skript auszuführen) und
+prüft die Neustart-/Shutdown-Klassifikation mit Fixture-Events. Damit ist die
+Voraussetzung für den empfohlenen Refactor auf `EventCorrelation.psm1`
+geschaffen; der Refactor selbst ist noch nicht gemacht.
+
 
 ## Aktuelle Phase
 
@@ -127,8 +178,8 @@ gateweisen Status (45/50 PASS, 5 BLOCKED mit Begründung).
   (40 Assertions, aktuell 40/40 PASS) + Runner
   `tests/HardwareStability/Validate-HardwareStability.ps1` (10 Gates, aktuell alle PASS,
   Exitcode 0).
-- README, SPEC/STATE/ACCEPTANCE-Dokumente, `LOCAL_LLM_IMPLEMENTATION_REPORT.md`,
-  `LOCAL_LLM_TEST_RESULTS.txt`.
+- README, SPEC/STATE/ACCEPTANCE-Dokumente, `docs/history/HARDWARE_STABILITY_IMPLEMENTATION_REPORT_2026-09.md`,
+  `docs/history/HARDWARE_STABILITY_TEST_RESULTS_2026-09.txt`.
 
 ## Reale Validierung auf dieser Maschine (X470-SERVER)
 
@@ -222,10 +273,9 @@ PCDiagLites Restart-/Shutdown-Klassifikation aufbauen (analog zu
 Erledigt: PR #1 gemerged nach `main`, vollständiger elevierter Quick-Profil-Lauf auf
 echter Produktionshardware bestätigt PASS. Offene, freiwillige Folgepunkte:
 
-- Telemetrie unter Windows PowerShell 5.1 zum Laufen bringen (fehlende optionale
-  NuGet-Abhängigkeiten von LibreHardwareMonitorLib vendoren oder `net472`-Build
-  gezielt für PS5.1 laden), damit der Thermal Guard auch im produktiven
-  Elevation-Pfad echte Live-Temperaturen hat.
+- ~~Telemetrie unter Windows PowerShell 5.1 zum Laufen bringen~~ - umgesetzt
+  im Nachtrag 2026-11-26, reale Verifikation steht noch aus. CPU-Temperatur
+  braucht zusätzlich PawnIO.
 - `kiwus-it.de/r` (Wix-Weiterleitung) zeigt zeitweise noch veraltete Inhalte -
   vermutlich Client- oder Wix-seitiges Caching des 301/302-Redirects; nicht im
   Code behebbar, siehe Chat-Verlauf für Diagnosehinweise.
