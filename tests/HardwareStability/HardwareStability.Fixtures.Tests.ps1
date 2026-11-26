@@ -164,11 +164,23 @@ try {
         Write-HsOverallProgress -Activity "Fixture" -Completed
         $r.Status
     }).AddArgument([string]$LibRoot).AddArgument([string]$FixtureCache).AddArgument([string]$ConfigPath)
-    $progressStatus = @($progressRunspace.Invoke())
+    # Bounded wait: a hang must fail this check, not block the whole suite.
+    $progressAsync = $progressRunspace.BeginInvoke()
+    $progressFinished = $progressAsync.AsyncWaitHandle.WaitOne(120000)
+    if ($progressFinished) {
+        $progressStatus = @($progressRunspace.EndInvoke($progressAsync))
+    } else {
+        $progressStatus = @("TIMEOUT")
+        Write-Host "  HS-061 runspace did not finish within 120 s. Last output:" -ForegroundColor Yellow
+        @($progressRunspace.Streams.Information | Select-Object -Last 5) | ForEach-Object { Write-Host "    $_" }
+        @($progressRunspace.Streams.Error | Select-Object -Last 5) | ForEach-Object { Write-Host "    ERROR: $_" }
+        try { $progressRunspace.Stop() } catch {}
+    }
     $progressRecords = @($progressRunspace.Streams.Progress)
 } finally {
     $progressRunspace.Dispose()
 }
+Assert-True ($progressFinished) "HS-061 Progress check finished within 120 s"
 $filled = @($progressRecords | Where-Object { $_.PercentComplete -ge 0 -and $_.Activity -match "Fixture, Komponente 1 von 1: " })
 $percentValues = @($filled | ForEach-Object { $_.PercentComplete })
 Assert-True ($progressStatus -contains "PASS") "HS-061 Stage still PASSes while reporting progress (got $($progressStatus -join ','))"
