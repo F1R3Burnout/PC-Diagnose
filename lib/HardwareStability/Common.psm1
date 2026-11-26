@@ -267,16 +267,77 @@ function Get-HsTimeProgress {
 }
 
 function Write-HsLog {
+    <# Console line with time stamp, also appended to the run log when a path is given. #>
     param(
-        [Parameter(Mandatory=$true)][string]$Path,
+        [AllowEmptyString()][string]$Path = "",
         [Parameter(Mandatory=$true)][string]$Text,
         [string]$Color = "Gray"
     )
     $line = "[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $Text
     Write-Host $line -ForegroundColor $Color
+    if (-not $Path) { return }
     try {
         $line | Out-File -FilePath $Path -Encoding UTF8 -Append
     } catch {}
+}
+
+function Test-HsInteractiveConsole {
+    <#
+        Prompts only make sense with a real console user: not with -NoPrompt,
+        not in CI, not with redirected input, not in a non-interactive remote
+        session.
+    #>
+    param([switch]$NoPrompt)
+    if ($NoPrompt) { return $false }
+    try {
+        if (-not [Environment]::UserInteractive) { return $false }
+        if ([Console]::IsInputRedirected) { return $false }
+    } catch { return $false }
+    return $true
+}
+
+function Read-HsChoice {
+    <# Reads one of the allowed answers; repeats on anything else. #>
+    param([Parameter(Mandatory=$true)][string]$Prompt, [Parameter(Mandatory=$true)][string[]]$Allowed, [string]$Default = "")
+    while ($true) {
+        $answer = ([string](Read-Host $Prompt)).Trim()
+        if ([string]::IsNullOrEmpty($answer) -and $Default) { return $Default }
+        if ($Allowed -contains $answer) { return $answer }
+        Write-Host "  Bitte eine der Optionen eingeben: $($Allowed -join ', ')" -ForegroundColor Yellow
+    }
+}
+
+function Read-HsDurationMinutes {
+    <#
+        Asks for a duration: the given fixed choices plus a custom number of
+        minutes. Returns the minutes.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$Title,
+        [Parameter(Mandatory=$true)][int[]]$Choices,
+        [string[]]$Labels = @(),
+        [int]$DefaultIndex = 1,
+        [int]$MaxMinutes = 600,
+        [string]$Hint = ""
+    )
+    Write-Host ""
+    Write-Host $Title -ForegroundColor Cyan
+    for ($i = 0; $i -lt $Choices.Count; $i++) {
+        $label = if ($Labels.Count -gt $i -and $Labels[$i]) { "$($Labels[$i]) - " } else { "" }
+        Write-Host ("  [{0}] {1}{2} Minuten" -f ($i + 1), $label, $Choices[$i])
+    }
+    $customKey = $Choices.Count + 1
+    Write-Host "  [$customKey] Eigene Dauer in Minuten"
+    if ($Hint) { Write-Host "  $Hint" -ForegroundColor DarkGray }
+    $allowed = @(1..$customKey | ForEach-Object { [string]$_ })
+    $answer = [int](Read-HsChoice -Prompt "Auswahl [1-$customKey, Enter = $DefaultIndex]" -Allowed $allowed -Default ([string]$DefaultIndex))
+    if ($answer -le $Choices.Count) { return [int]$Choices[$answer - 1] }
+    while ($true) {
+        $custom = ([string](Read-Host "Minuten (1-$MaxMinutes)")).Trim()
+        $parsed = 0
+        if ([int]::TryParse($custom, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le $MaxMinutes) { return $parsed }
+        Write-Host "  Bitte eine ganze Zahl von 1 bis $MaxMinutes eingeben." -ForegroundColor Yellow
+    }
 }
 
 function Stop-HsProcessTree {

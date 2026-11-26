@@ -19,6 +19,7 @@ Import-Module (Join-Path $LibRoot "MemoryTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "GpuTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "StorageWriteVerify.psm1") -Force
 Import-Module (Join-Path $LibRoot "StorageBackground.psm1") -Force
+Import-Module (Join-Path $LibRoot "StressTest.psm1") -Force
 Import-Module (Join-Path $LibRoot "StorageTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "Reporting.psm1") -Force
 Import-Module (Join-Path $LibRoot "Telemetry.psm1") -Force
@@ -275,6 +276,69 @@ Assert-True (@($opRecords | Where-Object { $_.CurrentOperation -eq "Temperaturen
 $mainScriptText = Get-Content -Raw (Join-Path $RepoRoot "scripts\diagnostics\HardwareStability.ps1")
 Assert-True ($mainScriptText -match '\$parallelStartKey = @\(\$keys \| Where-Object \{ \$_ -in @\("GPU","VRAM","VRAMMemory","GPULoad"\) \}\)') "HS-063 Background storage checks start only at a GPU stage, never next to CPU, Cache or RAM"
 
+Write-Host "`n=== HS-064 Stresstest (Prime95 + FurMark) ===" -ForegroundColor Cyan
+$fmArgs = Get-HsFurMarkArguments -Seconds 1800 -Width 1920 -Height 1080
+Assert-True (($fmArgs -join " ") -eq "--demo furmark-gl --width 1920 --height 1080 --max-time 1800") "HS-064 FurMark 2 is started as OpenGL stress test with size and end time ($($fmArgs -join ' '))"
+$vcDir = Join-Path $FixtureCache "vcruntime_check"
+New-Item -ItemType Directory -Force -Path $vcDir | Out-Null
+Assert-True (-not (Test-HsVcRuntimeInstalled -SystemDirectory $vcDir)) "HS-064 A missing Visual C++ runtime is detected"
+foreach ($dll in @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll")) { Set-Content -LiteralPath (Join-Path $vcDir $dll) -Value "x" }
+Assert-True (Test-HsVcRuntimeInstalled -SystemDirectory $vcDir) "HS-064 An installed Visual C++ runtime is recognised"
+
+# The VC++ runtime installer is run only with a valid Microsoft signature.
+$cmdSigned = Test-HsAuthenticodeSigner -Path (Join-Path $env:SystemRoot "System32\cmd.exe") -SubjectPattern "O=Microsoft Corporation"
+Assert-True ($cmdSigned.Valid) "HS-064 A Windows binary validates against its publisher ($($cmdSigned.Status), $($cmdSigned.Subject))"
+$cmdWrongPublisher = Test-HsAuthenticodeSigner -Path (Join-Path $env:SystemRoot "System32\cmd.exe") -SubjectPattern "O=Some Other Publisher"
+Assert-True (-not $cmdWrongPublisher.Valid) "HS-064 A valid signature of another publisher is rejected"
+$unsignedExe = Join-Path $FixtureCache "sig_check\unsigned.exe"
+New-HsFakeFurMark -Path $unsignedExe -RunMilliseconds 0
+Assert-True (-not (Test-HsAuthenticodeSigner -Path $unsignedExe -SubjectPattern "O=Microsoft Corporation").Valid) "HS-064 An unsigned installer is never accepted"
+$stressConfig = Get-HsToolConfig -ConfigPath $ConfigPath
+Assert-True ($stressConfig.tools.furmark2.sha256 -match '^[0-9a-f]{64}$' -and $stressConfig.tools.vcredist_x64.sha256 -match '^[0-9a-f]{64}$') "HS-064 FurMark and the VC++ runtime are hash-pinned"
+
+$verdictPass = Get-HsStressVerdict -Mode Both -CpuResult ([pscustomobject]@{ Status = "PASS"; Reason = "" }) -GpuResult ([pscustomobject]@{ Status = "PASS"; Reason = "" })
+$verdictCpuFail = Get-HsStressVerdict -Mode Both -CpuResult ([pscustomobject]@{ Status = "FAIL"; Reason = "ROUNDOFF" }) -GpuResult ([pscustomobject]@{ Status = "WARNING"; Reason = "early" })
+$verdictReset = Get-HsStressVerdict -Mode GPU -GpuResult ([pscustomobject]@{ Status = "PASS"; Reason = "" }) -DriverResets 1
+$verdictThermal = Get-HsStressVerdict -Mode CPU -CpuResult ([pscustomobject]@{ Status = "INTERRUPTED"; Reason = "" }) -ThermalAbortReason "CPU 101 C"
+Assert-True ($verdictPass.Status -eq "PASS" -and $verdictPass.Findings.Count -eq 0) "HS-064 Both parts running their full time is a PASS"
+Assert-True ($verdictCpuFail.Status -eq "FAIL" -and $verdictCpuFail.Findings.Count -eq 2) "HS-064 A Prime95 calculation error makes the run FAIL"
+Assert-True ($verdictReset.Status -eq "WARNING") "HS-064 A graphics driver reset during the test is a WARNING"
+Assert-True ($verdictThermal.Status -eq "THERMAL_ABORT") "HS-064 A thermal abort is reported as THERMAL_ABORT"
+
+# The real script end to end with fake Prime95/FurMark (child process: the
+# script may call exit). Needs admin rights like the real tool.
+if ($isAdmin) {
+    $stressCache = Join-Path $FixtureCache "stress_cache"
+    $stressOut = Join-Path $FixtureCache "stress_out"
+    New-HsFakePrime95 -Path (Join-Path $stressCache "prime95\prime95.exe") -FailureText "" -RunMilliseconds 30000
+    New-HsFakeFurMark -Path (Join-Path $stressCache "furmark2\FurMark_win64\furmark.exe") -RunMilliseconds -1
+    $hostExe = (Get-Process -Id $PID).Path
+    $stressScript = Join-Path $RepoRoot "scripts\diagnostics\StressTest.ps1"
+    $stressArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $stressScript, "-Mode", "Both", "-Minutes", "0.1", "-NoPrompt", "-NoDownload",
+        "-SkipTelemetry", "-ToolCacheRoot", $stressCache, "-OutputRoot", $stressOut, "-ModuleRootOverride", [string]$LibRoot, "-ConfigPathOverride", [string]$ConfigPath)
+    $stressRun = Start-Process -FilePath $hostExe -ArgumentList $stressArgs -Wait -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $FixtureCache "stress_stdout.txt") -RedirectStandardError (Join-Path $FixtureCache "stress_stderr.txt")
+    $stressResultFile = @(Get-ChildItem -LiteralPath $stressOut -Recurse -Filter "00_Result.json" -ErrorAction SilentlyContinue) | Select-Object -First 1
+    $stressResult = if ($stressResultFile) { Get-Content -Raw -LiteralPath $stressResultFile.FullName | ConvertFrom-Json } else { $null }
+    if (-not $stressResult) { Get-Content -LiteralPath (Join-Path $FixtureCache "stress_stdout.txt"), (Join-Path $FixtureCache "stress_stderr.txt") -ErrorAction SilentlyContinue | Select-Object -Last 15 | ForEach-Object { Write-Host "    $_" } }
+    Assert-True ($null -ne $stressResult -and $stressResult.Status -eq "PASS" -and $stressResult.Cpu.Status -eq "PASS" -and $stressResult.Gpu.Status -eq "PASS") "HS-064 Stress test CPU + GPU runs Prime95 and FurMark for the chosen time and PASSes (exit $($stressRun.ExitCode), got $(if ($stressResult) { "$($stressResult.Status) / CPU $($stressResult.Cpu.Status) / GPU $($stressResult.Gpu.Status)" } else { 'no result' }))"
+    $fmSeen = Get-Content -LiteralPath (Join-Path $stressCache "furmark2\FurMark_win64\furmark_fixture_args.txt") -ErrorAction SilentlyContinue
+    Assert-True ($fmSeen.Count -ge 2 -and $fmSeen[0] -eq "--demo furmark-gl --width 1280 --height 720 --max-time 66" -and $fmSeen[1] -like "*FurMark_win64") "HS-064 FurMark gets the stress test arguments and its own folder as working directory ($($fmSeen -join ' | '))"
+    Assert-True (@(Get-Process -Name "furmark","prime95" -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$stressCache*" }).Count -eq 0) "HS-064 No Prime95 or FurMark process is left running"
+
+    # FurMark ending on its own long before the planned end (crash under load).
+    New-HsFakeFurMark -Path (Join-Path $stressCache "furmark2\FurMark_win64\furmark.exe") -RunMilliseconds 500 -ExitCode 3
+    $stressOut2 = Join-Path $FixtureCache "stress_out2"
+    $stressArgs2 = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $stressScript, "-Mode", "GPU", "-Minutes", "0.2", "-NoPrompt", "-NoDownload",
+        "-SkipTelemetry", "-ToolCacheRoot", $stressCache, "-OutputRoot", $stressOut2, "-ModuleRootOverride", [string]$LibRoot, "-ConfigPathOverride", [string]$ConfigPath)
+    Start-Process -FilePath $hostExe -ArgumentList $stressArgs2 -Wait -WindowStyle Hidden | Out-Null
+    $stressResult2File = @(Get-ChildItem -LiteralPath $stressOut2 -Recurse -Filter "00_Result.json" -ErrorAction SilentlyContinue) | Select-Object -First 1
+    $stressResult2 = if ($stressResult2File) { Get-Content -Raw -LiteralPath $stressResult2File.FullName | ConvertFrom-Json } else { $null }
+    Assert-True ($null -ne $stressResult2 -and $stressResult2.Status -eq "WARNING" -and $stressResult2.Gpu.Status -eq "WARNING" -and [string]$stressResult2.Gpu.Reason -match "selbst beendet") "HS-064 FurMark ending early is reported, never a PASS (got $(if ($stressResult2) { "$($stressResult2.Status): $($stressResult2.Gpu.Reason)" } else { 'no result' }))"
+} else {
+    Write-Host "  (HS-064 end-to-end part skipped: needs Administrator rights)" -ForegroundColor DarkGray
+}
+
 Write-Host "`n=== HS-052 / HS-053 Tool integrity checks ===" -ForegroundColor Cyan
 $nugetBase64 = "NXcNYlWoXe5cz9sb8Huo6x2dCZVYkhwKtgE00n/MoI8V4ZI/7/t+EI5bOhQFlZfFjjqM8+U6prjU/aARt7H/tA=="
 Assert-True ((ConvertTo-HsHexHash -Value $nugetBase64 -ByteLength 64) -eq "35770d6255a85dee5ccfdb1bf07ba8eb1d9d099558921c0ab60134d27fcca08f15e1923feffb7e108e5b3a14059597c58e3a8cf3e53aa6b8d4fda011b7b1ffb4") "HS-052 NuGet base64 SHA512 is converted to the matching hex digest"
@@ -442,6 +506,31 @@ $gpuMemState = Test-HsThermalState -Rows $gpuMem -Thresholds $thresholds
 Assert-True ($gpuMemState.State -eq "WARNING" -and $gpuMemState.Reason -match "GPU Memory") "HS-041 GPU memory junction uses its own limits (102 C => WARNING, not ABORT)"
 $superIoVrm = @([pscustomobject]@{ HardwareType = "SuperIO"; SensorType = "Temperature"; SensorName = "VRM MOS"; Value = 116 })
 Assert-True ((Test-HsThermalState -Rows $superIoVrm -Thresholds $thresholds).State -eq "ABORT") "HS-041 VRM sensors reported by the Super I/O chip are guarded too"
+# Shared by the Hardware-Stabilitaetstest and the Stresstest: warning
+# throttling, telemetry CSV, temperature line and peaks.
+$guardState = @{ Reason = ""; At = [datetime]::MinValue }
+$guardLog = Join-Path $FixtureCache "thermal_guard.log"
+[void](Invoke-HsThermalGuard -Rows $warnRows -Thresholds $thresholds -State $guardState -LogPath $guardLog)
+[void](Invoke-HsThermalGuard -Rows $warnRows -Thresholds $thresholds -State $guardState -LogPath $guardLog)
+$guardAbort = Invoke-HsThermalGuard -Rows $abortRows -Thresholds $thresholds -State $guardState -LogPath $guardLog
+$guardLines = @(Get-Content -LiteralPath $guardLog -ErrorAction SilentlyContinue)
+Assert-True ($guardAbort.State -eq "ABORT" -and @($guardLines | Where-Object { $_ -match "Thermal warning" }).Count -eq 1 -and @($guardLines | Where-Object { $_ -match "THERMAL ABORT" }).Count -eq 1) "HS-041 The thermal guard logs an unchanged warning once and every abort ($($guardLines.Count) line(s))"
+$csvState = @{}
+$csvPath = Join-Path $FixtureCache "telemetry_rows.csv"
+Save-HsTelemetryRows -Rows $warnRows -Path $csvPath -State $csvState
+Save-HsTelemetryRows -Rows $warnRows -Path $csvPath -State $csvState
+Assert-True (@(Import-Csv -LiteralPath $csvPath).Count -eq 1) "HS-041 Telemetry rows are written at most every 5 s"
+$lineRows = @(
+    [pscustomobject]@{ HardwareType = "Cpu"; SensorType = "Temperature"; SensorName = "Core (Tctl/Tdie)"; Value = 78.4 },
+    [pscustomobject]@{ HardwareType = "GpuAmd"; SensorType = "Temperature"; SensorName = "GPU Core"; Value = 70 },
+    [pscustomobject]@{ HardwareType = "GpuAmd"; SensorType = "Temperature"; SensorName = "GPU Hot Spot"; Value = 85 }
+)
+$deg = "$([char]0x00B0)C"
+Assert-True ((Format-HsTemperatureLine -Rows $lineRows -Extra "Platte 40$deg") -eq "Temperaturen: CPU 78$deg | GPU 70$deg (Hotspot 85$deg) | Platte 40$deg") "HS-041 One temperature line format for both tests ($(Format-HsTemperatureLine -Rows $lineRows -Extra "Platte 40$deg"))"
+$peaks = @{}
+Update-HsTemperaturePeaks -Peaks $peaks -Rows $lineRows
+Update-HsTemperaturePeaks -Peaks $peaks -Rows @([pscustomobject]@{ HardwareType = "Cpu"; SensorType = "Temperature"; SensorName = "Core (Tctl/Tdie)"; Value = 60 })
+Assert-True ($peaks.Cpu -eq 78.4 -and $peaks.Gpu -eq 70 -and $peaks.GpuHotspot -eq 85 -and -not $peaks.ContainsKey("Vrm")) "HS-041 Peak temperatures keep the maximum per sensor class"
 
 Write-Host "`n=== HS-042 / HS-043 / HS-045 / HS-046 Reporting ===" -ForegroundColor Cyan
 $partialStage = New-HsStage -StageName "RAM" -Component "RAM"

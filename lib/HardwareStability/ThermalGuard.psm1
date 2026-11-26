@@ -1,5 +1,7 @@
 Set-StrictMode -Version 2.0
 
+Import-Module (Join-Path $PSScriptRoot "Common.psm1") -Force
+
 function Test-HsThermalState {
     <#
     .SYNOPSIS
@@ -66,6 +68,35 @@ function Test-HsThermalState {
     }
 
     return $result
+}
+
+function Invoke-HsThermalGuard {
+    <#
+    .SYNOPSIS
+        Evaluates the rows against the thresholds and logs the result: an
+        ABORT every time, a WARNING only when it changes or once a minute
+        (some stages check several times per second). State is a hashtable
+        owned by the caller (keys Reason, At). Returns the thermal state.
+    #>
+    param(
+        [AllowNull()][object[]]$Rows,
+        [Parameter(Mandatory=$true)]$Thresholds,
+        [Parameter(Mandatory=$true)][hashtable]$State,
+        [string]$LogPath = ""
+    )
+    $thermal = Test-HsThermalState -Rows $Rows -Thresholds $Thresholds
+    if ($thermal.State -eq "ABORT") {
+        Write-HsLog -Path $LogPath -Text "THERMAL ABORT: $($thermal.Reason)" -Color "Red"
+    } elseif ($thermal.State -eq "WARNING") {
+        $now = Get-Date
+        $lastAt = if ($State.ContainsKey("At")) { [datetime]$State.At } else { [datetime]::MinValue }
+        if ($thermal.Reason -ne [string]$State.Reason -or ($now - $lastAt).TotalSeconds -ge 60) {
+            Write-HsLog -Path $LogPath -Text "Thermal warning: $($thermal.Reason)" -Color "Yellow"
+            $State.Reason = $thermal.Reason
+            $State.At = $now
+        }
+    }
+    return $thermal
 }
 
 Export-ModuleMember -Function * -Variable *

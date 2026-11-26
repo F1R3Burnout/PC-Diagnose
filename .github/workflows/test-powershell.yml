@@ -76,6 +76,18 @@ jobs:
         shell: powershell
         run: .\tests\HardwareStability\Telemetry.Smoke.ps1 -InstallPawnIO -ToolCacheRoot "$env:RUNNER_TEMP\telemetry-pawnio"
 
+  stresstest-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Real FurMark download, verification and a short GPU run (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\tests\HardwareStability\StressTest.Smoke.ps1 -OutputRoot "$env:RUNNER_TEMP\stress-smoke" -ToolCacheRoot "$env:RUNNER_TEMP\stress-tools"
+
   hardware-stability-fixtures:
     runs-on: windows-latest
 

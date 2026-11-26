@@ -273,7 +273,10 @@ function Start-HsBackgroundProcess {
         [string]$StdOutPath = "",
         [string]$Stage = "",
         [scriptblock]$OnOutputLine = $null,
-        [hashtable]$EnvironmentVariables = $null
+        [hashtable]$EnvironmentVariables = $null,
+        # Tools that load data files relative to the current directory
+        # (FurMark) need their own folder as working directory.
+        [string]$WorkingDirectory = ""
     )
 
     $psi = New-Object Diagnostics.ProcessStartInfo
@@ -285,6 +288,7 @@ function Start-HsBackgroundProcess {
     $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
     $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
     $psi.CreateNoWindow = $true
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
     if ($EnvironmentVariables) {
         foreach ($key in $EnvironmentVariables.Keys) {
             $psi.EnvironmentVariables[$key] = [string]$EnvironmentVariables[$key]

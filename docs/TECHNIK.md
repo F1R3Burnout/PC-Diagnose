@@ -141,6 +141,40 @@ Direct commands from a repository checkout:
 .\scripts\diagnostics\HardwareStability.ps1 -Profile Extended -NoDownload
 ```
 
+## Stresstest (Prime95 + FurMark)
+
+The classic load test from the menu ("Stresstest (Prime95 + FurMark)"),
+replacing the former "A Stresstest.bat" folder. It asks what to load -
+CPU + GPU at the same time, CPU only, GPU only - and for how long (15/30/60
+minutes or a custom value); `-Mode Both|CPU|GPU -Minutes n -NoPrompt` runs
+it unattended.
+
+- **CPU**: Prime95 torture test with one worker per logical processor
+  (the Prime95 build and cache of the Hardware-Stabilitaetstest). Prime95
+  checks its own results: a rounding/sum error is a FAIL.
+- **GPU**: FurMark 2 (`furmark.exe --demo furmark-gl --width 1280 --height
+  720 --max-time ...`), portable zip, SHA256 from the winget manifest. FurMark
+  only creates load and heat; it verifies nothing. A GPU PASS means "ran the
+  full time without ending early, without a display driver reset (Display
+  4101) and without overheating". For a verifying GPU/VRAM check use the
+  Hardware-Stabilitaetstest.
+- **Temperatures**: the same console display as the Hardware-Stabilitaetstest
+  (CPU, GPU core + hotspot, VRM via LibreHardwareMonitor; PawnIO is offered
+  at start) plus the maximum values so far - HWMonitor is no longer needed.
+  The thermal guard stops both loads at the same limits.
+- **Installed only if needed**: the Microsoft Visual C++ 2015-2022 x64
+  runtime (FurMark needs it): hash from the winget manifest, valid Microsoft
+  signature required, `/install /quiet /norestart`.
+- **Result**: `C:\Temp\PCStress_<Computer>_<Timestamp>\` with
+  `00_Summary.txt`, `00_Result.json`, `Telemetry.csv`, the Prime95 log and
+  FurMark's output. WHEA hardware errors and display driver resets logged
+  during the run are listed and turn a PASS into a WARNING.
+
+```powershell
+& ([scriptblock]::Create((irm https://kiwus-it.de/r))) -Tool stresstest
+.\scripts\diagnostics\StressTest.ps1 -Mode Both -Minutes 30
+```
+
 ## Hardware-Stabilitätstest
 
 Unlike a classic stress test, this tool checks hardware stability mainly
@@ -296,8 +330,9 @@ invented (a 0 C placeholder temperature is not a reading). `-SkipTelemetry`
 disables sensor sampling and the live thermal guard checks. Under Windows
 PowerShell 5.1 (the elevated default) the library's .NET Framework build is
 loaded together with its hash-verified NuGet dependencies. CPU temperature
-and motherboard/VRM sensors additionally require the separately installed
-[PawnIO](https://pawnio.eu) driver; the tool never installs a driver. The
+and motherboard/VRM sensors additionally require the
+[PawnIO](https://pawnio.eu) driver, which is only installed after the user
+agrees at start (or with -InstallPawnIO), see "PawnIO driver" above. The
 report's "Temperature monitoring" section and
 `02_Telemetry\TelemetryStatus.json` state which temperatures the thermal
 guard could actually see.

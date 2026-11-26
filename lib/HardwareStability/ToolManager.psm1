@@ -50,6 +50,26 @@ function Get-HsPropertyOrDefault {
     return $Default
 }
 
+function Test-HsAuthenticodeSigner {
+    <#
+    .SYNOPSIS
+        True if the file carries a valid Authenticode signature whose signer
+        certificate subject matches SubjectPattern (a regex, e.g. "CN=CPUID\b").
+        Used as an additional check before an installer is run.
+    #>
+    param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)][string]$SubjectPattern)
+    $check = [pscustomobject]@{ Valid = $false; Status = ""; Subject = "" }
+    try {
+        $signature = Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop
+        $check.Status = [string]$signature.Status
+        if ($signature.SignerCertificate) { $check.Subject = [string]$signature.SignerCertificate.Subject }
+        $check.Valid = ($signature.Status -eq "Valid" -and $check.Subject -match $SubjectPattern)
+    } catch {
+        $check.Status = "Error: $($_.Exception.Message)"
+    }
+    return $check
+}
+
 function Resolve-HsTool {
     <#
     .SYNOPSIS

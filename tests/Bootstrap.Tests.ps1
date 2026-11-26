@@ -148,6 +148,11 @@ try {
             if ($toolId -eq "pcdiag") { Assert-True ($script:CapturedLaunch.Arguments.DaysBack -eq 3) "PC diagnostics keeps the chosen lookback" }
             if ($toolId -eq "netdiag") { Assert-True ($script:CapturedLaunch.Arguments.LocalTargets[0] -eq "192.0.2.1") "Network diagnostics keeps target options" }
         }
+        $stressManifest = [pscustomobject]@{ tools = @([pscustomobject]@{ id="stresstest"; name="Stresstest"; requiresAdmin=$false; path="scripts/diagnostics/StressTest.ps1"; dependencies=@("lib/HardwareStability/StressTest.psm1", "config/HardwareStabilityTools.json") }) }
+        Invoke-RemoteTool -Manifest $stressManifest -SelectedTool "stresstest"
+        Assert-True ($script:CapturedLaunch.ScriptPath -like "*StressTest.ps1") "Stress test can be started from the menu"
+        Assert-True ((Test-Path -LiteralPath (Join-Path $script:CapturedLaunch.Arguments.ModuleRootOverride "StressTest.psm1")) -and (Test-Path -LiteralPath $script:CapturedLaunch.Arguments.ConfigPathOverride)) "Stress test receives its cached modules and tool configuration"
+        Assert-True ($script:CapturedLaunch.Arguments.OutputRoot -eq $OutputRoot -and $script:CapturedLaunch.Arguments.NoDownload) "Stress test keeps the output folder and -NoDownload"
         $TemporaryScriptPermission = $false
     } finally {
         $env:TEMP = $originalTemp

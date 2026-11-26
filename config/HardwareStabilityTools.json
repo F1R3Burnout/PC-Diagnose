@@ -176,6 +176,33 @@
       "license": "Signed official edition by namazso - see https://pawnio.eu",
       "usedFor": ["TELEMETRY_CPU_TEMPERATURE"],
       "notes": "Installed only after the user agrees at start (or with -InstallPawnIO). Silent switches '-install -silent' as declared by the publisher in winget-pkgs. Stays installed afterwards; removable via Windows Apps ('PawnIO'). Required by LibreHardwareMonitor 0.9.5+ for CPU temperature and Super I/O (motherboard/VRM) sensors."
+    },
+    "furmark2": {
+      "name": "Geeks3D FurMark 2",
+      "version": "2.10.2.0",
+      "officialSource": "https://geeks3d.com/furmark/downloads/",
+      "downloadUrl": "https://gpumagick.com/downloads/files/2025/fm2/2_10_dbc69dd0a08da5ff09169a4fc759ddaa/FurMark_2.10.2_win64.zip",
+      "archiveType": "zip",
+      "executable": "FurMark_win64\\furmark.exe",
+      "sha256": "27ab2e723e2e65df720bcafea681d2104744eda4a1e0a0374d7e61eaa820e63b",
+      "sha256Source": "InstallerSha256 of Geeks3D.FurMark.2 2.10.2.0 (x64 zip, portable) in the official winget-pkgs manifest",
+      "license": "Freeware (Geeks3D)",
+      "usedFor": ["STRESS_GPU"],
+      "notes": "Portable zip, nothing is installed. furmark.exe is the command line tool (--demo furmark-gl --width --height --max-time). Needs the Microsoft Visual C++ 2015+ runtime (x64), see vcredist_x64."
+    },
+    "vcredist_x64": {
+      "name": "Microsoft Visual C++ 2015-2022 Redistributable (x64)",
+      "version": "14.52.37029.0",
+      "officialSource": "https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist",
+      "downloadUrl": "https://download.visualstudio.microsoft.com/download/pr/78d061c5-9ef3-42ab-98ed-3309d1095dc4/9C02C9ED120F671B900E6B9471D890E3B2414117A7E53F4AE2E855466FA2B7C9/VC_redist.x64.exe",
+      "archiveType": "exe",
+      "executable": "VC_redist.x64.exe",
+      "sha256": "9c02c9ed120f671b900e6b9471d890e3b2414117a7e53f4ae2e855466fa2b7c9",
+      "sha256Source": "InstallerSha256 of Microsoft.VCRedist.2015+.x64 14.52.37029.0 in the official winget-pkgs manifest (also part of the download URL); additionally the Authenticode signature must be valid and from Microsoft before it is run",
+      "license": "Microsoft Software License Terms (redistributable)",
+      "usedFor": ["STRESS_GPU"],
+      "notes": "Installed only if vcruntime140.dll / vcruntime140_1.dll / msvcp140.dll are missing (FurMark needs them). Silent switches '/install /quiet /norestart'."
+
     }
   }
 }

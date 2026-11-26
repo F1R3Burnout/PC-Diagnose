@@ -156,6 +156,51 @@
           "description": "Bounds the read-only Storage Surface Read scan. 0 means the full drive."
         }
       ]
+    },
+    {
+      "id": "stresstest",
+      "name": "Stresstest (Prime95 + FurMark)",
+      "category": "pc-test",
+      "description": "Klassischer Belastungstest: CPU + GPU gleichzeitig, nur CPU oder nur GPU, Dauer waehlbar.\n    Prime95 und FurMark unter Volllast, Temperaturanzeige in der Konsole, Temperaturschutz und Ergebnisdatei.",
+      "path": "scripts/diagnostics/StressTest.ps1",
+      "dependencies": [
+        "config/HardwareStabilityTools.json",
+        "lib/HardwareStability/Common.psm1",
+        "lib/HardwareStability/ProcessRunner.psm1",
+        "lib/HardwareStability/ToolManager.psm1",
+        "lib/HardwareStability/Profiles.psm1",
+        "lib/HardwareStability/Inventory.psm1",
+        "lib/HardwareStability/Telemetry.psm1",
+        "lib/HardwareStability/ThermalGuard.psm1",
+        "lib/HardwareStability/EventCorrelation.psm1",
+        "lib/HardwareStability/CpuTests.psm1",
+        "lib/HardwareStability/GpuTests.psm1",
+        "lib/HardwareStability/StressTest.psm1",
+        "lib/HardwareStability/Native/D3D11ComputeVerifier.cs"
+      ],
+      "kind": "powershell",
+      "requiresAdmin": true,
+      "safeMode": "active-load",
+      "parameters": [
+        {
+          "name": "Mode",
+          "type": "string",
+          "default": "",
+          "description": "Both (CPU + GPU), CPU or GPU. Empty = the test asks at start."
+        },
+        {
+          "name": "Minutes",
+          "type": "double",
+          "default": 0,
+          "description": "Duration in minutes. 0 = the test asks at start (30 without a console)."
+        },
+        {
+          "name": "OutputRoot",
+          "type": "string",
+          "default": "C:\\Temp",
+          "description": "Output folder for the result folder."
+        }
+      ]
     }
   ]
 }

@@ -22,6 +22,7 @@ Das PowerShell-Werkzeug bietet System-, Netzwerk- und Displaydiagnose sowie eine
 | NetzwerkDiagnose | Adapter, DNS, Erreichbarkeit, Geschwindigkeit, VPN und Netzwerkereignisse |
 | HDMI-/Displaydiagnose | Displaypfade, EDID, HDR, Audio, Live-Überwachung und Vorher-/Nachher-Vergleich |
 | Hardware-Stabilitätstest | CPU, RAM, GPU/VRAM und Datenträger mit Datenvergleich, Temperaturüberwachung und Reset-Auswertung |
+| Stresstest (Prime95 + FurMark) | Klassischer Belastungstest: CPU + GPU, nur CPU oder nur GPU, Dauer wählbar, Temperaturanzeige mit Maximalwerten und Temperaturschutz |
 
 ## Start
 
@@ -53,7 +54,7 @@ Die temporäre Skriptfreigabe nutzt `RemoteSigned` für den Prozess. Gruppenrich
 
 ## Ergebnisse und Datenschutz
 
-Die Werkzeuge schreiben ihre Ergebnisse unter `C:\Temp`, beispielsweise `NetzwerkDiagnose`, `HDMIDiagnose` oder `PCStability_<Computer>_<Zeit>`. PCDiagLite erstellt HTML-Auswertungen, Quellenlisten und ein ZIP mit den gesammelten Daten.
+Die Werkzeuge schreiben ihre Ergebnisse unter `C:\Temp`, beispielsweise `NetzwerkDiagnose`, `HDMIDiagnose`, `PCStability_<Computer>_<Zeit>` oder `PCStress_<Computer>_<Zeit>`. PCDiagLite erstellt HTML-Auswertungen, Quellenlisten und ein ZIP mit den gesammelten Daten.
 
 Für PCDiagLite steht `-PrivacyMode` bereit. Berichte und Crash-Dumps können trotzdem sensible System- und Anwendungsinformationen enthalten. Inhalt vor einer Weitergabe prüfen.
 

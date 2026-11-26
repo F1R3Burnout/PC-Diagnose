@@ -2,6 +2,27 @@
 
 Letztes Update: 2026-11-26 (Telemetrie unter PS 5.1, Review-Fixes, PCDiagLite-Tests)
 
+## Nachtrag 2026-11-26 (5) — Menüpunkt "Stresstest (Prime95 + FurMark)"
+
+- Ersetzt den Ordner "Stresstest" mit `A Stresstest.bat` (Prime95 + FurMark 1 +
+  HWMonitor, 30 Min.): `scripts/diagnostics/StressTest.ps1`, Modul
+  `lib/HardwareStability/StressTest.psm1`, Manifest-ID `stresstest`.
+- Auswahl CPU + GPU / nur CPU / nur GPU und Dauer 15/30/60/eigene Minuten.
+- FurMark 2.10.2 (Portable-Zip, SHA256 aus winget) statt FurMark 1; VC++-Laufzeit
+  wird nur bei Bedarf installiert (winget-Hash + Microsoft-Signatur).
+- Statt HWMonitor die vorhandene Temperaturanzeige (jetzt `Format-HsTemperatureLine`
+  in Telemetry.psm1, vom Stabilitätstest mitbenutzt) plus laufende Maximalwerte;
+  Temperaturschutz wie im Stabilitätstest.
+- `Start-HsBackgroundProcess -WorkingDirectory` (FurMark lädt Daten relativ).
+- Nichts doppelt: beide Tests nutzen dieselben Bausteine - `Test-HsInteractiveConsole`,
+  `Read-HsChoice`, `Read-HsDurationMinutes`, `Write-HsLog` (Common), `Request-HsPawnIoInstall`,
+  `Save-HsTelemetryRows`, `Format-HsTemperatureLine`, `Update-HsTemperaturePeaks` (Telemetry),
+  `Invoke-HsThermalGuard` (ThermalGuard), `Get-HsHardwareInventory`, Prime95 über
+  `Invoke-HsCpuTortureTest`, dieselben Temperaturgrenzen und denselben Tool-Cache.
+- Tests: HS-064 (Fixtures inkl. Lauf mit Fake-Prime95/-FurMark, vorzeitiges
+  FurMark-Ende = WARNING), Bootstrap-Test, CI-Job `stresstest-smoke` (echter
+  FurMark-Download + kurzer GPU-Lauf).
+
 ## Nachtrag 2026-11-26 (4) — Storage parallel zu den GPU-Tests
 
 Ziel: kürzere Laufzeit, ohne die Zuordnung eines Fehlers zu verwischen.

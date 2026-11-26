@@ -1,6 +1,7 @@
 Set-StrictMode -Version 2.0
 
 $moduleDir = $PSScriptRoot
+Import-Module (Join-Path $moduleDir "Common.psm1") -Force
 Import-Module (Join-Path $moduleDir "ToolManager.psm1") -Force
 
 $script:HsComputer = $null
@@ -193,6 +194,62 @@ function Install-HsPawnIo {
         $result.Message = "PawnIO installation failed: $($_.Exception.Message)"
     }
     return $result
+}
+
+function Request-HsPawnIoInstall {
+    <#
+    .SYNOPSIS
+        Installs PawnIO if it is missing and the user agrees (asked once,
+        only in an interactive console) or -Force is given. Must run before
+        Initialize-HsTelemetry. Returns the note for the telemetry status
+        ("" when PawnIO is already installed).
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$ConfigPath,
+        [Parameter(Mandatory=$true)][string]$ToolCacheRoot,
+        [switch]$NoDownload,
+        [switch]$Force,
+        [switch]$NoPrompt,
+        [string]$LogPath = ""
+    )
+    if ((Get-HsPawnIoStatus).Installed) { return "" }
+    $installDriver = [bool]$Force
+    if (-not $installDriver -and (Test-HsInteractiveConsole -NoPrompt:$NoPrompt)) {
+        Write-Host ""
+        Write-Host "CPU-Temperatur: Dafuer braucht die Sensorbibliothek den Treiber PawnIO" -ForegroundColor Cyan
+        Write-Host "(signiert, offizielle Version von https://pawnio.eu). Ohne ihn kann der Test die" -ForegroundColor Cyan
+        Write-Host "CPU-Temperatur weder anzeigen noch bei Ueberhitzung abbrechen." -ForegroundColor Cyan
+        Write-Host "Der Treiber bleibt danach installiert und kann unter Windows 'Apps' (PawnIO) entfernt werden." -ForegroundColor DarkGray
+        $installDriver = ((Read-HsChoice -Prompt "PawnIO jetzt installieren? [J/n]" -Allowed @("j","J","n","N","ja","nein") -Default "j") -match '^(?i)j')
+    }
+    if (-not $installDriver) {
+        return "PawnIO installation was declined; CPU temperature is not available in this run."
+    }
+    Write-HsLog -Path $LogPath -Text "Installing PawnIO driver..." -Color "Cyan"
+    $install = Install-HsPawnIo -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -NoDownload:$NoDownload
+    Write-HsLog -Path $LogPath -Text "PawnIO: $($install.Message)" -Color $(if ($install.Installed -and -not $install.RebootRequired) { "Green" } else { "Yellow" })
+    return [string]$install.Message
+}
+
+function Save-HsTelemetryRows {
+    <#
+        Appends temperatures, loads and power to a CSV, at most every
+        IntervalSeconds. State is a hashtable owned by the caller (key LastAt).
+    #>
+    param(
+        [AllowNull()][object[]]$Rows,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][hashtable]$State,
+        [int]$IntervalSeconds = 5
+    )
+    if ($null -eq $Rows) { return }
+    $now = Get-Date
+    if ($State.ContainsKey("LastAt") -and ($now - [datetime]$State.LastAt).TotalSeconds -lt $IntervalSeconds) { return }
+    $State.LastAt = $now
+    try {
+        @($Rows | Where-Object { $null -ne $_ -and $_.SensorType -in @("Temperature","Load","Power") }) |
+            Export-Csv -LiteralPath $Path -Append -NoTypeInformation -Encoding UTF8
+    } catch {}
 }
 
 function New-HsTelemetryStatus {
@@ -468,6 +525,62 @@ function Get-HsPeakTemperature {
     $temps = @($Rows | Where-Object { $_.SensorType -eq "Temperature" } | Select-Object -ExpandProperty Value)
     if ($temps.Count -eq 0) { return $null }
     return ($temps | Measure-Object -Maximum).Maximum
+}
+
+function Format-HsTemperatureLine {
+    <#
+    .SYNOPSIS
+        One line with the current temperatures for the progress display:
+        CPU, GPU core (+ hotspot), VRM if the board reports it, plus an
+        optional extra part (e.g. the disk temperature). Only values a sensor
+        actually reports are shown; a missing CPU temperature is named instead
+        of being left out silently.
+    #>
+    param([AllowNull()][object[]]$Rows, [switch]$PawnIoMissing, [string]$Extra = "")
+    $deg = "$([char]0x00B0)C"
+    $parts = @()
+    $temps = @($Rows | Where-Object { $null -ne $_ -and $_.SensorType -eq "Temperature" })
+    $cpu = @($temps | Where-Object { $_.HardwareType -eq "Cpu" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
+    if ($cpu.Count -gt 0 -and $cpu[0].Count -gt 0) {
+        $parts += "CPU $([math]::Round($cpu[0].Maximum))$deg"
+    } elseif ($PawnIoMissing) {
+        $parts += "CPU - (PawnIO fehlt)"
+    } else {
+        $parts += "CPU -"
+    }
+    $gpuCore = @($temps | Where-Object { $_.HardwareType -like "Gpu*" -and $_.SensorName -notmatch "(?i)hot\s*spot|memory|junction" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
+    $gpuHot = @($temps | Where-Object { $_.HardwareType -like "Gpu*" -and $_.SensorName -match "(?i)hot\s*spot|junction" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
+    if ($gpuCore.Count -gt 0 -and $gpuCore[0].Count -gt 0) {
+        $gpuText = "GPU $([math]::Round($gpuCore[0].Maximum))$deg"
+        if ($gpuHot.Count -gt 0 -and $gpuHot[0].Count -gt 0) { $gpuText = "$gpuText (Hotspot $([math]::Round($gpuHot[0].Maximum))$deg)" }
+        $parts += $gpuText
+    }
+    $vrm = @($temps | Where-Object { $_.HardwareType -eq "Motherboard" -or $_.HardwareType -eq "SuperIO" } | Where-Object { $_.SensorName -match "(?i)vrm|mos" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
+    if ($vrm.Count -gt 0 -and $vrm[0].Count -gt 0) { $parts += "VRM $([math]::Round($vrm[0].Maximum))$deg" }
+    if ($Extra) { $parts += $Extra }
+    return "Temperaturen: " + ($parts -join " | ")
+}
+
+function Update-HsTemperaturePeaks {
+    <#
+    .SYNOPSIS
+        Keeps the highest CPU / GPU core / GPU hotspot / VRM temperature seen
+        so far in the given hashtable (keys Cpu, Gpu, GpuHotspot, Vrm).
+    #>
+    param([Parameter(Mandatory=$true)][hashtable]$Peaks, [AllowNull()][object[]]$Rows)
+    $temps = @($Rows | Where-Object { $null -ne $_ -and $_.SensorType -eq "Temperature" -and $null -ne $_.Value })
+    $groups = @{
+        Cpu        = @($temps | Where-Object { $_.HardwareType -eq "Cpu" })
+        Gpu        = @($temps | Where-Object { $_.HardwareType -like "Gpu*" -and $_.SensorName -notmatch "(?i)hot\s*spot|memory|junction" })
+        GpuHotspot = @($temps | Where-Object { $_.HardwareType -like "Gpu*" -and $_.SensorName -match "(?i)hot\s*spot|junction" })
+        Vrm        = @($temps | Where-Object { ($_.HardwareType -eq "Motherboard" -or $_.HardwareType -eq "SuperIO") -and $_.SensorName -match "(?i)vrm|mos" })
+    }
+    foreach ($key in $groups.Keys) {
+        foreach ($row in $groups[$key]) {
+            $value = [double]$row.Value
+            if (-not $Peaks.ContainsKey($key) -or $null -eq $Peaks[$key] -or $value -gt [double]$Peaks[$key]) { $Peaks[$key] = $value }
+        }
+    }
 }
 
 function Close-HsTelemetry {

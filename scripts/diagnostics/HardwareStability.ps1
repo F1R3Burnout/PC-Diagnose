@@ -148,28 +148,6 @@ New-Item -ItemType Directory -Force -Path $ToolCacheRoot | Out-Null
 
 $selectedComponents = @($Components -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-function Test-HsInteractiveConsole {
-    # Prompts only make sense with a real console user: not in CI, not with
-    # redirected input, not in a non-interactive remote session.
-    if ($NoPrompt) { return $false }
-    try {
-        if (-not [Environment]::UserInteractive) { return $false }
-        if ([Console]::IsInputRedirected) { return $false }
-    } catch { return $false }
-    return $true
-}
-
-function Read-HsChoice {
-    <# Reads one of the allowed answers; repeats on anything else. #>
-    param([Parameter(Mandatory=$true)][string]$Prompt, [Parameter(Mandatory=$true)][string[]]$Allowed, [string]$Default = "")
-    while ($true) {
-        $answer = ([string](Read-Host $Prompt)).Trim()
-        if ([string]::IsNullOrEmpty($answer) -and $Default) { return $Default }
-        if ($Allowed -contains $answer) { return $answer }
-        Write-Host "  Bitte eine der Optionen eingeben: $($Allowed -join ', ')" -ForegroundColor Yellow
-    }
-}
-
 function Select-HsProfileInteractive {
     Write-Host ""
     Write-Host "Hardware-Stabilitaetstest - Dauer und Intensitaet waehlen" -ForegroundColor Cyan
@@ -189,7 +167,7 @@ function Select-HsProfileInteractive {
 }
 
 if (-not $Profile) {
-    if ($DryRun -or -not (Test-HsInteractiveConsole)) {
+    if ($DryRun -or -not (Test-HsInteractiveConsole -NoPrompt:$NoPrompt)) {
         $Profile = "Quick"
     } else {
         $chosenProfile = Select-HsProfileInteractive
@@ -283,7 +261,7 @@ function Get-HsTelemetrySampleForStage {
     return ,$rows
 }
 
-$script:HsStageTelemetryLast = [datetime]::MinValue
+$script:HsStageTelemetryState = @{}
 $script:HsThermalAbortReason = ""
 $script:HsThermalWarningLast = @{ Reason = ""; At = [datetime]::MinValue }
 
@@ -295,14 +273,8 @@ function Save-HsStageTelemetry {
         baseline was written before.
     #>
     param([AllowNull()][object[]]$Rows)
-    if ($null -eq $Rows -or $DryRun) { return }
-    $now = Get-Date
-    if (($now - $script:HsStageTelemetryLast).TotalSeconds -lt 5) { return }
-    $script:HsStageTelemetryLast = $now
-    try {
-        @($Rows | Where-Object { $null -ne $_ -and $_.SensorType -in @("Temperature","Load","Power") }) |
-            Export-Csv -LiteralPath (Join-Path $Dirs.Telemetry "StageTelemetry.csv") -Append -NoTypeInformation -Encoding UTF8
-    } catch {}
+    if ($DryRun) { return }
+    Save-HsTelemetryRows -Rows $Rows -Path (Join-Path $Dirs.Telemetry "StageTelemetry.csv") -State $script:HsStageTelemetryState
 }
 
 function Test-HsThermalAbortOrCancel {
@@ -311,20 +283,10 @@ function Test-HsThermalAbortOrCancel {
     if ($SkipTelemetry) { return $false }
     $rows = Get-HsTelemetrySample -Stage $StageName
     Save-HsStageTelemetry -Rows $rows
-    $state = Test-HsThermalState -Rows $rows -Thresholds $thermalDefaults
+    $state = Invoke-HsThermalGuard -Rows $rows -Thresholds $thermalDefaults -State $script:HsThermalWarningLast -LogPath $RuntimeLog
     if ($state.State -eq "ABORT") {
-        Write-Progress2 "THERMAL ABORT: $($state.Reason)" "Red"
         $script:HsThermalAbortReason = $state.Reason
         return $true
-    }
-    if ($state.State -eq "WARNING") {
-        # Some stages check several times per second; repeat a warning only
-        # when it changes or once a minute.
-        $now = Get-Date
-        if ($state.Reason -ne $script:HsThermalWarningLast.Reason -or ($now - $script:HsThermalWarningLast.At).TotalSeconds -ge 60) {
-            Write-Progress2 "Thermal warning: $($state.Reason)" "Yellow"
-            $script:HsThermalWarningLast = @{ Reason = $state.Reason; At = $now }
-        }
     }
     return $false
 }
@@ -394,7 +356,7 @@ if ($pending -and [string]$pending.Status -eq "Running") {
     Write-Host "[1] Analyze the previous incident and continue with a new run"
     Write-Host "[2] Continue with a new run without further analysis"
     Write-Host "[3] Exit"
-    $choice = if (Test-HsInteractiveConsole) { Read-Host "Select" } else { "1" }
+    $choice = if (Test-HsInteractiveConsole -NoPrompt:$NoPrompt) { Read-Host "Select" } else { "1" }
     if ($choice -eq "3") { exit 0 }
     if ($choice -eq "1") {
         $incidentPath = Join-Path $pending.ResultDirectory "PreviousIncident.json"
@@ -415,24 +377,9 @@ if ($pending -and [string]$pending.Status -eq "Running") {
 # kernel driver, so it is only installed after the user agrees (or with
 # -InstallPawnIO) - and before telemetry starts, which reads it only once.
 $pawnIoInstallNote = ""
-if (-not $SkipTelemetry -and -not $NoDriverInstall -and -not (Get-HsPawnIoStatus).Installed) {
-    $installDriver = [bool]$InstallPawnIO
-    if (-not $installDriver -and (Test-HsInteractiveConsole)) {
-        Write-Host ""
-        Write-Host "CPU-Temperatur: Dafuer braucht die Sensorbibliothek den Treiber PawnIO" -ForegroundColor Cyan
-        Write-Host "(signiert, offizielle Version von https://pawnio.eu). Ohne ihn kann der Test die" -ForegroundColor Cyan
-        Write-Host "CPU-Temperatur weder anzeigen noch bei Ueberhitzung abbrechen." -ForegroundColor Cyan
-        Write-Host "Der Treiber bleibt danach installiert und kann unter Windows 'Apps' (PawnIO) entfernt werden." -ForegroundColor DarkGray
-        $installDriver = ((Read-HsChoice -Prompt "PawnIO jetzt installieren? [J/n]" -Allowed @("j","J","n","N","ja","nein") -Default "j") -match '^(?i)j')
-    }
-    if ($installDriver) {
-        Write-Progress2 "Installing PawnIO driver..." "Cyan"
-        $pawnIoInstall = Install-HsPawnIo -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -NoDownload:$NoDownload
-        $pawnIoInstallNote = $pawnIoInstall.Message
-        Write-Progress2 "PawnIO: $($pawnIoInstall.Message)" $(if ($pawnIoInstall.Installed -and -not $pawnIoInstall.RebootRequired) { "Green" } else { "Yellow" })
-    } else {
-        $pawnIoInstallNote = "PawnIO installation was declined; CPU temperature is not available in this run."
-    }
+if (-not $SkipTelemetry -and -not $NoDriverInstall) {
+    $pawnIoInstallNote = Request-HsPawnIoInstall -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -NoDownload:$NoDownload `
+        -Force:$InstallPawnIO -NoPrompt:$NoPrompt -LogPath $RuntimeLog
 }
 
 if (-not $SkipTelemetry) {
@@ -670,32 +617,14 @@ function Get-HsTemperatureLine {
     $now = Get-Date
     if (($now - $script:HsTemperatureCache.At).TotalSeconds -lt 3) { return $script:HsTemperatureCache.Line }
     $script:HsTemperatureCache.At = $now
-    $deg = "$([char]0x00B0)C"
-    $parts = @()
-    if (-not $SkipTelemetry) {
-        $rows = Get-HsTelemetrySample -Stage "DISPLAY"
-        $temps = @($rows | Where-Object { $null -ne $_ -and $_.SensorType -eq "Temperature" })
-        $cpu = @($temps | Where-Object { $_.HardwareType -eq "Cpu" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
-        if ($cpu.Count -gt 0 -and $cpu[0].Count -gt 0) {
-            $parts += "CPU $([math]::Round($cpu[0].Maximum))$deg"
-        } elseif ($null -ne $telemetryStatus -and -not $telemetryStatus.PawnIoInstalled) {
-            $parts += "CPU - (PawnIO fehlt)"
-        } else {
-            $parts += "CPU -"
-        }
-        $gpuCore = @($temps | Where-Object { $_.HardwareType -like "Gpu*" -and $_.SensorName -notmatch "(?i)hot\s*spot|memory|junction" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
-        $gpuHot = @($temps | Where-Object { $_.HardwareType -like "Gpu*" -and $_.SensorName -match "(?i)hot\s*spot|junction" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
-        if ($gpuCore.Count -gt 0 -and $gpuCore[0].Count -gt 0) {
-            $gpuText = "GPU $([math]::Round($gpuCore[0].Maximum))$deg"
-            if ($gpuHot.Count -gt 0 -and $gpuHot[0].Count -gt 0) { $gpuText = "$gpuText (Hotspot $([math]::Round($gpuHot[0].Maximum))$deg)" }
-            $parts += $gpuText
-        }
-        $vrm = @($temps | Where-Object { $_.HardwareType -eq "Motherboard" -or $_.HardwareType -eq "SuperIO" } | Where-Object { $_.SensorName -match "(?i)vrm|mos" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
-        if ($vrm.Count -gt 0 -and $vrm[0].Count -gt 0) { $parts += "VRM $([math]::Round($vrm[0].Maximum))$deg" }
-    }
     $diskText = Get-HsDiskTemperatureText
-    if ($diskText) { $parts += $diskText }
-    $line = if ($parts.Count -gt 0) { "Temperaturen: " + ($parts -join " | ") } else { "" }
+    if ($SkipTelemetry) {
+        $line = if ($diskText) { "Temperaturen: $diskText" } else { "" }
+    } else {
+        $rows = Get-HsTelemetrySample -Stage "DISPLAY"
+        $pawnIoMissing = ($null -ne $telemetryStatus -and -not $telemetryStatus.PawnIoInstalled)
+        $line = Format-HsTemperatureLine -Rows $rows -PawnIoMissing:$pawnIoMissing -Extra $diskText
+    }
     $script:HsTemperatureCache.Line = $line
     return $line
 }
@@ -1231,21 +1160,9 @@ function Read-HsRetestRequest {
     }
     $keys = @($options | Where-Object { $picked -contains $_.Number } | ForEach-Object { $_.Keys } | Select-Object -Unique)
 
-    Write-Host ""
-    Write-Host "Wie lange soll jede gewaehlte Komponente getestet werden?" -ForegroundColor Cyan
-    Write-Host "  [1] Kurz   - 10 Minuten"
-    Write-Host "  [2] Mittel - 30 Minuten"
-    Write-Host "  [3] Lang   - 60 Minuten"
-    Write-Host "  [4] Eigene Dauer in Minuten"
-    Write-Host "  Datentraeger: Surface-Scan der Windows-Platte fuer diese Dauer plus Schreib-/Lesepruefung." -ForegroundColor DarkGray
-    $durationChoice = Read-HsChoice -Prompt "Auswahl [1-4, Enter = 1]" -Allowed @("1","2","3","4") -Default "1"
-    $minutes = switch ($durationChoice) { "1" { 10 } "2" { 30 } "3" { 60 } default { 0 } }
-    while ($minutes -le 0) {
-        $custom = ([string](Read-Host "Minuten (1-600)")).Trim()
-        $parsed = 0
-        if ([int]::TryParse($custom, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 600) { $minutes = $parsed }
-        else { Write-Host "  Bitte eine ganze Zahl von 1 bis 600 eingeben." -ForegroundColor Yellow }
-    }
+    $minutes = Read-HsDurationMinutes -Title "Wie lange soll jede gewaehlte Komponente getestet werden?" -Choices @(10, 30, 60) `
+        -Labels @("Kurz", "Mittel", "Lang") -DefaultIndex 1 -MaxMinutes 600 `
+        -Hint "Datentraeger: Surface-Scan der Windows-Platte fuer diese Dauer plus Schreib-/Lesepruefung."
     return [pscustomobject]@{ Keys = $keys; Minutes = [double]$minutes }
 }
 
@@ -1301,7 +1218,7 @@ while ($true) {
             Keys    = @($RetestComponents -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
             Minutes = $(if ($RetestMinutes -gt 0) { $RetestMinutes } else { 10.0 })
         }
-    } elseif ($noticeable.Count -gt 0 -and (Test-HsInteractiveConsole)) {
+    } elseif ($noticeable.Count -gt 0 -and (Test-HsInteractiveConsole -NoPrompt:$NoPrompt)) {
         $request = Read-HsRetestRequest -Noticeable $noticeable
     }
     if ($null -eq $request -or @($request.Keys).Count -eq 0) { break }

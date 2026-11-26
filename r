@@ -527,6 +527,13 @@ function Invoke-RemoteTool {
         if ($HsDryRun) { $toolArgs.DryRun = $true }
         $toolArgs.ModuleRootOverride = Join-Path $toolCacheDir "lib\HardwareStability"
         $toolArgs.ConfigPathOverride = Join-Path $toolCacheDir "config\HardwareStabilityTools.json"
+    } elseif ($toolInfo.id -eq "stresstest") {
+        # Mode and duration are chosen in the tool itself.
+        $toolArgs.OutputRoot = $OutputRoot
+        if ($NoDownload) { $toolArgs.NoDownload = $true }
+        if ($SkipTelemetry) { $toolArgs.SkipTelemetry = $true }
+        $toolArgs.ModuleRootOverride = Join-Path $toolCacheDir "lib\HardwareStability"
+        $toolArgs.ConfigPathOverride = Join-Path $toolCacheDir "config\HardwareStabilityTools.json"
     }
 
     Write-BootstrapLog "Launching $($toolInfo.id) with args: $((@($toolArgs.Keys) | ForEach-Object { "$_=$($toolArgs[$_])" }) -join ', ')"

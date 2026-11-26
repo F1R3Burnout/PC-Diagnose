@@ -161,4 +161,31 @@ class FakeMemtestVulkan {
     New-HsFixtureExe -CSharpSource $src -OutputPath $Path
 }
 
+function New-HsFakeFurMark {
+    <#
+        Simulates FurMark 2's furmark.exe: writes its arguments and working
+        directory to furmark_fixture_args.txt (in its working directory),
+        then runs for --max-time seconds (RunMilliseconds -1) or for the given
+        time, and exits with ExitCode - an early exit simulates a crash.
+    #>
+    param([Parameter(Mandatory=$true)][string]$Path, [int]$RunMilliseconds = -1, [int]$ExitCode = 0)
+    $src = @'
+using System;
+using System.IO;
+using System.Threading;
+class FakeFurMark {
+    static int Main(string[] args) {
+        File.WriteAllText("furmark_fixture_args.txt", string.Join(" ", args) + Environment.NewLine + Environment.CurrentDirectory);
+        int seconds = 0;
+        for (int i = 0; i < args.Length - 1; i++) { if (args[i] == "--max-time") { int.TryParse(args[i + 1], out seconds); } }
+        int runMs = __RUN_MS__;
+        Thread.Sleep(runMs >= 0 ? runMs : seconds * 1000);
+        return __EXIT__;
+    }
+}
+'@
+    $src = $src.Replace("__RUN_MS__", [string]$RunMilliseconds).Replace("__EXIT__", [string]$ExitCode)
+    New-HsFixtureExe -CSharpSource $src -OutputPath $Path
+}
+
 Export-ModuleMember -Function *
