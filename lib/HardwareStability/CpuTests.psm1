@@ -23,10 +23,12 @@ Import-Module (Join-Path $moduleDir "Common.psm1") -Force
     worker per logical processor, including SMT/Hyperthreading siblings,
     which increases L2/L3/interconnect and memory-controller contention.
 
-    A documented limitation: the official undoc.txt for this version does
-    not describe the "MinTortureFFT"/"MaxTortureFFT" ini keys some community
-    guides reference for selecting Small/Large FFT ranges, so this
-    integration does not rely on them (spec: "Keine Parameter erfinden").
+    The FFT range / memory keys ("MinTortureFFT", "MaxTortureFFT",
+    "TortureMem", ...) are not described in undoc.txt, so the stability
+    stages do not set them. They are used only for the classic stress test
+    (-TortureMemoryMB, "Blend" over the free RAM), with exactly the keys and
+    values Prime95 itself wrote to prime.txt when Blend with a custom memory
+    size was chosen in its dialog.
     Results.txt was observed to only appear after several minutes of torture
     testing (or on an actual failure) in real testing on this machine - a
     short run producing no results.txt is expected and is reported as such,
@@ -55,7 +57,12 @@ function Invoke-HsCpuTortureTest {
         [switch]$NoDownload,
         [scriptblock]$TelemetrySample = $null,
         [scriptblock]$CancelCheck = { $false },
-        [string]$ProgressLabel = ""
+        [string]$ProgressLabel = "",
+        # > 0: Prime95 "Blend" over this much RAM (MB) - CPU and RAM under
+        # load at the same time, as in the classic stress test. 0 = Prime95's
+        # default torture test (the Hardware-Stabilitaetstest checks RAM
+        # separately with MemoryChecker).
+        [int]$TortureMemoryMB = 0
     )
 
     $result = [pscustomobject]@{
@@ -65,6 +72,7 @@ function Invoke-HsCpuTortureTest {
         Command         = ""
         Workers         = 0
         CoresPerTest    = 0
+        TortureMemoryMB = 0
         DurationSeconds = 0
         FailurePatterns = @()
         PeakTemperature = $null
@@ -96,8 +104,16 @@ function Invoke-HsCpuTortureTest {
     $result.Workers = $workers
     $result.CoresPerTest = $coresPerTest
 
-    "NumWorkers=$workers`nWorkPreference=0`nCoresPerTest=$coresPerTest`nV30OptionsConverted=1`nWelcomeDialogAlreadyShown=1`n" |
-        Out-File -FilePath (Join-Path $workDir "prime.txt") -Encoding ASCII -Force
+    $primeConfig = "NumWorkers=$workers`nWorkPreference=0`nCoresPerTest=$coresPerTest`nV30OptionsConverted=1`nWelcomeDialogAlreadyShown=1`n"
+    if ($TortureMemoryMB -gt 0) {
+        # The keys Prime95 itself writes to prime.txt when "Blend" with a
+        # custom memory size is chosen in its torture test dialog (taken from
+        # a prime.txt Prime95 30.19 wrote): FFT sizes 4K-8192K, memory in MB,
+        # 6 minutes per FFT size, hyperthreads included.
+        $primeConfig += "StressTester=1`nUsePrimenet=0`nTortureHyperthreading=1`nMinTortureFFT=4`nMaxTortureFFT=8192`nTortureMem=$TortureMemoryMB`nTortureTime=6`nTortureWeak=0`n"
+        $result.TortureMemoryMB = $TortureMemoryMB
+    }
+    $primeConfig | Out-File -FilePath (Join-Path $workDir "prime.txt") -Encoding ASCII -Force
 
     $resultsPath = Join-Path $workDir "results.txt"
     if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
@@ -105,7 +121,7 @@ function Invoke-HsCpuTortureTest {
     $logPath = Join-Path $OutputDirectory "$StageName.log"
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
     $result.LogPath = $logPath
-    $result.Command = "$exePath -t (workers=$workers, coresPerTest=$coresPerTest)"
+    $result.Command = "$exePath -t (workers=$workers, coresPerTest=$coresPerTest$(if ($TortureMemoryMB -gt 0) { ", blend over $TortureMemoryMB MB RAM" }))"
 
     $process = Start-Process -FilePath $exePath -ArgumentList "-t" -WorkingDirectory $workDir -PassThru -WindowStyle Minimized
     Register-HsProcess -ProcessId $process.Id -Stage $StageName -LogFile $logPath | Out-Null

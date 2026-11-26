@@ -18,6 +18,9 @@ neuen (0). Offen:
 - GPU-Last schwankt (LHM-Stichproben 0-99 %, ca. 65-104 W): Dispatch und
   CPU-Prüfung wechseln sich ab. Für maximale Wärme gibt es jetzt den Stresstest
   mit FurMark.
+- Stresstest: Prime95 lief ohne RAM-Last (nur Worker-Anzahl gesetzt). Jetzt
+  Blend über fast den ganzen freien RAM (`Invoke-HsCpuTortureTest -TortureMemoryMB`,
+  Größe über `Get-HsMaxRamPercent`), Varianten heißen "CPU + RAM + GPU" / "CPU + RAM".
 - 02_Telemetry\StageTelemetry.csv war im hochgeladenen ZIP beschädigt (Deflate-
   Fehler ab ca. 97 %); Original auf dem Rechner prüfen.
 

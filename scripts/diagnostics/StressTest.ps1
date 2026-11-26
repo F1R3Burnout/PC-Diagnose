@@ -5,8 +5,9 @@
     in der Konsole (statt HWMonitor), Temperaturschutz und Ergebnisdatei.
 
 .DESCRIPTION
-    Varianten: CPU + GPU gleichzeitig (Prime95 + FurMark), nur CPU
-    (Prime95, alle Threads) oder nur GPU (FurMark). Dauer waehlbar.
+    Varianten: CPU + RAM + GPU gleichzeitig (Prime95 Blend + FurMark),
+    CPU + RAM (Prime95 Blend ueber fast den ganzen freien RAM, alle Threads)
+    oder nur GPU (FurMark). Dauer waehlbar.
 
     Prime95 prueft seine Rechenergebnisse selbst (Rundungs-/Summenfehler =
     FAIL). FurMark erzeugt nur Last und Waerme und prueft nichts nach: ein
@@ -21,7 +22,7 @@
     Rueckfrage - dem PawnIO-Treiber (fuer die CPU-Temperatur).
 
 .PARAMETER Mode
-    Both (CPU + GPU), CPU oder GPU. Leer = Auswahl beim Start.
+    Both (CPU + RAM + GPU), CPU (CPU + RAM) oder GPU. Leer = Auswahl beim Start.
 
 .PARAMETER Minutes
     Dauer in Minuten. 0 = Auswahl beim Start (ohne Rueckfrage: 30).
@@ -76,7 +77,7 @@ $ConfigPath = if ($ConfigPathOverride) { $ConfigPathOverride } else { Join-Path 
 
 foreach ($module in @(
     "Common.psm1","ProcessRunner.psm1","ToolManager.psm1","Profiles.psm1","Inventory.psm1","Telemetry.psm1",
-    "ThermalGuard.psm1","EventCorrelation.psm1","CpuTests.psm1","GpuTests.psm1","StressTest.psm1"
+    "ThermalGuard.psm1","EventCorrelation.psm1","CpuTests.psm1","MemoryTests.psm1","GpuTests.psm1","StressTest.psm1"
 )) {
     Import-Module (Join-Path $ModuleRoot $module) -Force
 }
@@ -121,7 +122,7 @@ if ($Minutes -le 0) {
     }
 }
 
-$modeLabel = switch ($Mode) { "Both" { "CPU + GPU" } "CPU" { "nur CPU" } "GPU" { "nur GPU" } }
+$modeLabel = switch ($Mode) { "Both" { "CPU + RAM + GPU" } "CPU" { "CPU + RAM" } "GPU" { "nur GPU" } }
 $runCpu = $Mode -in @("Both","CPU")
 $runGpu = $Mode -in @("Both","GPU")
 $plannedSeconds = [double]$Minutes * 60
@@ -276,11 +277,15 @@ try {
 
     if ($runCpu) {
         if ($furMarkHandle) { $global:HsParallelStatusProvider = { Get-StressFurMarkStatusText } }
-        Write-Progress2 "Prime95 startet (Torture-Test, $($cpuInfo.LogicalProcessors) Worker)." "Cyan"
+        # Prime95 "Blend" over as much RAM as is free now (same sizing as the
+        # RAM test), keeping a reserve for Windows - and for FurMark if it runs.
+        $ramTarget = Get-HsMaxRamPercent -ExtraReserveMB $(if ($furMarkHandle) { 1024 } else { 0 }) -MaxPercent 90
+        $tortureMB = [int][math]::Floor([double]$ramTarget.TotalMB * $ramTarget.Percent / 100)
+        Write-Progress2 ("Prime95 startet: Blend, {0} Worker, {1:N1} GB RAM ({2}% von {3:N1} GB; frei waren {4:N1} GB)." -f $cpuInfo.LogicalProcessors, ($tortureMB / 1024), $ramTarget.Percent, ($ramTarget.TotalMB / 1024), ($ramTarget.FreeMB / 1024)) "Cyan"
         $cpuResult = Invoke-HsCpuTortureTest -StageName "CPU_CACHE_IMC" -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot `
             -OutputDirectory $Out -DurationMinutes $Minutes -LogicalProcessors $cpuInfo.LogicalProcessors -PhysicalCores $cpuInfo.Cores `
             -NoDownload:$NoDownload -TelemetrySample { param($s) Get-StressSample } -CancelCheck { Test-StressAbort } `
-            -ProgressLabel "Prime95 (alle Threads)"
+            -TortureMemoryMB $tortureMB -ProgressLabel ("Prime95 Blend (CPU + {0:N1} GB RAM)" -f ($tortureMB / 1024))
         Write-Progress2 "Prime95: $($cpuResult.Status) - $($cpuResult.Reason)" $(if ($cpuResult.Status -eq "PASS") { "Green" } elseif ($cpuResult.Status -eq "FAIL") { "Red" } else { "Yellow" })
     } elseif ($furMarkHandle) {
         $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -352,7 +357,7 @@ $lines = New-Object System.Collections.ArrayList
 [void]$lines.Add("GPU:             $gpuNames")
 [void]$lines.Add("")
 if ($runCpu) {
-    $cpuLine = if ($cpuResult) { "$($cpuResult.Status) - $($cpuResult.Workers) Worker - $($cpuResult.Reason)" } else { "lief nicht" }
+    $cpuLine = if ($cpuResult) { "$($cpuResult.Status) - Blend, $($cpuResult.Workers) Worker, $([math]::Round($cpuResult.TortureMemoryMB / 1024, 1)) GB RAM - $($cpuResult.Reason)" } else { "lief nicht" }
     [void]$lines.Add("Prime95:         $cpuLine")
 }
 if ($runGpu) {

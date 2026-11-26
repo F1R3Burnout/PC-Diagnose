@@ -126,6 +126,8 @@ New-HsFakePrime95 -Path (Join-Path $p95Cache "prime95.exe") -FailureText "" -Run
 $cpuPass = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "cpu_pass_out") -DurationMinutes 0.05 -LogicalProcessors 8 -PhysicalCores 4 -NoDownload
 Assert-True ($cpuPass.Status -eq "PASS") "HS-011 Prime95 PASS fixture (no failure text) => PASS"
 Assert-True ($cpuPass.Workers -eq 4) "HS-014 CPU_COMPUTE uses one worker per physical core (4)"
+$stabilityPrimeTxt = Get-Content -Raw -LiteralPath (Join-Path $FixtureCache "prime95_CPU_COMPUTE\prime.txt")
+Assert-True ($stabilityPrimeTxt -notmatch 'TortureMem|MinTortureFFT') "HS-014 The stability stages keep Prime95's default test (RAM is checked separately by MemoryChecker)"
 
 Remove-Item -Recurse -Force $p95Cache -ErrorAction SilentlyContinue
 New-HsFakePrime95 -Path (Join-Path $p95Cache "prime95.exe") -FailureText "FATAL ERROR: hardware failure detected"
@@ -325,6 +327,10 @@ if ($isAdmin) {
     $fmSeen = Get-Content -LiteralPath (Join-Path $stressCache "furmark2\FurMark_win64\furmark_fixture_args.txt") -ErrorAction SilentlyContinue
     Assert-True ($fmSeen.Count -ge 2 -and $fmSeen[0] -eq "--demo furmark-gl --width 1280 --height 720 --max-time 66" -and $fmSeen[1] -like "*FurMark_win64") "HS-064 FurMark gets the stress test arguments and its own folder as working directory ($($fmSeen -join ' | '))"
     Assert-True (@(Get-Process -Name "furmark","prime95" -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$stressCache*" }).Count -eq 0) "HS-064 No Prime95 or FurMark process is left running"
+    $stressPrimeTxt = Get-Content -Raw -LiteralPath (Join-Path $stressCache "prime95_CPU_CACHE_IMC\prime.txt") -ErrorAction SilentlyContinue
+    $stressTortureMem = [regex]::Match([string]$stressPrimeTxt, 'TortureMem=(\d+)')
+    Assert-True ($stressTortureMem.Success -and [int]$stressTortureMem.Groups[1].Value -ge 256 -and $stressPrimeTxt -match 'MinTortureFFT=4' -and $stressPrimeTxt -match 'MaxTortureFFT=8192') "HS-064 The stress test runs Prime95 Blend over the free RAM (TortureMem=$(if ($stressTortureMem.Success) { $stressTortureMem.Groups[1].Value } else { 'missing' }) MB)"
+    Assert-True ([double]$stressResult.Cpu.TortureMemoryMB -ge 256) "HS-064 The result names how much RAM Prime95 used ($($stressResult.Cpu.TortureMemoryMB) MB)"
 
     # FurMark ending on its own long before the planned end (crash under load).
     New-HsFakeFurMark -Path (Join-Path $stressCache "furmark2\FurMark_win64\furmark.exe") -RunMilliseconds 500 -ExitCode 3

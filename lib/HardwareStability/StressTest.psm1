@@ -14,8 +14,8 @@ Import-Module (Join-Path $PSScriptRoot "ToolManager.psm1") -Force
 function Get-HsStressModeChoice {
     <# The test variants offered in the menu, in display order. #>
     return @(
-        [pscustomobject]@{ Key = "1"; Mode = "Both"; Label = "CPU + GPU gleichzeitig (Prime95 + FurMark)" }
-        [pscustomobject]@{ Key = "2"; Mode = "CPU";  Label = "nur CPU (Prime95, alle Threads)" }
+        [pscustomobject]@{ Key = "1"; Mode = "Both"; Label = "CPU + RAM + GPU gleichzeitig (Prime95 Blend + FurMark)" }
+        [pscustomobject]@{ Key = "2"; Mode = "CPU";  Label = "CPU + RAM (Prime95 Blend, alle Threads, fast der ganze freie RAM)" }
         [pscustomobject]@{ Key = "3"; Mode = "GPU";  Label = "nur GPU (FurMark)" }
     )
 }

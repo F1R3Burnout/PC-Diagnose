@@ -145,13 +145,17 @@ Direct commands from a repository checkout:
 
 The classic load test from the menu ("Stresstest (Prime95 + FurMark)"),
 replacing the former "A Stresstest.bat" folder. It asks what to load -
-CPU + GPU at the same time, CPU only, GPU only - and for how long (15/30/60
-minutes or a custom value); `-Mode Both|CPU|GPU -Minutes n -NoPrompt` runs
-it unattended.
+CPU + RAM + GPU at the same time, CPU + RAM, or GPU only - and for how long
+(15/30/60 minutes or a custom value); `-Mode Both|CPU|GPU -Minutes n
+-NoPrompt` runs it unattended.
 
-- **CPU**: Prime95 torture test with one worker per logical processor
-  (the Prime95 build and cache of the Hardware-Stabilitaetstest). Prime95
-  checks its own results: a rounding/sum error is a FAIL.
+- **CPU + RAM**: Prime95 "Blend" (FFT 4K-8192K) with one worker per logical
+  processor over almost all free RAM (`TortureMem`, sized like the RAM test:
+  available memory minus a Windows reserve, 1 GB more when FurMark runs) -
+  the settings of the old prime.txt. Prime95 checks its own results: a
+  rounding/sum error is a FAIL. Same Prime95 build and cache as the
+  Hardware-Stabilitaetstest, whose stages keep Prime95's default test (RAM is
+  verified there by MemoryChecker).
 - **GPU**: FurMark 2 (`furmark.exe --demo furmark-gl --width 1280 --height
   720 --max-time ...`), portable zip, SHA256 from the winget manifest. FurMark
   only creates load and heat; it verifies nothing. A GPU PASS means "ran the
