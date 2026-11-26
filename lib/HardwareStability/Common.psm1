@@ -149,6 +149,8 @@ function Write-HsStageProgress {
             return
         }
 
+        $writeMilestone = $false
+        $step = 0
         if ($Percent -ge 0) {
             $step = [int][math]::Floor([math]::Min(100, $Percent) / 10)
             $milestone = Get-Variable -Name HsProgressMilestone -Scope Global -ValueOnly -ErrorAction SilentlyContinue
@@ -156,16 +158,56 @@ function Write-HsStageProgress {
                 $global:HsProgressMilestone = @{ Activity = $fullActivity; Step = $step }
             } elseif ($step -gt $milestone.Step) {
                 $milestone.Step = $step
-                Write-Host ("    {0}: {1}% - {2}" -f $Activity, ($step * 10), $Status) -ForegroundColor DarkGray
+                $writeMilestone = $true
             }
         }
 
         $now = [datetime]::UtcNow
-        if (-not $Force -and ($now - $script:HsProgressLastRender).TotalMilliseconds -lt 250) { return }
+        if (-not $Force -and -not $writeMilestone -and ($now - $script:HsProgressLastRender).TotalMilliseconds -lt 250) { return }
         $script:HsProgressLastRender = $now
-        $progressArgs = @{ Id = 1; Activity = $fullActivity; Status = $(if ($Status) { $Status } else { " " }) }
+
+        # Remaining time of this stage and of the whole run. The run plan is
+        # set per stage by the main script ($global:HsRunPlanState): the sum
+        # of the planned durations still ahead, plus whether some of them
+        # cannot be known in advance (RAM passes, full surface scan, extended
+        # SMART self-test) - then the total is shown as a minimum.
+        $statusText = $Status
+        if ($SecondsRemaining -ge 0) { $statusText = "$statusText | Phase noch $(Format-HsDuration $SecondsRemaining)" }
+        $plan = Get-Variable -Name HsRunPlanState -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+        if ($null -ne $plan) {
+            $totalSeconds = [double]$plan.LaterKnownSeconds + $(if ($SecondsRemaining -ge 0) { $SecondsRemaining } else { 0 })
+            $isMinimum = ($SecondsRemaining -lt 0) -or [bool]$plan.LaterUnknownText
+            $prefix = if ($isMinimum) { "mind. " } else { "ca. " }
+            $statusText = "$statusText | Gesamt noch $prefix$(Format-HsDuration $totalSeconds)"
+            if ($plan.LaterUnknownText) { $statusText = "$statusText + $($plan.LaterUnknownText)" }
+        }
+
+        # Current temperatures, supplied by the main script (it owns the
+        # telemetry session and caches the readings for a few seconds).
+        $temperatureLine = ""
+        $provider = Get-Variable -Name HsTemperatureProvider -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+        if ($provider) {
+            try {
+                $temperatureLine = [string](& $provider)
+            } catch {
+                # Shown once in the run log by the main script; never fails a stage.
+                $temperatureLine = ""
+                if (-not (Get-Variable -Name HsTemperatureProviderError -Scope Global -ValueOnly -ErrorAction SilentlyContinue)) {
+                    $global:HsTemperatureProviderError = $_.Exception.Message
+                }
+            }
+        }
+
+        if ($writeMilestone) {
+            $line = "    {0}: {1}% - {2}" -f $Activity, ($step * 10), $statusText
+            if ($temperatureLine) { $line = "$line | $temperatureLine" }
+            Write-Host $line -ForegroundColor DarkGray
+        }
+
+        $progressArgs = @{ Id = 1; Activity = $fullActivity; Status = $(if ($statusText) { $statusText } else { " " }) }
         if ($Percent -ge 0) { $progressArgs.PercentComplete = [int][math]::Min(100, [math]::Max(0, [math]::Floor($Percent))) }
         if ($SecondsRemaining -ge 0) { $progressArgs.SecondsRemaining = [int][math]::Ceiling($SecondsRemaining) }
+        if ($temperatureLine) { $progressArgs.CurrentOperation = $temperatureLine }
         Write-Progress @progressArgs
     } catch {
         # Progress output is a convenience only and must never fail a stage.

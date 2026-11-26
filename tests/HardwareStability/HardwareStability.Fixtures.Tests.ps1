@@ -157,6 +157,8 @@ try {
         Import-Module (Join-Path $libRoot "Common.psm1") -Force
         Import-Module (Join-Path $libRoot "CpuTests.psm1") -Force
         Write-HsOverallProgress -Activity "Fixture" -Status "Komponente 1 von 1" -Stage "CPU Compute"
+        $global:HsRunPlanState = @{ LaterKnownSeconds = 600; LaterUnknownText = "RAM" }
+        $global:HsTemperatureProvider = { "Temperaturen: CPU 50 C" }
         $r = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $configPath -ToolCacheRoot $cacheRoot `
             -OutputDirectory (Join-Path $cacheRoot "cpu_progress_out") -DurationMinutes 0.1 -LogicalProcessors 2 -PhysicalCores 1 -NoDownload
         Write-HsOverallProgress -Activity "Fixture" -Completed
@@ -174,6 +176,8 @@ Assert-True ($filled.Count -ge 3) "HS-061 Progress records are emitted despite a
 Assert-True (@($progressRecords | Where-Object { $_.ParentActivityId -ge 0 }).Count -eq 0) "HS-061 Only one top-level bar is used (no child records)"
 Assert-True ($percentValues.Count -ge 2 -and $percentValues[-1] -gt $percentValues[0]) "HS-061 The bar fills over time ($($percentValues -join ' -> ')%)"
 Assert-True (@($filled | Where-Object { $_.StatusDescription -match "\d+:\d\d von \d+:\d\d" }).Count -ge 1) "HS-061 Status shows elapsed and planned time"
+Assert-True (@($filled | Where-Object { $_.StatusDescription -match "Phase noch \d+:\d\d" -and $_.StatusDescription -match "Gesamt noch mind\. 1\d:\d\d \+ RAM" }).Count -ge 1) "HS-061 Status shows remaining stage time and remaining total (planned later stages + unknown parts) ($(@($filled)[0].StatusDescription))"
+Assert-True (@($filled | Where-Object { $_.CurrentOperation -eq "Temperaturen: CPU 50 C" }).Count -ge 1) "HS-061 Current temperatures are shown under the bar"
 
 Write-Host "`n=== HS-052 / HS-053 Tool integrity checks ===" -ForegroundColor Cyan
 $nugetBase64 = "NXcNYlWoXe5cz9sb8Huo6x2dCZVYkhwKtgE00n/MoI8V4ZI/7/t+EI5bOhQFlZfFjjqM8+U6prjU/aARt7H/tA=="

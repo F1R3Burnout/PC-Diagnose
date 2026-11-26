@@ -404,6 +404,7 @@ function Invoke-HsStageWrapper {
     Start-HsStage $stage
     Write-Progress2 "START: $Component" "Cyan"
     Write-HsOverallProgress -Activity $script:HsOverallActivity -Status $script:HsOverallStatus -Stage $Component
+    Step-HsRunPlan -StageName $StageName
 
     if ($idleState.State -eq "ABORT") {
         Complete-HsStage $stage -Status "THERMAL_ABORT" -Assessment "Configured safety threshold was already reached before this stage's load began."
@@ -441,6 +442,146 @@ function New-HsStageDirs {
     return $stageDirs
 }
 
+function Get-HsStagePlan {
+    <#
+    .SYNOPSIS
+        Planned stages of a component list in execution order, with their
+        planned seconds - the basis of "Gesamt noch ..." in the progress bar.
+        Seconds = -1 marks a stage whose length depends on the hardware and
+        cannot be known up front (RAM passes, full surface scan, extended
+        SMART self-test); the total is then shown as a minimum.
+    #>
+    param([Parameter(Mandatory=$true)][string[]]$Keys, [Parameter(Mandatory=$true)]$StageProfile)
+
+    $plan = New-Object System.Collections.ArrayList
+    $diskCount = [math]::Max(1, @($inventory.PhysicalDisks).Count)
+    foreach ($key in $Keys) {
+        switch ($key) {
+            "CPU"   { [void]$plan.Add([pscustomobject]@{ Stage = "CPU_COMPUTE"; Seconds = [double]$StageProfile.CpuComputeMinutes * 60; Unknown = "" }) }
+            "Cache" { [void]$plan.Add([pscustomobject]@{ Stage = "CPU_CACHE_IMC"; Seconds = [double]$StageProfile.CpuCacheImcMinutes * 60; Unknown = "" }) }
+            "RAM" {
+                if ([double]$StageProfile.RamDurationMinutes -gt 0) {
+                    [void]$plan.Add([pscustomobject]@{ Stage = "RAM"; Seconds = [double]$StageProfile.RamDurationMinutes * 60; Unknown = "" })
+                } else {
+                    [void]$plan.Add([pscustomobject]@{ Stage = "RAM"; Seconds = -1; Unknown = "RAM" })
+                }
+            }
+            "GPU"   { [void]$plan.Add([pscustomobject]@{ Stage = "GPU_COMPUTE"; Seconds = 15; Unknown = "" }) }
+            { $_ -in @("VRAM","VRAMMemory") } { [void]$plan.Add([pscustomobject]@{ Stage = "VRAM"; Seconds = [double]$StageProfile.VramTestMinutes * 60; Unknown = "" }) }
+        }
+        if ($key -in @("VRAM","GPULoad")) {
+            [void]$plan.Add([pscustomobject]@{ Stage = "GPU_LOAD_THERMAL"; Seconds = [double]$StageProfile.GpuLoadMinutes * 60; Unknown = "" })
+        }
+        if ($key -eq "Storage") {
+            for ($d = 0; $d -lt $diskCount; $d++) { [void]$plan.Add([pscustomobject]@{ Stage = "STORAGE_SMART"; Seconds = 10; Unknown = "" }) }
+            if ($StageProfile.SmartSelfTest -eq "Short") {
+                [void]$plan.Add([pscustomobject]@{ Stage = "STORAGE_SMART_SELFTEST"; Seconds = 150; Unknown = "" })
+            } else {
+                [void]$plan.Add([pscustomobject]@{ Stage = "STORAGE_SMART_SELFTEST"; Seconds = -1; Unknown = "SMART-Test" })
+            }
+            if (-not $StageProfile.SurfaceScanEnabled) {
+                [void]$plan.Add([pscustomobject]@{ Stage = "STORAGE_SURFACE"; Seconds = 1; Unknown = "" })
+            } elseif ([double]$StageProfile.SurfaceScanMaxMinutes -gt 0) {
+                [void]$plan.Add([pscustomobject]@{ Stage = "STORAGE_SURFACE"; Seconds = [double]$StageProfile.SurfaceScanMaxMinutes * 60; Unknown = "" })
+            } else {
+                [void]$plan.Add([pscustomobject]@{ Stage = "STORAGE_SURFACE"; Seconds = -1; Unknown = "Surface-Scan" })
+            }
+            [void]$plan.Add([pscustomobject]@{ Stage = "STORAGE_WRITE_VERIFY"; Seconds = 5 + [double]$StageProfile.StorageWriteVerifyMB * 2 / 250; Unknown = "" })
+        }
+        if ($key -eq "PCIe") { [void]$plan.Add([pscustomobject]@{ Stage = "PCIE_WHEA"; Seconds = 5; Unknown = "" }) }
+        if ($key -eq "System") { [void]$plan.Add([pscustomobject]@{ Stage = "SYSTEM_STABILITY"; Seconds = [double]$StageProfile.SystemStabilityMinutes * 60; Unknown = "" }) }
+    }
+    return ,$plan
+}
+
+function Step-HsRunPlan {
+    <# Moves the plan pointer to the stage that is starting and publishes what is left after it. #>
+    param([Parameter(Mandatory=$true)][string]$StageName)
+    if ($null -eq $script:HsStagePlan) { return }
+    for ($i = $script:HsStagePlanIndex + 1; $i -lt $script:HsStagePlan.Count; $i++) {
+        if ($script:HsStagePlan[$i].Stage -eq $StageName) { $script:HsStagePlanIndex = $i; break }
+    }
+    $later = @()
+    for ($i = $script:HsStagePlanIndex + 1; $i -lt $script:HsStagePlan.Count; $i++) { $later += $script:HsStagePlan[$i] }
+    $knownSeconds = 0.0
+    foreach ($entry in $later) { if ($entry.Seconds -ge 0) { $knownSeconds += $entry.Seconds } }
+    $unknown = @($later | Where-Object { $_.Unknown } | ForEach-Object { $_.Unknown } | Select-Object -Unique)
+    $global:HsRunPlanState = @{
+        LaterKnownSeconds = $knownSeconds
+        LaterUnknownText  = ($unknown -join "/")
+    }
+}
+
+$script:HsTemperatureCache = @{ At = [datetime]::MinValue; Line = ""; DiskAt = [datetime]::MinValue; DiskText = "" }
+$script:HsSmartctlPath = ""
+
+function Get-HsDiskTemperatureText {
+    <#
+        Windows disk temperature via smartctl (LibreHardwareMonitor's storage
+        group is deliberately disabled, see Telemetry.psm1). Read-only and
+        polled at most every 30 s.
+    #>
+    if (-not $script:HsSmartctlPath) { return "" }
+    $now = Get-Date
+    if (($now - $script:HsTemperatureCache.DiskAt).TotalSeconds -lt 30) { return $script:HsTemperatureCache.DiskText }
+    $script:HsTemperatureCache.DiskAt = $now
+    $text = ""
+    try {
+        $disk = @($inventory.PhysicalDisks) | Select-Object -First 1
+        if ($disk) {
+            $index = [int]($disk.DeviceId -replace '[^0-9]','')
+            $run = Invoke-HsProcess -FilePath $script:HsSmartctlPath -ArgumentList @("-A", "/dev/pd$index") -TimeoutSeconds 15
+            $out = [string]$run.StdOut
+            $value = $null
+            $nvme = [regex]::Match($out, '(?im)^Temperature:\s+(\d+)\s+Celsius')
+            $ata = [regex]::Match($out, '(?im)^\s*(?:194|190)\s+\S*Temp\S*\s+(?:\S+\s+){7}(\d+)')
+            if ($nvme.Success) { $value = [int]$nvme.Groups[1].Value } elseif ($ata.Success) { $value = [int]$ata.Groups[1].Value }
+            if ($null -ne $value -and $value -gt 0) { $text = "Platte $value$([char]0x00B0)C" }
+        }
+    } catch {}
+    $script:HsTemperatureCache.DiskText = $text
+    return $text
+}
+
+function Get-HsTemperatureLine {
+    <#
+        One line with the current temperatures for the progress display,
+        cached for 3 s. Only values a sensor actually reports are shown; a
+        missing CPU temperature is named instead of being left out silently.
+    #>
+    $now = Get-Date
+    if (($now - $script:HsTemperatureCache.At).TotalSeconds -lt 3) { return $script:HsTemperatureCache.Line }
+    $script:HsTemperatureCache.At = $now
+    $deg = "$([char]0x00B0)C"
+    $parts = @()
+    if (-not $SkipTelemetry) {
+        $rows = Get-HsTelemetrySample -Stage "DISPLAY"
+        $temps = @($rows | Where-Object { $null -ne $_ -and $_.SensorType -eq "Temperature" })
+        $cpu = @($temps | Where-Object { $_.HardwareType -eq "Cpu" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
+        if ($cpu.Count -gt 0 -and $cpu[0].Count -gt 0) {
+            $parts += "CPU $([math]::Round($cpu[0].Maximum))$deg"
+        } elseif ($null -ne $telemetryStatus -and -not $telemetryStatus.PawnIoInstalled) {
+            $parts += "CPU - (PawnIO fehlt)"
+        } else {
+            $parts += "CPU -"
+        }
+        $gpuCore = @($temps | Where-Object { $_.HardwareType -like "Gpu*" -and $_.SensorName -notmatch "(?i)hot\s*spot|memory|junction" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
+        $gpuHot = @($temps | Where-Object { $_.HardwareType -like "Gpu*" -and $_.SensorName -match "(?i)hot\s*spot|junction" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
+        if ($gpuCore.Count -gt 0 -and $gpuCore[0].Count -gt 0) {
+            $gpuText = "GPU $([math]::Round($gpuCore[0].Maximum))$deg"
+            if ($gpuHot.Count -gt 0 -and $gpuHot[0].Count -gt 0) { $gpuText = "$gpuText (Hotspot $([math]::Round($gpuHot[0].Maximum))$deg)" }
+            $parts += $gpuText
+        }
+        $vrm = @($temps | Where-Object { $_.HardwareType -eq "Motherboard" -or $_.HardwareType -eq "SuperIO" } | Where-Object { $_.SensorName -match "(?i)vrm|mos" } | ForEach-Object { $_.Value } | Measure-Object -Maximum)
+        if ($vrm.Count -gt 0 -and $vrm[0].Count -gt 0) { $parts += "VRM $([math]::Round($vrm[0].Maximum))$deg" }
+    }
+    $diskText = Get-HsDiskTemperatureText
+    if ($diskText) { $parts += $diskText }
+    $line = if ($parts.Count -gt 0) { "Temperaturen: " + ($parts -join " | ") } else { "" }
+    $script:HsTemperatureCache.Line = $line
+    return $line
+}
+
 function Invoke-HsComponentStages {
     <#
     .SYNOPSIS
@@ -466,6 +607,8 @@ function Invoke-HsComponentStages {
 
     $order = @("CPU","Cache","RAM","GPU","VRAM","VRAMMemory","GPULoad","Storage","PCIe","System")
     $keys = @($order | Where-Object { $ComponentKeys -contains $_ })
+    $script:HsStagePlan = Get-HsStagePlan -Keys $keys -StageProfile $StageProfile
+    $script:HsStagePlanIndex = -1
     $cpuInfo = @($inventory.Cpus)[0]
     $script:HsOverallActivity = $OverallActivity
     $keyIndex = 0
@@ -692,6 +835,7 @@ function Invoke-HsComponentStages {
     }
 
     Write-HsOverallProgress -Activity $OverallActivity -Completed
+    $global:HsRunPlanState = $null
 }
 
 function Get-HsRetestKeysForStage {
@@ -794,6 +938,16 @@ function Save-HsRunReport {
 # Main run
 # ---------------------------------------------------------------------------
 
+# Live temperatures in the progress display. smartctl is resolved up front
+# (downloaded only if the Storage stages will need it anyway) so the Windows
+# disk temperature is shown from the first stage on.
+try {
+    $smartTool = Resolve-HsTool -ToolId "smartmontools" -ToolConfig (Get-HsToolConfig -ConfigPath $ConfigPath) -ToolCacheRoot $ToolCacheRoot `
+        -NoDownload:($NoDownload -or -not ($selectedComponents -contains "Storage"))
+    if ($smartTool.Available) { $script:HsSmartctlPath = $smartTool.ExecutablePath }
+} catch {}
+$global:HsTemperatureProvider = { Get-HsTemperatureLine }
+
 $mainDirs = @{ Cpu = $Dirs.Cpu; Ram = $Dirs.Ram; Gpu = $Dirs.Gpu; Storage = $Dirs.Storage }
 Invoke-HsComponentStages -ComponentKeys $selectedComponents -StageProfile $profileConfig -StageDirs $mainDirs `
     -OverallActivity "Hardware-Stabilitaetstest ($profileLabel)"
@@ -861,6 +1015,12 @@ Stages marked "(Retest ...)" are targeted repeats chosen after the main run;
 they add evidence but do not replace the original result.
 "@ | Out-File (Join-Path $Out "README.txt") -Encoding UTF8
 
+if (Get-Variable -Name HsTemperatureProviderError -Scope Global -ValueOnly -ErrorAction SilentlyContinue) {
+    Write-Progress2 "Temperature display failed during the run: $global:HsTemperatureProviderError" "Yellow"
+}
+$global:HsTemperatureProvider = $null
+$global:HsTemperatureProviderError = $null
+$global:HsRunPlanState = $null
 Close-HsTelemetry
 New-HsResultZip -SourceDirectory $Out -ZipPath "$Out.zip"
 

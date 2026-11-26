@@ -221,7 +221,14 @@ of the write/verify check, surface scan, SMART self-test type - see
 **Live progress**: one progress bar at the top of the console, labelled
 with the run position ("Hardware-Stabilitaetstest (Extended (Lang)),
 Komponente 1 von 8: CPU Compute"); the bar itself fills with the running
-stage's progress, and every 10% a plain line is also written. Real percentages where the work is countable
+stage's progress, and every 10% a plain line is also written. The status
+line shows the remaining time of the stage ("Phase noch") and of the whole
+run ("Gesamt noch"), the latter from the planned durations of the stages
+still ahead - shown as "mind. ... + RAM/Surface-Scan/SMART-Test" while some
+of them cannot be known up front. Below the bar the current temperatures are
+shown, refreshed every 3 s: CPU (needs PawnIO, otherwise "CPU - (PawnIO
+fehlt)"), GPU core and hotspot, VRM if the board reports it, and the Windows
+disk via smartctl (every 30 s). Real percentages where the work is countable
 (surface scan in bytes with MB/s and remaining time, write/verify in MB, RAM
 passes and write/read phases parsed from MemoryChecker, SMART self-test as
 reported by the drive, GPU compute iterations); elapsed against planned time

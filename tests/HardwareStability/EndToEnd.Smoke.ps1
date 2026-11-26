@@ -44,6 +44,8 @@ if ($runDir.Count -eq 0) {
     if ($retests.Count -eq 0) { $failures += "No retest stage was recorded" }
     $system = @($stages | Where-Object { $_.StageName -eq "SYSTEM_STABILITY" })
     if ($Components -match "System" -and ($system.Count -eq 0 -or [string]$system[0].Coverage -notmatch "RAM:")) { $failures += "System stability did not include the RAM load" }
+    $runtimeLog = Get-Content -Raw -LiteralPath (Join-Path $run "99_Runtime\runtime.log") -ErrorAction SilentlyContinue
+    if ($runtimeLog -match "Temperature display failed") { $failures += "Temperature display threw during the run (see runtime.log)" }
     $html = Get-Content -Raw -LiteralPath (Join-Path $run "00_Result.html")
     if ($html -notmatch "Temperature monitoring") { $failures += "Report lacks the temperature monitoring section" }
 }
