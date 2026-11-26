@@ -33,6 +33,14 @@ jobs:
         shell: powershell
         run: .\tests\Bootstrap.Tests.ps1
 
+      - name: Test PCDiagLite restart/shutdown classification (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\tests\PCDiagLite.RestartShutdown.Tests.ps1
+
+      - name: Test PCDiagLite restart/shutdown classification (PowerShell 7)
+        shell: pwsh
+        run: .\tests\PCDiagLite.RestartShutdown.Tests.ps1
+
       - name: Validate manifest JSON
         shell: pwsh
         run: |
