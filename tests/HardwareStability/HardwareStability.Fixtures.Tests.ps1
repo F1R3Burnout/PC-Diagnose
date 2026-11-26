@@ -121,6 +121,19 @@ $noCpuStatus.GpuTemperatureAvailable = $true
 $noCpuStatus.Notes = @("No CPU temperature: test <note>")
 $card = New-HsTelemetryHtmlCard -TelemetryStatus $noCpuStatus
 Assert-True ($card -match "CPU temperature:</strong> no" -and $card -match "test &lt;note&gt;") "HS-054 Report states a missing CPU temperature and HTML-encodes notes"
+$fakeCpu = [pscustomobject]@{
+    HardwareType = "Cpu"; Name = "Fixture CPU"
+    Sensors = @(
+        [pscustomobject]@{ SensorType = "Temperature"; Name = "Core (Tctl/Tdie)"; Value = 0 },
+        [pscustomobject]@{ SensorType = "Temperature"; Name = "Package"; Value = 61.5 },
+        [pscustomobject]@{ SensorType = "Load"; Name = "CPU Total"; Value = 0 },
+        [pscustomobject]@{ SensorType = "Temperature"; Name = "No value"; Value = $null }
+    )
+}
+$fakeRows = Get-HsHardwareSensorRows -Hardware $fakeCpu -Stage "FIXTURE" -Timestamp (Get-Date)
+$fakeTemps = @($fakeRows | Where-Object { $_.SensorType -eq "Temperature" })
+Assert-True ($fakeTemps.Count -eq 1 -and $fakeTemps[0].Value -eq 61.5) "HS-054 A 0 C placeholder temperature (no PawnIO) is not reported as a reading"
+Assert-True (@($fakeRows | Where-Object { $_.SensorType -eq "Load" }).Count -eq 1) "HS-054 A 0 % load value is still a valid reading"
 $skippedCard = New-HsTelemetryHtmlCard -TelemetrySkipped
 Assert-True ($skippedCard -match "SkipTelemetry") "HS-054 Report states that telemetry was disabled"
 
