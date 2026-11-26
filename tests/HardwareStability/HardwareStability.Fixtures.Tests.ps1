@@ -427,6 +427,19 @@ New-HsFakeMemtestVulkan -Path (Join-Path $mvCache "memtest_vulkan-v0.5.0.exe") -
 $vramFail = Invoke-HsVramVerification -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "vram_fail_out") -DurationMinutes 0.05 -NoDownload
 Assert-True ($vramFail.Status -eq "FAIL") "HS-021 VRAM Error fixture ('Error found') => FAIL"
 
+# The thermal guard now also watches the VRAM test (it had no telemetry for
+# its 15 minutes in the second real run).
+Remove-Item -Recurse -Force $mvCache -ErrorAction SilentlyContinue
+New-HsFakeMemtestVulkan -Path (Join-Path $mvCache "memtest_vulkan-v0.5.0.exe") -Behavior "pass" -RunMilliseconds 20000
+$vramWatch = [Diagnostics.Stopwatch]::StartNew()
+$vramCancelled = Invoke-HsVramVerification -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "vram_cancel_out") -DurationMinutes 1 -NoDownload -CancelCheck { $true }
+$vramWatch.Stop()
+Assert-True ($vramCancelled.Status -eq "INTERRUPTED" -and $vramWatch.Elapsed.TotalSeconds -lt 10) "HS-021 The thermal guard can stop the VRAM test: INTERRUPTED, not PASS (got $($vramCancelled.Status) after $([math]::Round($vramWatch.Elapsed.TotalSeconds,1)) s)"
+
+Write-Host "`n=== HS-065 Evidence when a helper process dies ===" -ForegroundColor Cyan
+$crashLines = @(Get-HsProcessCrashEvidence -Since (Get-Date).AddMinutes(-2) -ProcessName "pcdiag-fixture-not-running.exe")
+Assert-True (@($crashLines | Where-Object { $_ -isnot [string] }).Count -eq 0 -and @($crashLines | Where-Object { $_ -notmatch "Low memory" }).Count -eq 0) "HS-065 Crash evidence is collected without errors and only names the asked process ($($crashLines.Count) line(s))"
+
 Write-Host "`n=== HS-030 / HS-031 Storage Write/Read Verification ===" -ForegroundColor Cyan
 $wv = Invoke-HsStorageWriteReadVerify -Directory (Join-Path $FixtureCache "writeverify") -SizeMB 8
 Assert-True ($wv.Status -eq "PASS") "HS-030 Storage Write/Read Verification uses only a normal test file and PASSes"

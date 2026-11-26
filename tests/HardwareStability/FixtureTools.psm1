@@ -139,7 +139,7 @@ class FakePrime95 {
 }
 
 function New-HsFakeMemtestVulkan {
-    param([Parameter(Mandatory=$true)][string]$Path, [string]$Behavior = "pass")
+    param([Parameter(Mandatory=$true)][string]$Path, [string]$Behavior = "pass", [int]$RunMilliseconds = 300)
     $body = switch ($Behavior) {
         "error" { 'Console.WriteLine("Error found. Mode NEXT_RE_READ, total errors 0x1");' }
         "devicelost" { 'Console.WriteLine("Runtime error: ERROR_DEVICE_LOST while getting () in context wait_for_fences");' }
@@ -153,7 +153,7 @@ class FakeMemtestVulkan {
     static int Main(string[] args) {
         Console.WriteLine("https://github.com/GpuZelenograd/memtest_vulkan v0.5.0 (fixture)");
         $body
-        Thread.Sleep(300);
+        Thread.Sleep($RunMilliseconds);
         return 0;
     }
 }

@@ -2,6 +2,25 @@
 
 Letztes Update: 2026-11-26 (Telemetrie unter PS 5.1, Review-Fixes, PCDiagLite-Tests)
 
+## Nachtrag 2026-11-26 (6) — zweiter realer Standard-Lauf (DESKTOP-DITMECS, 14:33)
+
+Lauf noch mit Stand 181a98a (vor Parallel-Storage). Bestätigt behoben: GPU Load
+ohne Fehlabbruch (Hotspot bis 99 C, 4347 Dispatches, PASS), Surface-Scan 931,5 GB
+in 7:51 PASS, NVMe-Selbsttest PASS, WHEA trennt alte (10 MCE, zuletzt 21.11.) von
+neuen (0). Offen:
+
+- System Stability: GPU-Job endet wieder ohne Ergebnis ("...: ."). Ursache weiter
+  unbekannt; jetzt nennt die Stufe Endzeit des Jobs und was Windows dazu
+  protokolliert hat (Application Error 1000, .NET 1026, WER 1001, Low-Memory 2004)
+  via `Get-HsProcessCrashEvidence`.
+- VRAM-Stufe (15 Min.) lief ohne Temperaturschutz und ohne Telemetrie - jetzt
+  `Invoke-HsVramVerification -CancelCheck` (Thermal Guard, INTERRUPTED bei Abbruch).
+- GPU-Last schwankt (LHM-Stichproben 0-99 %, ca. 65-104 W): Dispatch und
+  CPU-Prüfung wechseln sich ab. Für maximale Wärme gibt es jetzt den Stresstest
+  mit FurMark.
+- 02_Telemetry\StageTelemetry.csv war im hochgeladenen ZIP beschädigt (Deflate-
+  Fehler ab ca. 97 %); Original auf dem Rechner prüfen.
+
 ## Nachtrag 2026-11-26 (5) — Menüpunkt "Stresstest (Prime95 + FurMark)"
 
 - Ersetzt den Ordner "Stresstest" mit `A Stresstest.bat` (Prime95 + FurMark 1 +

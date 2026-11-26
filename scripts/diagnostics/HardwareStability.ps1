@@ -825,7 +825,8 @@ function Invoke-HsComponentStages {
                 Invoke-HsStageWrapper -StageName "VRAM" -Component "VRAM$StageSuffix" -Tool "memtest_vulkan" -Action {
                     param($stage)
                     $r = Invoke-HsVramVerification -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory $StageDirs.Gpu `
-                        -DurationMinutes $StageProfile.VramTestMinutes -NoDownload:$NoDownload -ProgressLabel "VRAM$StageSuffix (memtest_vulkan)"
+                        -DurationMinutes $StageProfile.VramTestMinutes -NoDownload:$NoDownload -ProgressLabel "VRAM$StageSuffix (memtest_vulkan)" `
+                        -CancelCheck { Test-HsThermalAbortOrCancel -StageName "VRAM" }
                     $stage.ToolVersion = $r.ToolVersion
                     $stage.Coverage = "$([math]::Round($r.DurationSeconds/60,1)) minute(s)"
                     Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
@@ -1032,12 +1033,29 @@ function Invoke-HsComponentStages {
                 }
                 $gpuResult = $null
                 $gpuJobError = ""
+                $gpuJobEnded = $null
                 try {
                     $gpuResult = Receive-Job -Job $gpuJob -Wait -ErrorAction Stop | Select-Object -Last 1
                 } catch {
                     $gpuJobError = $_.Exception.Message
                 } finally {
+                    try { $gpuJobEnded = $gpuJob.PSEndTime } catch {}
                     Remove-Job -Job $gpuJob -Force -ErrorAction SilentlyContinue
+                }
+                # A job process that dies leaves only "...: ." - name when it
+                # ended and what Windows logged about it (crash, low memory).
+                $gpuJobDetails = ""
+                if ($null -eq $gpuResult) {
+                    if ($gpuJobEnded) {
+                        $gpuJobDetails = " It ended at $(([datetime]$gpuJobEnded).ToString('HH:mm:ss')), $([math]::Round((([datetime]$gpuJobEnded) - $stage.Started).TotalMinutes, 1)) minute(s) into the stage."
+                    }
+                    $crashEvidence = @(Get-HsProcessCrashEvidence -Since $stage.Started)
+                    if ($crashEvidence.Count -gt 0) {
+                        $gpuJobDetails += " Windows logged: $($crashEvidence -join ' | ')"
+                        foreach ($line in $crashEvidence) { Add-HsNote -Stage $stage -Note $line }
+                    } else {
+                        $gpuJobDetails += " Windows logged no application crash or low-memory event for it."
+                    }
                 }
                 $driverResets = @(Get-HsGpuDriverResetEvents -Since $stage.Started)
                 if ($null -eq $gpuResult) {
@@ -1045,7 +1063,7 @@ function Invoke-HsComponentStages {
                     $resetText = if ($driverResets.Count -gt 0) { " Windows logged $($driverResets.Count) display driver reset(s) during this stage (first: $($driverResets[0].TimeCreated.ToString('HH:mm:ss')))." } else { "" }
                     $gpuResult = [pscustomobject]@{
                         Status     = $gpuStatus
-                        Reason     = "The GPU load process ended without a result$(if ($gpuJobError) { " ($gpuJobError)" })$resetText"
+                        Reason     = "The GPU load process ended without a result$(if ($gpuJobError) { " ($gpuJobError)" }).$gpuJobDetails$resetText"
                         Iterations = 0
                         DeviceLost = $false
                     }

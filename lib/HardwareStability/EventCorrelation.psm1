@@ -28,6 +28,43 @@ function Get-HsEventsSafe {
     }
 }
 
+function Get-HsProcessCrashEvidence {
+    <#
+    .SYNOPSIS
+        Why did a helper process end without a result? Collects what Windows
+        logged in the time window: application crashes (Application Error
+        1000, .NET Runtime 1026, Windows Error Reporting 1001) of the given
+        process name, and low-memory conditions (Resource-Exhaustion-Detector
+        2004). Returns short text lines; empty if Windows logged nothing.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][datetime]$Since,
+        [datetime]$Until = [datetime]::Now,
+        [string]$ProcessName = "powershell.exe"
+    )
+    $lines = @()
+    $end = $Until.AddMinutes(1)
+    $queries = @(
+        @{ Filter = @{ LogName = "Application"; ProviderName = "Application Error"; Id = 1000; StartTime = $Since; EndTime = $end }; Label = "Application crash" },
+        @{ Filter = @{ LogName = "Application"; ProviderName = ".NET Runtime"; Id = 1026; StartTime = $Since; EndTime = $end }; Label = ".NET runtime error" },
+        @{ Filter = @{ LogName = "Application"; ProviderName = "Windows Error Reporting"; Id = 1001; StartTime = $Since; EndTime = $end }; Label = "Windows Error Reporting" },
+        @{ Filter = @{ LogName = "System"; ProviderName = "Microsoft-Windows-Resource-Exhaustion-Detector"; Id = 2004; StartTime = $Since; EndTime = $end }; Label = "Low memory (Resource-Exhaustion-Detector 2004)" }
+    )
+    foreach ($query in $queries) {
+        $events = @()
+        try { $events = @(Get-HsEventsSafe -Filter $query.Filter -Maximum 20) } catch {}
+        foreach ($event in $events) {
+            $message = ""
+            try { $message = ([string]$event.Message -replace '\s+', ' ').Trim() } catch {}
+            if ($query.Label -ne "Low memory (Resource-Exhaustion-Detector 2004)" -and $message -notmatch [regex]::Escape($ProcessName)) { continue }
+            if ($message.Length -gt 300) { $message = $message.Substring(0, 300) + "..." }
+            $lines += "$($event.TimeCreated.ToString('HH:mm:ss')) $($query.Label): $message"
+        }
+    }
+    # Plain output (no leading comma): callers wrap the call in @().
+    return $lines
+}
+
 function Get-HsEventDataSummary {
     <#
         Flattens an event's <EventData> into a "Name=Value; Name2=Value2"

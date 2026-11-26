@@ -140,6 +140,8 @@ function Invoke-HsVramVerification {
         [Parameter(Mandatory=$true)][string]$OutputDirectory,
         [Parameter(Mandatory=$true)][double]$DurationMinutes,
         [switch]$NoDownload,
+        # Thermal guard / Ctrl+C: true stops memtest_vulkan (INTERRUPTED).
+        [scriptblock]$CancelCheck = $null,
         [string]$ProgressLabel = "VRAM (memtest_vulkan)"
     )
 
@@ -195,7 +197,7 @@ function Invoke-HsVramVerification {
     }
     try {
         $run = Invoke-HsProcess -FilePath $tool.ExecutablePath -TimeoutSeconds ([int][math]::Ceiling($DurationMinutes * 60)) `
-            -StdOutPath $logPath -Stage "VRAM" -OnOutputLine $cb -OnTick $tick
+            -StdOutPath $logPath -Stage "VRAM" -OnOutputLine $cb -OnTick $tick -CancelCheck $CancelCheck
     } finally {
         Write-HsStageProgress -Activity $ProgressLabel -Completed
     }
@@ -223,6 +225,12 @@ function Invoke-HsVramVerification {
     if ($script:errorFound) {
         $result.Status = "FAIL"
         $result.Reason = "GPU memory verification errors occurred. GPU VRAM or the GPU memory path is suspected (not necessarily a defective VRAM chip)."
+        return $result
+    }
+
+    if ($run.Cancelled) {
+        $result.Status = "INTERRUPTED"
+        $result.Reason = "VRAM verification was stopped after $([math]::Round($result.DurationSeconds/60,1)) minute(s) (thermal guard or Ctrl+C); no error was found up to then."
         return $result
     }
 
