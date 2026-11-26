@@ -428,20 +428,36 @@ if ($selectedComponents -contains "VRAM") {
 # ---------------------------------------------------------------------------
 
 if ($selectedComponents -contains "Storage") {
-    Invoke-HsStageWrapper -StageName "STORAGE_SMART" -Component "Storage SMART" -Tool "smartctl" -Action {
-        param($stage)
-        $disk = @($inventory.PhysicalDisks) | Select-Object -First 1
-        if (-not $disk) { Complete-HsStage $stage -Status "SKIPPED" -Assessment "No physical disk found."; return }
-        $index = [int]($disk.DeviceId -replace '[^0-9]','')
-        $r = Invoke-HsSmartQuery -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $index -OutputDirectory $Dirs.Storage -NoDownload:$NoDownload
-        $stage.ToolVersion = $r.ToolVersion
-        $stage.LogPaths = @($r.RawOutputPath)
-        Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+    # SMART is read-only and cheap, so every physical disk is queried (the
+    # first disk alone could be a USB bridge that reports UNSUPPORTED while
+    # the Windows disk stayed unchecked). The disk holding Windows is listed
+    # first by the inventory; the SMART self-test runs only on that disk.
+    $smartDisks = @($inventory.PhysicalDisks)
+    if ($smartDisks.Count -eq 0) {
+        Invoke-HsStageWrapper -StageName "STORAGE_SMART" -Component "Storage SMART" -Tool "smartctl" -Action {
+            param($stage)
+            Complete-HsStage $stage -Status "SKIPPED" -Assessment "No physical disk found."
+        } | Out-Null
+    }
+    $smartIsFirstDisk = $true
+    foreach ($smartDisk in $smartDisks) {
+        $smartIndex = [int]($smartDisk.DeviceId -replace '[^0-9]','')
+        $smartRunSelfTest = $smartIsFirstDisk
+        $smartIsFirstDisk = $false
+        Invoke-HsStageWrapper -StageName "STORAGE_SMART" -Component "Storage SMART ($($smartDisk.DeviceId))" -Tool "smartctl" -Action {
+            param($stage)
+            $r = Invoke-HsSmartQuery -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $smartIndex -OutputDirectory $Dirs.Storage -NoDownload:$NoDownload
+            $stage.ToolVersion = $r.ToolVersion
+            $stage.Coverage = "$($smartDisk.DeviceId): $($smartDisk.Model)"
+            $stage.LogPaths = @($r.RawOutputPath)
+            Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+        } | Out-Null
 
-        if ($r.Status -in @("PASS","WARNING")) {
-            $selfTest = Start-HsSmartSelfTest -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $index `
+        $smartStage = $script:HsStages[$script:HsStages.Count - 1]
+        if ($smartRunSelfTest -and $smartStage.Status -in @("PASS","WARNING")) {
+            $selfTest = Start-HsSmartSelfTest -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $smartIndex `
                 -TestType $profileConfig.SmartSelfTest -NoDownload:$NoDownload
-            Invoke-HsStageWrapper -StageName "STORAGE_SMART_SELFTEST" -Component "Storage SMART Self-Test" -Tool "smartctl" -Action {
+            Invoke-HsStageWrapper -StageName "STORAGE_SMART_SELFTEST" -Component "Storage SMART Self-Test ($($smartDisk.DeviceId))" -Tool "smartctl" -Action {
                 param($innerStage)
                 Complete-HsStage $innerStage -Status $selfTest.Status -Assessment $selfTest.Reason
             } | Out-Null
@@ -458,7 +474,7 @@ if ($selectedComponents -contains "Storage") {
         $index = [int]($disk.DeviceId -replace '[^0-9]','')
         $maxBytes = if ($SurfaceScanMaxBytes -gt 0) { $SurfaceScanMaxBytes } else { $profileConfig.SurfaceScanMaxBytes }
         $r = Invoke-HsStorageSurfaceScan -DriveIndex $index -MaxBytes $maxBytes -CancelCheck { Test-HsThermalAbortOrCancel -StageName "STORAGE_SURFACE" }
-        $stage.Coverage = "$([math]::Round($r.BytesRead/1GB,2)) / $([math]::Round($r.TotalBytes/1GB,2)) GB read"
+        $stage.Coverage = "$($disk.DeviceId) (Windows disk first): $([math]::Round($r.BytesRead/1GB,2)) / $([math]::Round($r.TotalBytes/1GB,2)) GB read"
         $stage.ErrorCount = $r.Errors.Count
         Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
     }
@@ -512,8 +528,10 @@ if ($selectedComponents -contains "System") {
             Invoke-HsGpuLoadThermalValidation -DurationSeconds $seconds
         } -ArgumentList $ModuleRoot, $durationSeconds
 
+        # Own output folder: the combined run reuses the CPU_COMPUTE workload
+        # and would otherwise overwrite the CPU Compute stage's log.
         $cpuResult = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot `
-            -OutputDirectory $Dirs.Cpu -DurationMinutes $profileConfig.SystemStabilityMinutes `
+            -OutputDirectory (Join-Path $Dirs.Cpu "SystemStability") -DurationMinutes $profileConfig.SystemStabilityMinutes `
             -LogicalProcessors ([int]$cpuCount.LogicalProcessors) -PhysicalCores ([int]$cpuCount.Cores) `
             -NoDownload:$NoDownload -CancelCheck { Test-HsThermalAbortOrCancel -StageName "SYSTEM_STABILITY" }
 
@@ -524,8 +542,14 @@ if ($selectedComponents -contains "System") {
             Complete-HsStage $stage -Status "FAIL" -Assessment "Combined CPU+GPU activity produced a verified error (CPU: $($cpuResult.Status), GPU: $($gpuResult.Status)). Individual components may still pass in isolation."
         } elseif ($gpuResult.DeviceLost) {
             Complete-HsStage $stage -Status "FAIL" -Assessment "GPU device was lost during combined system activity."
-        } else {
+        } elseif ($cpuResult.Status -eq "PASS" -and $gpuResult.Status -eq "PASS") {
             Complete-HsStage $stage -Status "PASS" -Assessment "CPU and GPU workloads ran concurrently for $($profileConfig.SystemStabilityMinutes) minute(s) with no verified errors."
+        } else {
+            # A combined PASS is only meaningful if BOTH workloads really ran.
+            # Previously a skipped Prime95 (e.g. -NoDownload) or an unsupported
+            # GPU still produced PASS here.
+            $partStatus = if ($cpuResult.Status -eq "INTERRUPTED") { "INTERRUPTED" } elseif ($cpuResult.Status -in @("SKIPPED","UNSUPPORTED") -and $gpuResult.Status -in @("SKIPPED","UNSUPPORTED")) { "SKIPPED" } else { "BLOCKED" }
+            Complete-HsStage $stage -Status $partStatus -Assessment "Combined CPU+GPU stability could not be verified because not both workloads completed (CPU: $($cpuResult.Status) - $($cpuResult.Reason) GPU: $($gpuResult.Status) - $($gpuResult.Reason))."
         }
     }
 }

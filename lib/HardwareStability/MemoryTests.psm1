@@ -52,10 +52,12 @@ function Invoke-HsRamVerification {
     $logPath = Join-Path $OutputDirectory "MemoryChecker.log"
     $result.LogPath = $logPath
 
-    $args = @("--batch", "$PercentOfPhysicalRam%")
-    $result.Command = "$($tool.ExecutablePath) $($args -join ' ')"
+    # Not named $args: that is PowerShell's automatic variable for unbound
+    # arguments and shadowing it is easy to break in later edits.
+    $toolArguments = @("--batch", "$PercentOfPhysicalRam%")
+    $result.Command = "$($tool.ExecutablePath) $($toolArguments -join ' ')"
 
-    $run = Invoke-HsProcess -FilePath $tool.ExecutablePath -ArgumentList $args -TimeoutSeconds $TimeoutSeconds `
+    $run = Invoke-HsProcess -FilePath $tool.ExecutablePath -ArgumentList $toolArguments -TimeoutSeconds $TimeoutSeconds `
         -StdOutPath $logPath -Stage "RAM" -OnOutputLine $OnOutputLine -CancelCheck $CancelCheck `
         -EnvironmentVariables @{ MEMCHCK_PASSES = "$Passes" }
 

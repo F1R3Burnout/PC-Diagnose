@@ -42,6 +42,18 @@ function Get-HsHardwareInventory {
     $physicalDisksMsft = @()
     try { $physicalDisksMsft = @(Get-PhysicalDisk -ErrorAction Stop) } catch {}
 
+    # Win32_DiskDrive does not enumerate in drive-index order (a USB disk can
+    # come first - seen on a real X670E run), so the disk that holds Windows
+    # is identified explicitly and listed first for the storage stages.
+    $systemDiskIndex = $null
+    try {
+        $systemLetter = ([string]$env:SystemDrive).TrimEnd(':')
+        if ($systemLetter) {
+            $systemPartition = Get-Partition -DriveLetter $systemLetter -ErrorAction Stop | Select-Object -First 1
+            if ($null -ne $systemPartition) { $systemDiskIndex = [int]$systemPartition.DiskNumber }
+        }
+    } catch {}
+
     $powerScheme = ""
     try {
         $activeSchemeLine = (powercfg /getactivescheme) 2>$null
@@ -85,11 +97,14 @@ function Get-HsHardwareInventory {
                 VramBytes    = if ($_.AdapterRAM -gt 0) { [int64]$_.AdapterRAM } else { $null }
             }
         })
-        PhysicalDisks     = @($disks | ForEach-Object {
+        SystemDiskIndex   = $systemDiskIndex
+        PhysicalDisks     = @(@($disks | ForEach-Object {
             $index = $_.Index
             $health = @($physicalDisksMsft | Where-Object { $_.DeviceId -eq [string]$index }) | Select-Object -First 1
             [pscustomobject]@{
                 DeviceId      = "PhysicalDrive$index"
+                Index         = [int]$index
+                IsSystemDisk  = ($null -ne $systemDiskIndex -and [int]$index -eq $systemDiskIndex)
                 Model         = Get-HsUnknownOrValue $_.Model
                 SerialNumber  = Get-HsUnknownOrValue (([string]$_.SerialNumber).Trim())
                 FirmwareRevision = Get-HsUnknownOrValue $_.FirmwareRevision
@@ -99,7 +114,7 @@ function Get-HsHardwareInventory {
                 HealthStatus  = if ($health) { Get-HsUnknownOrValue $health.HealthStatus } else { "Unsupported" }
                 OperationalStatus = if ($health) { Get-HsUnknownOrValue ($health.OperationalStatus -join ",") } else { "Unsupported" }
             }
-        })
+        }) | Sort-Object @{ Expression = { -not $_.IsSystemDisk } }, Index)
         Volumes           = @($volumes | ForEach-Object {
             [pscustomobject]@{
                 DriveLetter = $_.DriveLetter

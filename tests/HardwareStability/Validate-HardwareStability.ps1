@@ -66,7 +66,19 @@ Set-Gate "HS-006" ($outputRootHasStabilityDirs.Count -eq 0) "DryRun created no P
 
 Write-Host "`n=== HS-008 through HS-047: fixture suite ===" -ForegroundColor Cyan
 & pwsh -NoProfile -File (Join-Path $PSScriptRoot "HardwareStability.Fixtures.Tests.ps1")
-Set-Gate "HS-008..047" ($LASTEXITCODE -eq 0) "tests/HardwareStability/HardwareStability.Fixtures.Tests.ps1 exit code $LASTEXITCODE (covers HS-007..HS-047; see its own PASS/FAIL lines for the exact gate list)"
+Set-Gate "HS-008..054" ($LASTEXITCODE -eq 0) "tests/HardwareStability/HardwareStability.Fixtures.Tests.ps1 under pwsh, exit code $LASTEXITCODE (covers HS-007..HS-054; see its own PASS/FAIL lines for the exact gate list)"
+
+# The production path elevates into Windows PowerShell 5.1 (powershell.exe,
+# .NET Framework) - every real bug found so far only showed up there, so the
+# same fixture suite must also pass under that host.
+$windowsPowerShell = Get-Command powershell.exe -ErrorAction SilentlyContinue
+if ($windowsPowerShell) {
+    Write-Host "`n=== HS-008..054 under Windows PowerShell 5.1 ===" -ForegroundColor Cyan
+    & $windowsPowerShell.Source -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "HardwareStability.Fixtures.Tests.ps1")
+    Set-Gate "HS-008..054 (PS5.1)" ($LASTEXITCODE -eq 0) "fixture suite under powershell.exe, exit code $LASTEXITCODE"
+} else {
+    Set-Gate "HS-008..054 (PS5.1)" $false "powershell.exe not found - the production host was not tested"
+}
 
 Write-Host "`n=== HS-048: existing PC-Diagnose tools still work (regression) ===" -ForegroundColor Cyan
 if (-not $SkipRegression) {
@@ -78,6 +90,15 @@ if (-not $SkipRegression) {
     } catch {
         $regressionOk = $false
         $regressionDetail += "HDMIDiagnose.Tests.ps1 threw: $($_.Exception.Message)"
+    }
+    foreach ($regressionTest in @("PCDiagLite.RestartShutdown.Tests.ps1")) {
+        try {
+            & pwsh -NoProfile -File (Join-Path $RepoRoot "tests\$regressionTest") | Out-Null
+            if ($LASTEXITCODE -ne 0) { $regressionOk = $false; $regressionDetail += "$regressionTest exit $LASTEXITCODE" }
+        } catch {
+            $regressionOk = $false
+            $regressionDetail += "$regressionTest threw: $($_.Exception.Message)"
+        }
     }
     Set-Gate "HS-048" $regressionOk ($regressionDetail -join "; ")
 } else {
