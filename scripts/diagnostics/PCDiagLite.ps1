@@ -59,7 +59,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $ToolName = "PCDiagLite"
-$ToolVersion = "2.5 GPU Crash Evidence"
+$ToolVersion = "2.6 Component-aware hardware evidence"
 $RunStarted = Get-Date
 $RestartCorrelationWindowMinutes = 10
 $BootCorrelationWindowMinutes = 3
@@ -578,6 +578,37 @@ function Test-CsvReadable {
         return $true
     } catch {
         return $false
+    }
+}
+
+function Copy-DiagnosticEvidenceFile {
+    param([string]$SourcePath, [string]$DestinationPath)
+
+    try {
+        Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force -ErrorAction Stop
+        return [PSCustomObject]@{ Success = $true; Note = "" }
+    } catch {
+        return [PSCustomObject]@{ Success = $false; Note = "Copy failed: $($_.Exception.Message)" }
+    }
+}
+
+function Get-CopiedCrashDumps {
+    param([string[]]$SearchRoots)
+
+    $files = @(foreach ($root in $SearchRoots) {
+        if (Test-Path -LiteralPath $root) {
+            Get-ChildItem -LiteralPath $root -Filter "*.dmp" -Recurse -File -ErrorAction SilentlyContinue
+        }
+    })
+    $seen = @{}
+    foreach ($file in @($files | Sort-Object LastWriteTime -Descending)) {
+        # WER and LiveKernelReports may contain identical copies of one dump.
+        $key = $file.FullName
+        try { $key = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } catch {}
+        if (-not $seen.ContainsKey($key)) {
+            $seen[$key] = $true
+            $file
+        }
     }
 }
 
@@ -1349,6 +1380,109 @@ function Get-FirstEventDataValue {
         if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
     }
     return ""
+}
+
+function Get-WheaEventAssessment {
+    param([Parameter(Mandatory=$true)]$Event)
+
+    $message = [string]$Event.Message
+    $data = [string]$Event.EventData
+    $reportedBy = Get-FirstEventDataValue -EventData $data -Names @("ReportedByComponent", "ComponentName", "Component")
+    $errorSource = Get-FirstEventDataValue -EventData $data -Names @("ErrorSourceName", "ErrorSource")
+    $errorType = Get-FirstEventDataValue -EventData $data -Names @("ErrorTypeName", "ErrorType")
+    if ($message -match '(?im)^\s*(?:Reported by component|Gemeldet von Komponente)\s*:\s*([^\r\n]+)') { $reportedBy = $matches[1].Trim() }
+    if ($message -match '(?im)^\s*(?:Error Source|Fehlerquelle)\s*:\s*([^\r\n]+)') { $errorSource = $matches[1].Trim() }
+    if ($message -match '(?im)^\s*(?:Error Type|Fehlertyp)\s*:\s*([^\r\n]+)') { $errorType = $matches[1].Trim() }
+    $apicId = Get-FirstEventDataValue -EventData $data -Names @("ApicId", "ProcessorAPICID")
+    if (-not $apicId -and $message -match '(?im)(?:Processor APIC ID|Prozessor-APIC-ID)\s*:\s*(\d+)') { $apicId = $matches[1] }
+
+    $component = "Hardware (nicht eindeutig benannt)"
+    $recommendation = "Die WHEA-Details und das zugehoerige Speicherabbild pruefen. Ohne benannte Komponente laesst sich der Fehler nicht sicher CPU, RAM, Grafikkarte oder Mainboard zuordnen."
+    $classificationText = "$reportedBy $errorSource $errorType"
+    if ($classificationText -match '(?i)PCI\s*Express|PCIe|PCI-Express') {
+        $component = "PCIe-Verbindung / Geraet"
+        $recommendation = "Das im Ereignis genannte PCIe-Geraet anhand Geraetepfad, Vendor-/Device-ID und Bus/Geraet/Funktion zuordnen. Verbindung, Steckplatz, Firmware und den Treiber genau dieses Geraets pruefen. Ein Root-Port-Fehler beweist weder einen Grafikkarten- noch einen Mainboarddefekt."
+    } elseif ($classificationText -match '(?i)Memory|Arbeitsspeicher|Speicherfehler') {
+        $component = "Arbeitsspeicher / Speicherpfad"
+        $recommendation = "RAM zunaechst mit Standardeinstellungen ohne XMP/EXPO testen, dann Module einzeln pruefen. Auch CPU-Speichercontroller, Mainboard und Spannungsversorgung kommen infrage; die Meldung beweist keinen defekten RAM-Riegel."
+    } elseif ($classificationText -match '(?i)Processor|Prozessor|CPU|Cache' -or $apicId -ne "") {
+        $component = "CPU / Prozessorkern"
+        if ($errorType -match '(?i)Cache Hierarchy|Cache-Hierarchie') {
+            $component = "CPU / Cache-Hierarchie"
+            $errorType = "Cache Hierarchy Error"
+        }
+        $recommendation = "Gemeldet vom Prozessor: CPU-Stabilitaet und Versorgung priorisieren. CPU-Overclocking, Undervolting und manuelle Takt-/Spannungsaenderungen fuer einen Vergleich deaktivieren (bei AMD insbesondere PBO/Curve Optimizer). CPU-Temperaturen und Kuehlung pruefen; BIOS-Kompatibilitaet und passende Chipsatztreiber kontrollieren. RAM/XMP/EXPO separat mit Standardeinstellungen testen. Bleiben die Fehler bestehen, CPU, Mainboard-Spannungsversorgung und Netzteil gezielt gegenpruefen. Ein Cache-/Prozessorkernfehler beweist allein keinen CPU-Defekt."
+    }
+    $severity = "High"
+    if ([string]$Event.Id -eq '18' -or $message -match '(?i)\bfatal\b|schwerwiegender Hardwarefehler|nicht korrigierbar') { $severity = "Critical" }
+    if ([string]$Event.Id -in @("17", "19") -and $message -notmatch '(?i)uncorrectable|fatal|schwerwiegend|nicht korrigierbar') { $severity = "Medium" }
+    [PSCustomObject]@{
+        Component = $component
+        ReportedBy = $reportedBy
+        ErrorSource = $errorSource
+        ErrorType = $errorType
+        ApicId = $apicId
+        MCABank = Get-EventDataValue -EventData $data -Name "MCABank"
+        MciStatus = Get-EventDataValue -EventData $data -Name "MciStat"
+        Device = Get-FirstEventDataValue -EventData $data -Names @("PrimaryDeviceName", "DeviceName", "DeviceId")
+        Severity = $severity
+        Recommendation = $recommendation
+        TimeCreated = [string]$Event.TimeCreated
+        RecordId = [string]$Event.RecordId
+        SourceFile = [string]$Event.SourceFile
+        SourceEntry = [string]$Event.SourceEntry
+        Event = $Event
+    }
+}
+
+function Get-WerKernelInfo {
+    param([hashtable]$Fields, [string]$ReportPath = "")
+
+    $code = (Get-WerSignatureValue $Fields '(?i)^Code$').Trim().ToLowerInvariant() -replace '^0x', ''
+    if (-not $code -and $ReportPath -match '(?i)Kernel_([0-9a-f]+)_') { $code = $matches[1].ToLowerInvariant() }
+    if ($code -match '^[0-9a-f]+$') { $code = $code.TrimStart([char]'0'); if (-not $code) { $code = '0' } }
+    $classification = "Other live kernel report"
+    if ($code -eq '124' -or $ReportPath -match '(?i)[\\/]Kernel_124_') {
+        $classification = "WHEA hardware error report"
+    } elseif ($code -in @('117', '141', '142')) {
+        $classification = "GPU kernel timeout / TDR report"
+    } elseif ($code -in @('193', '1b0')) {
+        $classification = "Graphics kernel live report"
+    } elseif ($code -in @('a1000005', 'a2000002')) {
+        $classification = "AMD graphics diagnostic report"
+    }
+    $eventTime = ""
+    $fileTimeText = Get-WerFieldValue $Fields @("EventTime")
+    $fileTime = [long]0
+    if ([long]::TryParse($fileTimeText, [ref]$fileTime) -and $fileTime -gt 0) {
+        try { $eventTime = Format-FindingDate ([datetime]::FromFileTimeUtc($fileTime).ToLocalTime()) } catch {}
+    }
+    [PSCustomObject]@{ Classification = $classification; KernelCode = $code; EventTime = $eventTime }
+}
+
+function Update-KernelWerReportClassification {
+    param([object[]]$Rows)
+    foreach ($row in $Rows) {
+        if ([string]$row.EventType -notmatch '(?i)^LiveKernelEvent$') { $row; continue }
+        $fields = @{}
+        $packageReport = if ($row.PackagePath) { Join-Path $Dirs.Root ([string]$row.PackagePath) } else { "" }
+        if ($packageReport -and (Test-Path -LiteralPath $packageReport)) {
+            foreach ($line in @(Get-Content -LiteralPath $packageReport -ErrorAction SilentlyContinue)) {
+                if ($line -match '^([^=]+)=(.*)$') { $fields[$matches[1]] = $matches[2] }
+            }
+        }
+        if (-not $fields.ContainsKey('Sig[0].Value') -and $row.PSObject.Properties.Name -contains 'KernelCode' -and $row.KernelCode) {
+            $fields['Sig[0].Name'] = 'Code'
+            $fields['Sig[0].Value'] = [string]$row.KernelCode
+        }
+        $sourceReport = if ($row.PSObject.Properties.Name -contains 'SourceReport') { [string]$row.SourceReport } else { [string]$row.ReportPath }
+        $info = Get-WerKernelInfo -Fields $fields -ReportPath $sourceReport
+        if (-not $info.EventTime -and $row.PSObject.Properties.Name -contains 'EventTime') { $info.EventTime = [string]$row.EventTime }
+        foreach ($name in @('Classification','KernelCode','EventTime')) {
+            $row | Add-Member -NotePropertyName $name -NotePropertyValue $info.$name -Force
+        }
+        $row
+    }
 }
 
 function Get-Event1074Info {
@@ -2266,14 +2400,16 @@ function Write-InitialFindingsReport {
         ForEach-Object { $_.Group[0] }
     $werReports = Read-CsvSafe (Join-Path $Dirs.WER "WindowsErrorReporting_RecentReports.csv")
     $liveKernelRows = Read-CsvSafe (Join-Path $Dirs.GPU "LiveKernelReports.csv")
-    $gpuWerRows = Read-CsvSafe (Join-Path $Dirs.GPU "GPU_WER_Reports.csv")
+    $gpuWerRows = @(Update-KernelWerReportClassification -Rows (Read-CsvSafe (Join-Path $Dirs.GPU "GPU_WER_Reports.csv")))
     $amdInstallerLogRows = Read-CsvSafe (Join-Path $Dirs.GPU "AMDInstallerLogs.csv")
     $amdInstallerSignalRows = Read-CsvSafe (Join-Path $Dirs.GPU "AMDInstallerLogSignals.csv")
     $displayAdapterRows = Read-CsvSafe (Join-Path $Dirs.GPU "DisplayAdapters.csv")
     $displayPnpRows = Read-CsvSafe (Join-Path $Dirs.GPU "DisplayPnPDevices.csv")
     $relevantDriverRows = Read-CsvSafe (Join-Path $Dirs.System "Relevant_Drivers_Network_Storage_System.csv")
-    $basicDisplayRows = @($relevantDriverRows | Where-Object {
-        "$($_.DeviceName) $($_.Manufacturer) $($_.DriverProviderName) $($_.ClassName)" -match '(?i)Microsoft Basic Display Driver|Standard display types'
+    $basicDisplayRows = @($displayAdapterRows | Where-Object {
+        ([string]$_.Name -match '(?i)Microsoft Basic Display|Microsoft.*Basis.*anzeige') -and
+        ([string]$_.PNPDeviceID -notmatch '(?i)^ROOT\\BASICDISPLAY') -and
+        ([string]$_.ConfigManagerErrorCode -notin @('24','45'))
     })
 
     $eventCollectionFailed = $true
@@ -2335,14 +2471,28 @@ function Write-InitialFindingsReport {
     }
 
     $wheaEvents = @($allEvents | Where-Object { (Test-EventLevelAtMost $_ 3) -and $_.ProviderName -match 'WHEA-Logger' })
+    $wheaAssessments = @($wheaEvents | ForEach-Object { Get-WheaEventAssessment -Event $_ })
+    Export-CsvWithHeaders -Path (Join-Path $Dirs.Events "WHEA_Assessment.csv") -Rows $wheaAssessments -Columns @('TimeCreated','Component','ReportedBy','ErrorSource','ErrorType','ApicId','MCABank','MciStatus','Device','Severity','Recommendation','RecordId','SourceFile','SourceEntry')
     if ($wheaEvents.Count -gt 0) {
-        $wheaSeverity = if ($wheaEvents.Count -eq 1 -and [string]$wheaEvents[0].Id -eq '17') { "Medium" } else { "High" }
-        $wheaTitle = if ($wheaSeverity -eq "Medium") { "Single corrected WHEA / PCIe hardware error" } else { "WHEA hardware error events found" }
-        Add-Finding ([ref]$findings) $wheaSeverity "Hardware" $wheaTitle "$($wheaEvents.Count) WHEA-Logger event(s)." "Identify the affected device from the Event Viewer details. Update BIOS/UEFI, chipset, storage, GPU, and device drivers; reduce unstable overclocking or XMP/EXPO if the events repeat." -EventRows $wheaEvents
+        foreach ($group in @($wheaAssessments | Group-Object Component,ErrorType,Severity)) {
+            $rows = @($group.Group)
+            $first = $rows[0]
+            $apicIds = @($rows | Where-Object { $_.ApicId -ne '' } | Select-Object -ExpandProperty ApicId -Unique)
+            $sources = @($rows | Where-Object ErrorSource | Select-Object -ExpandProperty ErrorSource -Unique)
+            $reporters = @($rows | Where-Object ReportedBy | Select-Object -ExpandProperty ReportedBy -Unique)
+            $wheaEvidence = "$($rows.Count) WHEA-Ereignis(se). Gemeldet von: $($reporters -join ', '); Bereich: $($first.Component); Fehlerquelle: $($sources -join ', '); Fehlertyp: $($first.ErrorType)."
+            if ($apicIds.Count -gt 0) { $wheaEvidence += " Prozessor-APIC-ID(s): $($apicIds -join ', '). APIC-IDs bezeichnen logische Prozessoren, keine RAM-Steckplaetze." }
+            $wheaDetails = (New-ObjectDetailsText -Rows @($rows | Select-Object * -ExcludeProperty Event) -Title "WHEA: gemeldete Komponente und technische Zuordnung") + "`r`n`r`n" + (New-EventDetailsText -Rows @($rows | ForEach-Object { $_.Event }))
+            $wheaTitle = "$($first.Component): $(if ($first.ErrorType) { $first.ErrorType } else { 'WHEA-Hardwarefehler' })"
+            Add-Finding ([ref]$findings) $first.Severity "Hardware" $wheaTitle $wheaEvidence $first.Recommendation -EventRows @($rows | ForEach-Object { $_.Event }) -DetailText $wheaDetails
+        }
     }
 
     if ($basicDisplayRows.Count -gt 0) {
         Add-Finding ([ref]$findings) "High" "Drivers" "Microsoft Basic Display Driver appears to be active" "$($basicDisplayRows.Count) display driver row(s) show Microsoft Basic Display Driver or standard display types." "Install the correct NVIDIA, AMD, Intel, or OEM graphics driver for this PC before chasing game crashes or rendering problems. Games such as Counter-Strike 2 should not be tested on the Microsoft Basic Display Driver." -TimeContext $currentObservation -DetailText (New-ObjectDetailsText -Rows $basicDisplayRows -Title "Display driver rows")
+    }
+    if ($displayAdapterRows.Count -eq 0 -and @($relevantDriverRows | Where-Object DeviceName -match '(?i)Microsoft Basic Display').Count -gt 0) {
+        Add-Finding ([ref]$findings) "Info" "Collection" "Current GPU driver state could not be verified" "Only a generic BasicDisplay inventory entry was collected; no current Win32_VideoController rows are available." "Review the GPU collection errors. A ROOT\\BASICDISPLAY system driver or a non-present device does not prove that the Radeon/NVIDIA/Intel display driver is missing." -TimeContext $currentObservation
     }
 
     $storageEvents = @($allEvents | Where-Object {
@@ -2404,7 +2554,7 @@ function Write-InitialFindingsReport {
 
     $gpuAssessmentRows = @()
     $watchdogRows = @($liveKernelRows | Where-Object { ([string]$_.Component -match '(?i)WATCHDOG|Display|DWM') -or ([string]$_.FileName -match '(?i)WATCHDOG|Display|DWM') })
-    $gpuKernelWerRows = @($gpuWerRows | Where-Object { [string]$_.Classification -eq 'GPU kernel timeout / TDR report' })
+    $gpuKernelWerRows = @($gpuWerRows | Where-Object { [string]$_.Classification -in @('GPU kernel timeout / TDR report','Graphics kernel live report','AMD graphics diagnostic report') })
     $amdInstallerEvents = @($allEvents | Where-Object {
         ([string]$_.ProviderName -match '(?i)Application Error|Windows Error Reporting|MsiInstaller') -and
         ((@($_.Message,$_.EventData) -join ' ') -match '(?i)AMDInstallManager|AMD Install Manager|AMDChipsetInstaller')
@@ -2416,17 +2566,22 @@ function Write-InitialFindingsReport {
 
     if ($watchdogRows.Count -gt 0 -or $gpuKernelWerRows.Count -gt 0) {
         $copiedGpuDumps = @($watchdogRows | Where-Object { [string]$_.Copied -eq 'Yes' })
-        $latestGpuEvidence = @($watchdogRows + $gpuKernelWerRows | Sort-Object { ConvertTo-DateTimeSafe ([string]$_.LastWriteTime) } -Descending | Select-Object -First 1)
+        $copiedGpuDumps += @($gpuKernelWerRows | Where-Object { $_.PackagePath } | ForEach-Object {
+            $reportPath = Join-Path $Dirs.Root ([string]$_.PackagePath)
+            if (Test-Path -LiteralPath $reportPath) { Get-ChildItem -LiteralPath (Split-Path -Parent $reportPath) -Filter '*.dmp' -File -ErrorAction SilentlyContinue }
+        })
+        $latestGpuEvidence = @($watchdogRows + $gpuKernelWerRows | Sort-Object { if ($_.EventTime) { ConvertTo-DateTimeSafe ([string]$_.EventTime) } else { ConvertTo-DateTimeSafe ([string]$_.LastWriteTime) } } -Descending | Select-Object -First 1)
         $gpuAssessmentRows += [PSCustomObject]@{
             Severity    = "High"
-            EvidenceType = "GPU kernel timeout / TDR"
-            Time        = if ($latestGpuEvidence.Count -gt 0) { [string]$latestGpuEvidence[0].LastWriteTime } else { "" }
+            EvidenceType = "Graphics kernel / GPU timeout"
+            Time        = if ($latestGpuEvidence.Count -gt 0) { if ($latestGpuEvidence[0].EventTime) { [string]$latestGpuEvidence[0].EventTime } else { [string]$latestGpuEvidence[0].LastWriteTime } } else { "" }
             Subject     = "Windows graphics kernel / watchdog"
-            Result      = if ($copiedGpuDumps.Count -gt 0) { "$($copiedGpuDumps.Count) matching live-kernel dump(s) copied" } else { "TDR evidence found; no matching dump copied" }
-            Meaning     = "This is stronger evidence than an application crash: Windows recorded a graphics-kernel timeout or watchdog report."
+            Result      = if ($copiedGpuDumps.Count -gt 0) { "$($copiedGpuDumps.Count) matching dump(s) copied, including WER attachments" } else { "Graphics kernel evidence found; no matching dump copied" }
+            Meaning     = "Windows recorded a graphics-kernel report. WHEA 124 reports are classified separately and are not counted as GPU timeouts."
             Source      = "08_GPU_Driver\LiveKernelReports.csv; 08_GPU_Driver\GPU_WER_Reports.csv"
         }
-        Add-Finding ([ref]$findings) "High" "Drivers" "GPU timeout / TDR evidence was captured" "$($watchdogRows.Count) matching live-kernel file(s) and $($gpuKernelWerRows.Count) matching WER kernel report(s)." "Review the copied WATCHDOG dump analysis first. Correlate its timestamp with display-driver, application, power, and WHEA events before changing additional hardware or drivers." -TimeContext $currentObservation -DetailText ((New-ObjectDetailsText -Rows @($watchdogRows + $gpuKernelWerRows) -Title "GPU TDR and watchdog evidence"))
+        $gpuTimeContext = if ($gpuAssessmentRows[-1].Time) { "Latest graphics kernel evidence: $($gpuAssessmentRows[-1].Time)" } else { $currentObservation }
+        Add-Finding ([ref]$findings) "High" "Drivers" "Graphics kernel / GPU timeout evidence was captured" "$($watchdogRows.Count) matching live-kernel file(s) and $($gpuKernelWerRows.Count) graphics-related WER report(s); $($copiedGpuDumps.Count) dump attachment(s) available. WHEA 124 reports are excluded." "Review the copied WATCHDOG dump analysis first. Correlate its timestamp with display-driver, application, power, and WHEA events before changing additional hardware or drivers." -TimeContext $gpuTimeContext -DetailText ((New-ObjectDetailsText -Rows @($watchdogRows + $gpuKernelWerRows) -Title "GPU TDR and watchdog evidence"))
     }
 
     if ($gpuUserModeCrashEvents.Count -gt 0) {
@@ -3664,6 +3819,7 @@ Files for manual review:
 - 01_Events\Restart_Shutdown_Incidents_${EventRangeLabel}.csv
 - 01_Events\System_Targeted_Stability_Storage_Network_${EventRangeLabel}.csv
 - 01_Events\System_Targeted_TopEvents_${EventRangeLabel}.csv
+- 01_Events\WHEA_Assessment.csv
 - 06_Minidumps\LiveKernelReports\ (copied watchdog/live-kernel dumps within package limits)
 - 07_WER\Reports\ (matching crash report folders and attachments)
 - 08_GPU_Driver\GPUDriverAssessment.csv
@@ -3707,7 +3863,7 @@ function Write-HtmlReport {
     $dumpAnalysis = @(Read-DumpAnalysisRows)
     $gpuAssessment = Read-CsvSafe (Join-Path $Dirs.GPU "GPUDriverAssessment.csv")
     $liveKernelReports = Read-CsvSafe (Join-Path $Dirs.GPU "LiveKernelReports.csv")
-    $gpuWerReports = Read-CsvSafe (Join-Path $Dirs.GPU "GPU_WER_Reports.csv")
+    $gpuWerReports = @(Update-KernelWerReportClassification -Rows (Read-CsvSafe (Join-Path $Dirs.GPU "GPU_WER_Reports.csv")))
     $amdInstallerSignals = Read-CsvSafe (Join-Path $Dirs.GPU "AMDInstallerLogSignals.csv")
     $amdInstallerLogs = Read-CsvSafe (Join-Path $Dirs.GPU "AMDInstallerLogs.csv")
     $displayAdapters = Read-CsvSafe (Join-Path $Dirs.GPU "DisplayAdapters.csv")
@@ -3934,7 +4090,7 @@ function Write-ResultWindowReport {
     $restartOpenAttribute = if ($restartIncidentProblems.Count -gt 0) { " open" } else { "" }
     $gpuAssessment = Read-CsvSafe (Join-Path $Dirs.GPU "GPUDriverAssessment.csv")
     $liveKernelReports = Read-CsvSafe (Join-Path $Dirs.GPU "LiveKernelReports.csv")
-    $gpuWerReports = Read-CsvSafe (Join-Path $Dirs.GPU "GPU_WER_Reports.csv")
+    $gpuWerReports = @(Update-KernelWerReportClassification -Rows (Read-CsvSafe (Join-Path $Dirs.GPU "GPU_WER_Reports.csv")))
     $amdInstallerLogs = Read-CsvSafe (Join-Path $Dirs.GPU "AMDInstallerLogs.csv")
     $amdInstallerSignals = Read-CsvSafe (Join-Path $Dirs.GPU "AMDInstallerLogSignals.csv")
     $displayAdapters = Read-CsvSafe (Join-Path $Dirs.GPU "DisplayAdapters.csv")
@@ -5356,6 +5512,7 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
 
             $appName = Get-WerFieldValue $fields @("AppName","AppPath","TargetAppId")
             $eventType = Get-WerFieldValue $fields @("EventType")
+            $kernelInfo = Get-WerKernelInfo -Fields $fields -ReportPath $file.FullName
             $friendlyName = Get-WerFieldValue $fields @("FriendlyEventName","ConsentKey")
             $reportIdentifier = Get-WerFieldValue $fields @("ReportIdentifier")
             $integratorReportIdentifier = Get-WerFieldValue $fields @("IntegratorReportIdentifier")
@@ -5374,6 +5531,7 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
             $combined = "$($file.DirectoryName) $appName $eventType $friendlyName $faultModule $exceptionCode $exceptionOffset $appPath"
             $isCrashReport = $combined -match '(?i)APPCRASH|BEX|LiveKernelEvent|Kernel_11[67]|Kernel_14[12]|WATCHDOG|Stopped working|Nicht mehr funktionsfähig|crash|hang|cs2|steam|game|counter-strike|xbox|gaming|AMDInstallManager|Radeon|amdkmdag|amdwddmg|atikmdag|amdxx|Sunshine|Apollo|Parsec|Virtual Display'
             $copiedReport = ""
+            $attachmentErrors = @()
             if ($isCrashReport -and $copyIndex -le 30) {
                 $safeApp = if ([string]::IsNullOrWhiteSpace($appName)) { "app" } else { $appName }
                 $safeApp = ($safeApp -replace '[\\/:*?"<>|\s]+', '_').Trim('_')
@@ -5396,9 +5554,11 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
                         $destinationName = "{0:00}_{1}" -f $attachmentIndex, $reportFile.Name
                         $destinationPath = Join-Path $reportDestination $destinationName
                     }
-                    Copy-Item -LiteralPath $reportFile.FullName -Destination $destinationPath -Force -ErrorAction SilentlyContinue
-                    if (Test-Path -LiteralPath $destinationPath) {
+                    $attachmentCopy = Copy-DiagnosticEvidenceFile -SourcePath $reportFile.FullName -DestinationPath $destinationPath
+                    if ($attachmentCopy.Success) {
                         $werCopiedBytes += $reportFile.Length
+                    } else {
+                        $attachmentErrors += "$($reportFile.Name): $($attachmentCopy.Note)"
                     }
                     $attachmentIndex++
                 }
@@ -5419,6 +5579,8 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
 
             $werRows += [PSCustomObject]@{
                 LastWriteTime     = $file.LastWriteTime
+                EventTime         = $kernelInfo.EventTime
+                KernelCode        = $kernelInfo.KernelCode
                 AppName           = $appName
                 EventType         = $eventType
                 FriendlyEventName = $friendlyName
@@ -5432,10 +5594,13 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
                 ReportPath        = $file.FullName
                 SourceReportDirectory = $file.DirectoryName
                 PackagePath       = $copiedReport
+                AttachmentCopyErrors = $attachmentErrors -join '; '
             }
         } catch {
             $werRows += [PSCustomObject]@{
                 LastWriteTime     = $file.LastWriteTime
+                EventTime         = ""
+                KernelCode        = ""
                 AppName           = ""
                 EventType         = "ReadError"
                 FriendlyEventName = $_.Exception.Message
@@ -5449,6 +5614,7 @@ Invoke-Step "Collect Windows Error Reporting app crash reports" {
                 ReportPath        = $file.FullName
                 SourceReportDirectory = $file.DirectoryName
                 PackagePath       = ""
+                AttachmentCopyErrors = ""
             }
         }
     }
@@ -5494,13 +5660,13 @@ Invoke-Step "Collect GPU and display-driver crash evidence" {
                 $destinationPath = Join-Path $liveKernelDestinationRoot $relativePath
                 $destinationDirectory = Split-Path -Parent $destinationPath
                 New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
-                Copy-Item -LiteralPath $file.FullName -Destination $destinationPath -Force -ErrorAction SilentlyContinue
-                if (Test-Path -LiteralPath $destinationPath) {
+                $copyResult = Copy-DiagnosticEvidenceFile -SourcePath $file.FullName -DestinationPath $destinationPath
+                if ($copyResult.Success) {
                     $copied = "Yes"
                     $liveKernelCopiedBytes += $file.Length
                     $packagePath = "06_Minidumps\LiveKernelReports\$relativePath"
                 } else {
-                    $note = "Copy failed; source was inventoried."
+                    $note = $copyResult.Note
                 }
             }
 
@@ -5521,19 +5687,21 @@ Invoke-Step "Collect GPU and display-driver crash evidence" {
     Export-CsvWithHeaders -Path (Join-Path $Dirs.GPU "LiveKernelReports.csv") -Rows $liveKernelRows -Columns @('EvidenceType','Component','FileName','LastWriteTime','SizeMB','Copied','SourcePath','PackagePath','Note')
 
     $recentWerRows = @(Read-CsvSafe (Join-Path $Dirs.WER "WindowsErrorReporting_RecentReports.csv"))
-    $gpuWerRows = @($recentWerRows | Where-Object {
+    $gpuWerRows = @(Update-KernelWerReportClassification -Rows @($recentWerRows | Where-Object {
         (@($_.EventType,$_.FriendlyEventName,$_.AppName,$_.FaultModule,$_.ApplicationPath,$_.ReportPath) -join ' ') -match '(?i)LiveKernelEvent|Kernel_11[67]|Kernel_14[12]|WATCHDOG|AMDInstallManager|Radeon|amdkmdag|amdwddmg|atikmdag|amdxx|Sunshine|Apollo|Parsec|Virtual Display|DisplayDriver'
-    } | ForEach-Object {
+    }) | ForEach-Object {
         $combined = @($_.EventType,$_.FriendlyEventName,$_.AppName,$_.FaultModule,$_.ReportPath) -join ' '
         $classification = "Graphics-related application report"
-        if ($combined -match '(?i)LiveKernelEvent|Kernel_11[67]|Kernel_14[12]|WATCHDOG') {
-            $classification = "GPU kernel timeout / TDR report"
+        if ([string]$_.EventType -eq 'LiveKernelEvent') {
+            $classification = $_.Classification
         } elseif ($combined -match '(?i)AMDInstallManager') {
             $classification = "AMD installer crash report"
         }
         [PSCustomObject]@{
             Classification    = $classification
             LastWriteTime     = $_.LastWriteTime
+            EventTime         = $_.EventTime
+            KernelCode        = $_.KernelCode
             AppName           = $_.AppName
             EventType         = $_.EventType
             FriendlyEventName = $_.FriendlyEventName
@@ -5547,7 +5715,7 @@ Invoke-Step "Collect GPU and display-driver crash evidence" {
             PackagePath       = $_.PackagePath
         }
     })
-    Export-CsvWithHeaders -Path (Join-Path $Dirs.GPU "GPU_WER_Reports.csv") -Rows $gpuWerRows -Columns @('Classification','LastWriteTime','AppName','EventType','FriendlyEventName','FaultModule','ExceptionCode','ExceptionOffset','ReportIdentifier','EventReportId','ApplicationPath','SourceReport','PackagePath')
+    Export-CsvWithHeaders -Path (Join-Path $Dirs.GPU "GPU_WER_Reports.csv") -Rows $gpuWerRows -Columns @('Classification','LastWriteTime','EventTime','KernelCode','AppName','EventType','FriendlyEventName','FaultModule','ExceptionCode','ExceptionOffset','ReportIdentifier','EventReportId','ApplicationPath','SourceReport','PackagePath')
 
     $amdLogSources = @()
     if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
@@ -5591,26 +5759,32 @@ Invoke-Step "Collect GPU and display-driver crash evidence" {
             $note = "Listed only: the 150 MB AMD log package budget was reached."
         } else {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
-            Copy-Item -LiteralPath $file.FullName -Destination $destinationPath -Force -ErrorAction SilentlyContinue
-            if (Test-Path -LiteralPath $destinationPath) {
+            $copyResult = Copy-DiagnosticEvidenceFile -SourcePath $file.FullName -DestinationPath $destinationPath
+            if ($copyResult.Success) {
                 $copied = "Yes"
                 $amdCopiedBytes += $file.Length
                 $packagePath = "08_GPU_Driver\AMD_Installer_Logs\$destinationName"
             } else {
-                $note = "Copy failed; source was inventoried."
+                $note = $copyResult.Note
             }
         }
 
         $signalMatches = @()
+        $signalReadFailed = $false
         if ($file.Length -le $amdSingleFileLimitBytes) {
-            $signalMatches = @(Select-String -LiteralPath $file.FullName -Pattern $failurePattern -AllMatches -ErrorAction SilentlyContinue | Select-Object -Last 12)
+            try {
+                $signalMatches = @(Select-String -LiteralPath $file.FullName -Pattern $failurePattern -AllMatches -ErrorAction Stop | Select-Object -Last 12)
+            } catch {
+                $signalReadFailed = $true
+                $note = "$note Log read failed: $($_.Exception.Message)".Trim()
+            }
         }
         $signalPreview = (@($signalMatches | ForEach-Object {
             $lineText = ([string]$_.Line).Trim()
             if ($lineText.Length -gt 500) { $lineText = $lineText.Substring(0, 500) + "..." }
             "line $($_.LineNumber): $lineText"
         }) -join " | ")
-        $signalStatus = if ($signalMatches.Count -gt 0) { "Potential failure terms found" } else { "No failure terms found in scanned text" }
+        $signalStatus = if ($signalReadFailed) { "Log unreadable; not assessed" } elseif ($file.Length -gt $amdSingleFileLimitBytes) { "Not scanned: size limit" } elseif ($signalMatches.Count -gt 0) { "Potential failure terms found" } else { "No failure terms found in scanned text" }
 
         $amdLogRows += [PSCustomObject]@{
             SourceGroup   = $item.Label
@@ -5762,12 +5936,10 @@ Invoke-Step "Analyze all copied crash dumps" {
     $analysisRows = @()
     $statusPath = Join-Path $Dirs.Dumps "DumpAnalysis_Status.txt"
     $debugger = Get-DumpDebuggerPath
-    $copiedDumps = @(Get-ChildItem -LiteralPath $Dirs.Dumps -Filter "*.dmp" -Recurse -File -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 12)
+    $copiedDumps = @(Get-CopiedCrashDumps -SearchRoots @($Dirs.Dumps, (Join-Path $Dirs.WER "Reports")))
 
     if ($copiedDumps.Count -eq 0) {
-        "No copied minidumps or live-kernel dumps were available for local analysis." | Out-File $statusPath -Encoding UTF8
+        "No copied crash dumps were found in 06_Minidumps or 07_WER\\Reports." | Out-File $statusPath -Encoding UTF8
         $analysisRows | Export-Csv (Join-Path $Dirs.Dumps "DumpAnalysis.csv") -NoTypeInformation -Encoding UTF8
         return
     }
@@ -5818,6 +5990,7 @@ Review DumpAnalysis_Status.txt and 99_Runtime\errors.txt, then rerun PCDiagLite 
 
     $analysisCsvPath = Join-Path $Dirs.Dumps "DumpAnalysis.csv"
     "Debugger: $debugger" | Out-File $statusPath -Encoding UTF8
+    "Analyzing $($copiedDumps.Count) unique copied crash dump(s), including WER attachments; identical copies are analyzed once." | Out-File $statusPath -Encoding UTF8 -Append
 
     $dumpIndex = 0
     $dumpTotal = $copiedDumps.Count

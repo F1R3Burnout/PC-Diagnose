@@ -33,6 +33,10 @@ jobs:
         shell: powershell
         run: .\tests\Bootstrap.Tests.ps1
 
+      - name: Test component-aware diagnostic evidence (offline)
+        shell: powershell
+        run: .\tests\PCDiagLite.Tests.ps1
+
       - name: Validate manifest JSON
         shell: pwsh
         run: |
