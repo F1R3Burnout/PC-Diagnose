@@ -139,11 +139,17 @@ function Invoke-HsCpuTortureTest {
     # lines are added or removed - an earlier SSE run must not stay in effect.
     $localPath = Join-Path $workDir "local.txt"
     $localLines = @()
-    if (Test-Path -LiteralPath $localPath) {
+    $localExists = Test-Path -LiteralPath $localPath
+    if ($localExists) {
         $localLines = @(Get-Content -LiteralPath $localPath -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch '^\s*CpuSupports(AVX|AVX2|FMA3|AVX512F)\s*=' })
     }
     if ($SmallFftSse) { $localLines += @("CpuSupportsAVX=0", "CpuSupportsAVX2=0", "CpuSupportsFMA3=0", "CpuSupportsAVX512F=0") }
-    if ($localLines.Count -gt 0) { $localLines | Out-File -FilePath $localPath -Encoding ASCII -Force }
+    if ($localLines.Count -gt 0) {
+        $localLines | Out-File -FilePath $localPath -Encoding ASCII -Force
+    } elseif ($localExists) {
+        # Nothing but our own lines was in it.
+        Remove-Item -LiteralPath $localPath -Force -ErrorAction SilentlyContinue
+    }
 
     $resultsPath = Join-Path $workDir "results.txt"
     if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }

@@ -377,6 +377,8 @@ New-HsFakePrime95 -Path (Join-Path $ccCache "prime95\prime95.exe") -FailureText 
 $cycleFail = Invoke-HsCoreCycleTest -ConfigPath $ConfigPath -ToolCacheRoot $ccCache -OutputDirectory (Join-Path $ccCache "cycle_fail_out") -MinutesPerCore 0.05 `
     -PhysicalCores 2 -LogicalProcessors 2 -Cores @(1) -NoDownload
 Assert-True ($cycleFail.Status -eq "FAIL" -and @($cycleFail.FailedCores) -contains 1 -and @($cycleFail.Cores).Count -eq 1 -and $cycleFail.Reason -match "core\(s\) 1") "HS-066 A calculation error names the failing core; a retest can test only that core ($($cycleFail.Reason))"
+Remove-Item -Recurse -Force (Join-Path $ccCache "prime95") -ErrorAction SilentlyContinue
+New-HsFakePrime95 -Path (Join-Path $ccCache "prime95\prime95.exe") -FailureText "" -RunMilliseconds 30000
 $cycleCancel = Invoke-HsCoreCycleTest -ConfigPath $ConfigPath -ToolCacheRoot $ccCache -OutputDirectory (Join-Path $ccCache "cycle_cancel_out") -MinutesPerCore 0.2 `
     -PhysicalCores 2 -LogicalProcessors 2 -NoDownload -CancelCheck { $true }
 Assert-True ($cycleCancel.Status -eq "INTERRUPTED" -and @($cycleCancel.Cores).Count -eq 1) "HS-066 A thermal abort stops the whole cycle after the current core (got $($cycleCancel.Status), $(@($cycleCancel.Cores).Count) core(s))"
