@@ -2,6 +2,23 @@
 
 Letztes Update: 2026-11-26 (Telemetrie unter PS 5.1, Review-Fixes, PCDiagLite-Tests)
 
+## Nachtrag 2026-11-26 (7) — CPU Kern für Kern (Single-Core-Boost)
+
+Anlass: 10 alte WHEA-MCE auf DESKTOP-DITMECS, aber alle Volllast-Tests PASS.
+Volllast taktet niedriger; Fehler an der Boost-Spitze einzelner Kerne (Curve
+Optimizer/PBO, schwacher Kern) zeigt erst eine Single-Core-Last.
+
+- `Invoke-HsCoreCycleTest` (CpuTests.psm1) nutzt `Invoke-HsCpuTortureTest`, neu mit
+  `-WorkerCount`, `-AffinityMask` (Prozess-Affinität + `EnableSetAffinity=0`) und
+  `-SmallFftSse` (36K-248K, `CpuSupportsAVX/AVX2/FMA3/AVX512F=0` in local.txt -
+  Schlüssel aus Prime95s undoc.txt; frühere SSE-Zeilen werden wieder entfernt).
+- Stufe `CPU_CORE_CYCLE` (Komponente `CoreCycle`) nach Cache/IMC; Abfrage nach der
+  Profilwahl [j/N], `-CoreCycle`, 2/6/15 Min. je Kern; eigener Menüpunkt `corecycle`
+  (Stabilitätstest mit nur dieser Stufe).
+- Ergebnis: fehlerhafte Kerne, höchster Takt je Kern (LHM "Core #n"), Zuordnung
+  der WHEA-APIC-IDs zu Kernen (`Get-HsWheaProcessorHistory`); Retest nur der
+  fehlerhaften Kerne.
+
 ## Nachtrag 2026-11-26 (6) — zweiter realer Standard-Lauf (DESKTOP-DITMECS, 14:33)
 
 Lauf noch mit Stand 181a98a (vor Parallel-Storage). Bestätigt behoben: GPU Load

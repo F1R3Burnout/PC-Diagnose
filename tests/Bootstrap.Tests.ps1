@@ -148,6 +148,10 @@ try {
             if ($toolId -eq "pcdiag") { Assert-True ($script:CapturedLaunch.Arguments.DaysBack -eq 3) "PC diagnostics keeps the chosen lookback" }
             if ($toolId -eq "netdiag") { Assert-True ($script:CapturedLaunch.Arguments.LocalTargets[0] -eq "192.0.2.1") "Network diagnostics keeps target options" }
         }
+        $coreManifest = [pscustomobject]@{ tools = @([pscustomobject]@{ id="corecycle"; name="Kern fuer Kern"; requiresAdmin=$false; path="scripts/diagnostics/HardwareStability.ps1"; dependencies=@("lib/HardwareStability/CpuTests.psm1", "config/HardwareStabilityTools.json") }) }
+        Invoke-RemoteTool -Manifest $coreManifest -SelectedTool "corecycle"
+        Assert-True ($script:CapturedLaunch.ScriptPath -like "*HardwareStability.ps1" -and $script:CapturedLaunch.Arguments.Components -eq "CoreCycle") "The core-by-core menu item starts the stability test with only that stage"
+        Assert-True (Test-Path -LiteralPath (Join-Path $script:CapturedLaunch.Arguments.ModuleRootOverride "CpuTests.psm1")) "The core-by-core test receives its cached modules"
         $stressManifest = [pscustomobject]@{ tools = @([pscustomobject]@{ id="stresstest"; name="Stresstest"; requiresAdmin=$false; path="scripts/diagnostics/StressTest.ps1"; dependencies=@("lib/HardwareStability/StressTest.psm1", "config/HardwareStabilityTools.json") }) }
         Invoke-RemoteTool -Manifest $stressManifest -SelectedTool "stresstest"
         Assert-True ($script:CapturedLaunch.ScriptPath -like "*StressTest.ps1") "Stress test can be started from the menu"

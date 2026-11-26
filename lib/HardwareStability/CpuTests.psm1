@@ -47,7 +47,7 @@ $script:HsPrimeFailurePatterns = @(
 
 function Invoke-HsCpuTortureTest {
     param(
-        [Parameter(Mandatory=$true)][ValidateSet("CPU_COMPUTE","CPU_CACHE_IMC")][string]$StageName,
+        [Parameter(Mandatory=$true)][ValidateSet("CPU_COMPUTE","CPU_CACHE_IMC","CPU_CORE_CYCLE")][string]$StageName,
         [Parameter(Mandatory=$true)][string]$ConfigPath,
         [Parameter(Mandatory=$true)][string]$ToolCacheRoot,
         [Parameter(Mandatory=$true)][string]$OutputDirectory,
@@ -62,7 +62,15 @@ function Invoke-HsCpuTortureTest {
         # load at the same time, as in the classic stress test. 0 = Prime95's
         # default torture test (the Hardware-Stabilitaetstest checks RAM
         # separately with MemoryChecker).
-        [int]$TortureMemoryMB = 0
+        [int]$TortureMemoryMB = 0,
+        # > 0: number of Prime95 workers instead of the stage default.
+        [int]$WorkerCount = 0,
+        # > 0: Prime95 runs only on these logical processors (bit mask);
+        # Prime95's own affinity setting is switched off (EnableSetAffinity=0).
+        [long]$AffinityMask = 0,
+        # Small FFTs (36K-248K, in cache) on the SSE code path: the least heat
+        # per core, so a single loaded core reaches its highest boost clock.
+        [switch]$SmallFftSse
     )
 
     $result = [pscustomobject]@{
@@ -73,6 +81,7 @@ function Invoke-HsCpuTortureTest {
         Workers         = 0
         CoresPerTest    = 0
         TortureMemoryMB = 0
+        AffinityMask    = 0
         DurationSeconds = 0
         FailurePatterns = @()
         PeakTemperature = $null
@@ -101,6 +110,7 @@ function Invoke-HsCpuTortureTest {
         $workers = [math]::Max(1, $LogicalProcessors)
         $coresPerTest = 1
     }
+    if ($WorkerCount -gt 0) { $workers = $WorkerCount }
     $result.Workers = $workers
     $result.CoresPerTest = $coresPerTest
 
@@ -112,8 +122,28 @@ function Invoke-HsCpuTortureTest {
         # 6 minutes per FFT size, hyperthreads included.
         $primeConfig += "StressTester=1`nUsePrimenet=0`nTortureHyperthreading=1`nMinTortureFFT=4`nMaxTortureFFT=8192`nTortureMem=$TortureMemoryMB`nTortureTime=6`nTortureWeak=0`n"
         $result.TortureMemoryMB = $TortureMemoryMB
+    } elseif ($SmallFftSse) {
+        # Same keys as above; 36K-248K is Prime95's "Small FFTs" range (in
+        # cache), 1 minute per FFT size so a short per-core slot covers several.
+        $primeConfig += "StressTester=1`nUsePrimenet=0`nTortureHyperthreading=0`nMinTortureFFT=36`nMaxTortureFFT=248`nTortureMem=0`nTortureTime=1`nTortureWeak=0`n"
+    }
+    if ($AffinityMask -gt 0) {
+        # undoc.txt: "EnableSetAffinity=0 or 1 (default is 1)" in prime.txt.
+        $primeConfig += "EnableSetAffinity=0`n"
+        $result.AffinityMask = $AffinityMask
     }
     $primeConfig | Out-File -FilePath (Join-Path $workDir "prime.txt") -Encoding ASCII -Force
+
+    # Code path: undoc.txt documents "CpuSupportsAVX=0 or 1" etc. in local.txt.
+    # Prime95 writes its own values (CPU speed, GUID) there, so only these
+    # lines are added or removed - an earlier SSE run must not stay in effect.
+    $localPath = Join-Path $workDir "local.txt"
+    $localLines = @()
+    if (Test-Path -LiteralPath $localPath) {
+        $localLines = @(Get-Content -LiteralPath $localPath -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch '^\s*CpuSupports(AVX|AVX2|FMA3|AVX512F)\s*=' })
+    }
+    if ($SmallFftSse) { $localLines += @("CpuSupportsAVX=0", "CpuSupportsAVX2=0", "CpuSupportsFMA3=0", "CpuSupportsAVX512F=0") }
+    if ($localLines.Count -gt 0) { $localLines | Out-File -FilePath $localPath -Encoding ASCII -Force }
 
     $resultsPath = Join-Path $workDir "results.txt"
     if (Test-Path -LiteralPath $resultsPath) { Remove-Item -LiteralPath $resultsPath -Force }
@@ -125,6 +155,15 @@ function Invoke-HsCpuTortureTest {
 
     $process = Start-Process -FilePath $exePath -ArgumentList "-t" -WorkingDirectory $workDir -PassThru -WindowStyle Minimized
     Register-HsProcess -ProcessId $process.Id -Stage $StageName -LogFile $logPath | Out-Null
+    if ($AffinityMask -gt 0) {
+        # The process mask restricts every thread of prime95.exe, including
+        # the worker it starts right after launch.
+        try {
+            $process.ProcessorAffinity = [IntPtr]$AffinityMask
+        } catch {
+            Add-Content -LiteralPath $logPath -Value "Could not set the processor affinity: $($_.Exception.Message)"
+        }
+    }
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $deadline = [datetime]::Now.AddMinutes($DurationMinutes)
@@ -210,7 +249,7 @@ function Invoke-HsCpuTortureTest {
     } elseif ($result.FailurePatterns.Count -gt 0) {
         # Verified failure evidence always wins, even if the process then exited.
         $result.Status = "FAIL"
-        $label = if ($StageName -eq "CPU_COMPUTE") { "Verified CPU calculation error" } else { "Cache/memory-path workload error" }
+        $label = switch ($StageName) { "CPU_COMPUTE" { "Verified CPU calculation error" } "CPU_CORE_CYCLE" { "Verified calculation error on this core under single-core load" } default { "Cache/memory-path workload error" } }
         $result.Reason = "$label occurred ($($result.FailurePatterns -join ', ')). CPU core stability, voltage, BIOS settings, or related platform stability should be investigated."
     } elseif ($exitedEarly) {
         $result.Status = "BLOCKED"
@@ -226,6 +265,116 @@ function Invoke-HsCpuTortureTest {
     }
 
     return $result
+}
+
+function Get-HsCoreLogicalProcessor {
+    <#
+        First logical processor of a physical core. Windows numbers the SMT
+        threads of a core consecutively (core 0 = logical 0 and 1), so with
+        SMT this is core * 2. The same holds for the APIC IDs of a Ryzen
+        5000 with one CCD, which is how WHEA entries are mapped to cores.
+    #>
+    param([Parameter(Mandatory=$true)][int]$Core, [Parameter(Mandatory=$true)][int]$PhysicalCores, [Parameter(Mandatory=$true)][int]$LogicalProcessors)
+    $threadsPerCore = if ($PhysicalCores -gt 0 -and $LogicalProcessors -ge 2 * $PhysicalCores) { 2 } else { 1 }
+    return $Core * $threadsPerCore
+}
+
+function Invoke-HsCoreCycleTest {
+    <#
+    .SYNOPSIS
+        Single-core stability test, one physical core after the other (the
+        CoreCycler principle): one Prime95 worker, pinned to one core, Small
+        FFTs on the SSE code path. With only one core loaded it boosts to the
+        top of its voltage/frequency curve - where a too aggressive Curve
+        Optimizer / PBO setting or a weak core fails, which an all-core test
+        (lower clocks) does not show.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$ConfigPath,
+        [Parameter(Mandatory=$true)][string]$ToolCacheRoot,
+        [Parameter(Mandatory=$true)][string]$OutputDirectory,
+        [Parameter(Mandatory=$true)][double]$MinutesPerCore,
+        [Parameter(Mandatory=$true)][int]$PhysicalCores,
+        [Parameter(Mandatory=$true)][int]$LogicalProcessors,
+        [int[]]$Cores = @(),
+        [switch]$NoDownload,
+        [scriptblock]$TelemetrySample = $null,
+        [scriptblock]$CancelCheck = { $false },
+        [string]$ProgressLabel = "Kern fuer Kern"
+    )
+
+    if ($Cores.Count -eq 0) { $Cores = @(0..([math]::Max(1, $PhysicalCores) - 1)) }
+    $perCore = New-Object System.Collections.ArrayList
+    $index = 0
+    foreach ($core in $Cores) {
+        $index++
+        $logical = Get-HsCoreLogicalProcessor -Core $core -PhysicalCores $PhysicalCores -LogicalProcessors $LogicalProcessors
+        if ($logical -gt 62) {
+            [void]$perCore.Add([pscustomobject]@{ Core = $core; LogicalProcessor = $logical; Status = "UNSUPPORTED"; Reason = "Cores beyond the first 63 logical processors are not supported."; MaxClockMHz = $null; FailurePatterns = @() })
+            continue
+        }
+        # Highest clock LibreHardwareMonitor reports for this core ("Core #n").
+        $clock = @{ Max = 0.0 }
+        $sensorName = "Core #$($core + 1)"
+        $sample = $null
+        if ($TelemetrySample) {
+            $innerSample = $TelemetrySample
+            $sample = {
+                param($stageName)
+                $rows = & $innerSample $stageName
+                foreach ($row in @($rows)) {
+                    if ($null -ne $row -and $row.SensorType -eq "Clock" -and $row.HardwareType -eq "Cpu" -and $row.SensorName -eq $sensorName -and [double]$row.Value -gt $clock.Max) { $clock.Max = [double]$row.Value }
+                }
+                return ,$rows
+            }.GetNewClosure()
+        }
+        $r = Invoke-HsCpuTortureTest -StageName "CPU_CORE_CYCLE" -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot `
+            -OutputDirectory (Join-Path $OutputDirectory ("Core{0}" -f $core)) -DurationMinutes $MinutesPerCore `
+            -LogicalProcessors $LogicalProcessors -PhysicalCores $PhysicalCores -NoDownload:$NoDownload `
+            -TelemetrySample $sample -CancelCheck $CancelCheck -WorkerCount 1 -AffinityMask ([long]1 -shl $logical) -SmallFftSse `
+            -ProgressLabel ("{0}: Kern {1} ({2} von {3}), 1 Thread, Small FFT" -f $ProgressLabel, $core, $index, $Cores.Count)
+        [void]$perCore.Add([pscustomobject]@{
+            Core             = $core
+            LogicalProcessor = $logical
+            Status           = $r.Status
+            Reason           = $r.Reason
+            MaxClockMHz      = $(if ($clock.Max -gt 0) { [math]::Round($clock.Max) } else { $null })
+            FailurePatterns  = @($r.FailurePatterns)
+        })
+        # A thermal abort / Ctrl+C stops the whole cycle; a missing Prime95
+        # would fail every core the same way.
+        if ($r.Status -eq "INTERRUPTED") { break }
+        if ($r.Status -eq "SKIPPED" -or [string]$r.Reason -match "not available") { break }
+    }
+
+    $failed = @($perCore | Where-Object { $_.Status -eq "FAIL" } | ForEach-Object { $_.Core })
+    $parts = @($perCore | ForEach-Object {
+        $clockText = if ($_.MaxClockMHz) { ", max $($_.MaxClockMHz) MHz" } else { "" }
+        $errorText = if (@($_.FailurePatterns).Count -gt 0) { " ($(@($_.FailurePatterns) -join ', '))" } else { "" }
+        "Core $($_.Core): $($_.Status)$clockText$errorText"
+    })
+    $tested = $perCore.Count
+    if ($failed.Count -gt 0) {
+        $status = "FAIL"
+        $reason = "Calculation error under single-core load on core(s) $($failed -join ', '): at its highest boost clock this core does not compute correctly. Typical causes: Curve Optimizer / PBO too aggressive for this core, boost override, or (at stock settings) a weak core."
+    } elseif (@($perCore | Where-Object { $_.Status -eq "INTERRUPTED" }).Count -gt 0) {
+        $status = "INTERRUPTED"
+        $reason = "The core-by-core test was stopped after $tested of $($Cores.Count) core(s)."
+    } elseif ($tested -lt $Cores.Count -or @($perCore | Where-Object { $_.Status -ne "PASS" }).Count -gt 0) {
+        $status = "BLOCKED"
+        $first = @($perCore | Where-Object { $_.Status -ne "PASS" } | Select-Object -First 1)
+        $reason = "Not every core could be tested$(if ($first.Count -gt 0) { ": $($first[0].Reason)" })"
+    } else {
+        $status = "PASS"
+        $reason = "All $tested core(s) ran $MinutesPerCore minute(s) each under single-core load (1 thread, Small FFT, SSE) without a calculation error."
+    }
+    return [pscustomobject]@{
+        Status         = $status
+        Reason         = "$reason $($parts -join '; ')."
+        Cores          = @($perCore)
+        FailedCores    = @($failed)
+        MinutesPerCore = $MinutesPerCore
+    }
 }
 
 Export-ModuleMember -Function * -Variable *

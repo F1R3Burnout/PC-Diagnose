@@ -18,6 +18,7 @@ function Get-HsProfile {
             RamPercentOfPhysical       = 90 # upper cap; the run uses as much of the AVAILABLE RAM as possible
             CpuComputeMinutes          = 5
             CpuCacheImcMinutes         = 5
+            CoreCycleMinutesPerCore    = 2 # Kern fuer Kern: Minuten je physischem Kern
             CpuFftMode                 = "Smallest"
             GpuComputeIterations       = 50
             GpuComputeWorkgroups       = 256
@@ -42,6 +43,7 @@ function Get-HsProfile {
             RamPercentOfPhysical       = 90 # upper cap; the run uses as much of the AVAILABLE RAM as possible
             CpuComputeMinutes          = 20
             CpuCacheImcMinutes         = 20
+            CoreCycleMinutesPerCore    = 6 # Kern fuer Kern: Minuten je physischem Kern
             CpuFftMode                 = "Small"
             GpuComputeIterations       = 500
             GpuComputeWorkgroups       = 1024
@@ -66,6 +68,7 @@ function Get-HsProfile {
             RamPercentOfPhysical       = 90 # upper cap; the run uses as much of the AVAILABLE RAM as possible
             CpuComputeMinutes          = 60
             CpuCacheImcMinutes         = 60
+            CoreCycleMinutesPerCore    = 15 # Kern fuer Kern: Minuten je physischem Kern
             CpuFftMode                 = "Large"
             GpuComputeIterations       = 5000
             GpuComputeWorkgroups       = 2048
@@ -107,10 +110,11 @@ function Get-HsProfileEstimateMinutes {
         RAM passes, the surface scan and the SMART self-test depend on the
         hardware (RAM size, disk size/speed) and come on top.
     #>
-    param([Parameter(Mandatory=$true)]$ProfileConfig, [string[]]$Components = @("CPU","Cache","RAM","GPU","VRAM","Storage","PCIe","System"))
+    param([Parameter(Mandatory=$true)]$ProfileConfig, [string[]]$Components = @("CPU","Cache","RAM","GPU","VRAM","Storage","PCIe","System"), [int]$PhysicalCores = 0)
     $minutes = 0.0
     if ($Components -contains "CPU") { $minutes += $ProfileConfig.CpuComputeMinutes }
     if ($Components -contains "Cache") { $minutes += $ProfileConfig.CpuCacheImcMinutes }
+    if ($Components -contains "CoreCycle") { $minutes += [math]::Max(1, $PhysicalCores) * $ProfileConfig.CoreCycleMinutesPerCore }
     if ($Components -contains "VRAM") { $minutes += $ProfileConfig.VramTestMinutes + $ProfileConfig.GpuLoadMinutes }
     if ($Components -contains "System") { $minutes += $ProfileConfig.SystemStabilityMinutes }
     if ($Components -contains "RAM" -and $ProfileConfig.RamDurationMinutes -gt 0) { $minutes += $ProfileConfig.RamDurationMinutes }
@@ -134,6 +138,9 @@ function Get-HsRetestProfile {
     $copy.Name = "$($BaseProfile.Name)-Retest"
     $copy.CpuComputeMinutes = $Minutes
     $copy.CpuCacheImcMinutes = $Minutes
+    # Core by core: the stage spreads the time over all cores, or gives it to
+    # each core that failed before (see Invoke-HsComponentStages).
+    $copy.CoreCycleMinutesPerCore = $Minutes
     $copy.VramTestMinutes = $Minutes
     $copy.GpuLoadMinutes = $Minutes
     $copy.SystemStabilityMinutes = $Minutes

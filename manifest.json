@@ -158,6 +158,52 @@
       ]
     },
     {
+      "id": "corecycle",
+      "name": "CPU Kern-fuer-Kern-Test (Single-Core-Boost)",
+      "category": "pc-test",
+      "description": "Prime95 mit einem Thread nacheinander auf jedem Kern (wie CoreCycler): findet Fehler, die nur beim hoechsten Boost eines einzelnen Kerns auftreten.\n    Curve Optimizer/PBO, WHEA-Cache-Fehler; Dauer je Kern Kurz/Mittel/Lang, frueheren WHEA-Fehlern wird der Kern zugeordnet.",
+      "path": "scripts/diagnostics/HardwareStability.ps1",
+      "dependencies": [
+        "config/HardwareStabilityTools.json",
+        "lib/HardwareStability/Common.psm1",
+        "lib/HardwareStability/ProcessRunner.psm1",
+        "lib/HardwareStability/ToolManager.psm1",
+        "lib/HardwareStability/Profiles.psm1",
+        "lib/HardwareStability/Inventory.psm1",
+        "lib/HardwareStability/Telemetry.psm1",
+        "lib/HardwareStability/ThermalGuard.psm1",
+        "lib/HardwareStability/EventCorrelation.psm1",
+        "lib/HardwareStability/CrashRecovery.psm1",
+        "lib/HardwareStability/CpuTests.psm1",
+        "lib/HardwareStability/MemoryTests.psm1",
+        "lib/HardwareStability/GpuTests.psm1",
+        "lib/HardwareStability/StorageTests.psm1",
+        "lib/HardwareStability/StorageSurface.psm1",
+        "lib/HardwareStability/StorageWriteVerify.psm1",
+        "lib/HardwareStability/StorageBackground.psm1",
+        "lib/HardwareStability/Reporting.psm1",
+        "lib/HardwareStability/Native/RawDiskReader.cs",
+        "lib/HardwareStability/Native/D3D11ComputeVerifier.cs"
+      ],
+      "kind": "powershell",
+      "requiresAdmin": true,
+      "safeMode": "active-verification",
+      "parameters": [
+        {
+          "name": "Profile",
+          "type": "string",
+          "default": "",
+          "description": "Quick (Kurz, 2 min per core), Standard (Mittel, 6) or Extended (Lang, 15). Empty = the test asks at start."
+        },
+        {
+          "name": "OutputRoot",
+          "type": "string",
+          "default": "C:\\Temp",
+          "description": "Output folder for the result package."
+        }
+      ]
+    },
+    {
       "id": "stresstest",
       "name": "Stresstest (Prime95 + FurMark)",
       "category": "pc-test",

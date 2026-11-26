@@ -345,6 +345,42 @@ if ($isAdmin) {
     Write-Host "  (HS-064 end-to-end part skipped: needs Administrator rights)" -ForegroundColor DarkGray
 }
 
+Write-Host "`n=== HS-066 CPU core by core (single-core boost) ===" -ForegroundColor Cyan
+Assert-True ((Get-HsCoreLogicalProcessor -Core 3 -PhysicalCores 8 -LogicalProcessors 16) -eq 6 -and (Get-HsCoreLogicalProcessor -Core 3 -PhysicalCores 4 -LogicalProcessors 4) -eq 3) "HS-066 A core maps to its first logical processor (with and without SMT)"
+$wheaEn = ConvertFrom-HsWheaMessage -Message "A fatal hardware error has occurred.`r`n`r`nReported by component: Processor Core`r`nError Source: Machine Check Exception`r`nError Type: Cache Hierarchy Error`r`nProcessor APIC ID: 3"
+$wheaDe = ConvertFrom-HsWheaMessage -Message "Schwerwiegender Hardwarefehler.`r`nFehlerquelle: Machine Check Exception`r`nFehlertyp: Bus/Interconnect Error`r`nProzessor-APIC-ID: 10"
+Assert-True ($wheaEn.ApicId -eq 3 -and $wheaEn.ErrorType -eq "Cache Hierarchy Error" -and $wheaDe.ApicId -eq 10 -and $wheaDe.ErrorType -eq "Bus/Interconnect Error") "HS-066 WHEA processor entries are read in English and German (APIC $($wheaEn.ApicId) '$($wheaEn.ErrorType)', APIC $($wheaDe.ApicId) '$($wheaDe.ErrorType)')"
+Assert-True ($null -eq (ConvertFrom-HsWheaMessage -Message "A corrected hardware error has occurred. Component: PCI Express Root Port").ApicId) "HS-066 WHEA entries without a processor give no APIC ID"
+Assert-True ((Get-HsProfileEstimateMinutes -ProfileConfig (Get-HsProfile -Name "Standard") -Components @("CoreCycle") -PhysicalCores 8) -eq 48) "HS-066 Mittel: 6 minutes per core, 48 minutes on 8 cores"
+
+$ccCache = Join-Path $FixtureCache "corecycle_cache"
+New-HsFakePrime95 -Path (Join-Path $ccCache "prime95\prime95.exe") -FailureText "" -RunMilliseconds 30000
+$single = Invoke-HsCpuTortureTest -StageName "CPU_CORE_CYCLE" -ConfigPath $ConfigPath -ToolCacheRoot $ccCache -OutputDirectory (Join-Path $ccCache "single_out") `
+    -DurationMinutes 0.05 -LogicalProcessors 2 -PhysicalCores 2 -NoDownload -WorkerCount 1 -AffinityMask 2 -SmallFftSse
+$singlePrime = Get-Content -Raw -LiteralPath (Join-Path $ccCache "prime95_CPU_CORE_CYCLE\prime.txt")
+$singleLocal = Get-Content -Raw -LiteralPath (Join-Path $ccCache "prime95_CPU_CORE_CYCLE\local.txt")
+$singleLog = Get-Content -Raw -LiteralPath (Join-Path $ccCache "single_out\CPU_CORE_CYCLE.log") -ErrorAction SilentlyContinue
+Assert-True ($single.Status -eq "PASS" -and $single.Workers -eq 1 -and $single.AffinityMask -eq 2 -and [string]$singleLog -notmatch "Could not set the processor affinity") "HS-066 One Prime95 worker runs pinned to the chosen logical processor (got $($single.Status), $($single.Workers) worker, mask $($single.AffinityMask))"
+Assert-True ($singlePrime -match "NumWorkers=1" -and $singlePrime -match "MinTortureFFT=36" -and $singlePrime -match "MaxTortureFFT=248" -and $singlePrime -match "TortureMem=0" -and $singlePrime -match "EnableSetAffinity=0") "HS-066 prime.txt: one worker, Small FFTs in cache, Prime95's own affinity off"
+Assert-True ($singleLocal -match "CpuSupportsAVX=0" -and $singleLocal -match "CpuSupportsAVX2=0" -and $singleLocal -match "CpuSupportsFMA3=0") "HS-066 local.txt selects the SSE code path (undoc.txt keys)"
+[void](Invoke-HsCpuTortureTest -StageName "CPU_CORE_CYCLE" -ConfigPath $ConfigPath -ToolCacheRoot $ccCache -OutputDirectory (Join-Path $ccCache "normal_out") `
+    -DurationMinutes 0.05 -LogicalProcessors 2 -PhysicalCores 2 -NoDownload)
+$normalLocal = Get-Content -Raw -LiteralPath (Join-Path $ccCache "prime95_CPU_CORE_CYCLE\local.txt") -ErrorAction SilentlyContinue
+Assert-True ([string]$normalLocal -notmatch "CpuSupports") "HS-066 A later normal run does not keep the SSE setting"
+
+$fakeClockSample = { param($stageName) ,@([pscustomobject]@{ HardwareType = "Cpu"; SensorType = "Clock"; SensorName = "Core #1"; Value = 4650.4 }, [pscustomobject]@{ HardwareType = "Cpu"; SensorType = "Clock"; SensorName = "Core #2"; Value = 4400 }) }
+$cycle = Invoke-HsCoreCycleTest -ConfigPath $ConfigPath -ToolCacheRoot $ccCache -OutputDirectory (Join-Path $ccCache "cycle_out") -MinutesPerCore 0.05 `
+    -PhysicalCores 2 -LogicalProcessors 2 -NoDownload -TelemetrySample $fakeClockSample
+Assert-True ($cycle.Status -eq "PASS" -and @($cycle.Cores).Count -eq 2 -and @($cycle.Cores)[0].MaxClockMHz -eq 4650 -and @($cycle.Cores)[1].MaxClockMHz -eq 4400) "HS-066 Every core is tested in turn and its boost clock is recorded ($($cycle.Reason))"
+Remove-Item -Recurse -Force (Join-Path $ccCache "prime95") -ErrorAction SilentlyContinue
+New-HsFakePrime95 -Path (Join-Path $ccCache "prime95\prime95.exe") -FailureText "ROUND OFF error exceeds threshold" -RunMilliseconds 30000
+$cycleFail = Invoke-HsCoreCycleTest -ConfigPath $ConfigPath -ToolCacheRoot $ccCache -OutputDirectory (Join-Path $ccCache "cycle_fail_out") -MinutesPerCore 0.05 `
+    -PhysicalCores 2 -LogicalProcessors 2 -Cores @(1) -NoDownload
+Assert-True ($cycleFail.Status -eq "FAIL" -and @($cycleFail.FailedCores) -contains 1 -and @($cycleFail.Cores).Count -eq 1 -and $cycleFail.Reason -match "core\(s\) 1") "HS-066 A calculation error names the failing core; a retest can test only that core ($($cycleFail.Reason))"
+$cycleCancel = Invoke-HsCoreCycleTest -ConfigPath $ConfigPath -ToolCacheRoot $ccCache -OutputDirectory (Join-Path $ccCache "cycle_cancel_out") -MinutesPerCore 0.2 `
+    -PhysicalCores 2 -LogicalProcessors 2 -NoDownload -CancelCheck { $true }
+Assert-True ($cycleCancel.Status -eq "INTERRUPTED" -and @($cycleCancel.Cores).Count -eq 1) "HS-066 A thermal abort stops the whole cycle after the current core (got $($cycleCancel.Status), $(@($cycleCancel.Cores).Count) core(s))"
+
 Write-Host "`n=== HS-052 / HS-053 Tool integrity checks ===" -ForegroundColor Cyan
 $nugetBase64 = "NXcNYlWoXe5cz9sb8Huo6x2dCZVYkhwKtgE00n/MoI8V4ZI/7/t+EI5bOhQFlZfFjjqM8+U6prjU/aARt7H/tA=="
 Assert-True ((ConvertTo-HsHexHash -Value $nugetBase64 -ByteLength 64) -eq "35770d6255a85dee5ccfdb1bf07ba8eb1d9d099558921c0ab60134d27fcca08f15e1923feffb7e108e5b3a14059597c58e3a8cf3e53aa6b8d4fda011b7b1ffb4") "HS-052 NuGet base64 SHA512 is converted to the matching hex digest"

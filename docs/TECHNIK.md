@@ -205,6 +205,19 @@ error, or a real read/write error was actually detected.
   pressure on the cache hierarchy, interconnect, and memory controller. Both
   read Prime95's own `results.txt` for `FATAL ERROR` / `ROUND OFF` / `SUMOUT`
   evidence.
+- **CPU core by core (Single-Core-Boost)** - optional for Kurz/Mittel/Lang
+  (asked after the profile choice, `-CoreCycle`, or component `CoreCycle`) and
+  its own menu item "CPU Kern-fuer-Kern-Test". The CoreCycler principle: one
+  Prime95 worker pinned to one physical core at a time (process affinity,
+  Prime95's own affinity off via `EnableSetAffinity=0`), Small FFTs 36K-248K
+  in cache on the SSE code path (`CpuSupportsAVX/AVX2/FMA3/AVX512F=0`, both
+  from Prime95's undoc.txt). With one core loaded it boosts to the top of its
+  voltage/frequency curve, where a too aggressive Curve Optimizer/PBO or a
+  weak core fails - an all-core test runs at lower clocks and does not show
+  it. 2/6/15 minutes per core (Kurz/Mittel/Lang). The result names the
+  failing core(s), the highest clock each core reached, and maps the APIC IDs
+  of earlier WHEA processor errors to cores. A retest gives the chosen time
+  to each core that failed (otherwise it is spread over all cores).
 - **RAM** - [MemoryChecker](https://github.com/lordmulder/MemoryChecker)
   writes a pattern to as much RAM as is available at stage start (available
   memory minus a reserve of max(1.5 GB, 6%) for Windows, capped at 90%),

@@ -20,7 +20,11 @@
     not given and the console is interactive, the tool asks for it.
 
 .PARAMETER Components
-    Comma-separated subset to run: CPU,Cache,RAM,GPU,VRAM,Storage,PCIe,System
+    Comma-separated subset to run: CPU,Cache,CoreCycle,RAM,GPU,VRAM,Storage,PCIe,System
+    (CoreCycle = core-by-core single-core test, also offered at start).
+
+.PARAMETER CoreCycle
+    Adds the core-by-core single-core test without asking.
 
 .PARAMETER DryRun
     Shows the planned inventory, stages, tools, and commands without
@@ -41,7 +45,7 @@
 
 .PARAMETER RetestComponents
     Non-interactive targeted retest after the main run, e.g. "Cache,RAM".
-    Keys: CPU, Cache, RAM, GPU, VRAM, GPULoad, Storage, System.
+    Keys: CPU, Cache, CoreCycle, RAM, GPU, VRAM, GPULoad, Storage, System.
 
 .PARAMETER RetestMinutes
     Duration per component for -RetestComponents (default 10).
@@ -79,6 +83,7 @@ param(
     [double]$MaxStageMinutes = 0,
     [switch]$InstallPawnIO,
     [switch]$NoDriverInstall,
+    [switch]$CoreCycle,
 
     [string]$ModuleRootOverride = "",
     [string]$ConfigPathOverride = ""
@@ -147,20 +152,30 @@ $ToolCacheRoot = Join-Path $env:TEMP "PC-Diagnose\HardwareStabilityTools"
 New-Item -ItemType Directory -Force -Path $ToolCacheRoot | Out-Null
 
 $selectedComponents = @($Components -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($CoreCycle -and $selectedComponents -notcontains "CoreCycle") { $selectedComponents += "CoreCycle" }
+# Only the core-by-core test (its own menu item): no other stage runs.
+$coreCycleOnly = ($selectedComponents.Count -eq 1 -and $selectedComponents[0] -eq "CoreCycle")
+$script:HsPhysicalCores = 0
+try { $script:HsPhysicalCores = [int]((@(Get-CimInstance Win32_Processor -ErrorAction Stop) | Measure-Object -Property NumberOfCores -Sum).Sum) } catch {}
 
 function Select-HsProfileInteractive {
     Write-Host ""
-    Write-Host "Hardware-Stabilitaetstest - Dauer und Intensitaet waehlen" -ForegroundColor Cyan
+    $title = if ($coreCycleOnly) { "CPU Kern-fuer-Kern-Test (Single-Core-Boost) - Dauer je Kern waehlen" } else { "Hardware-Stabilitaetstest - Dauer und Intensitaet waehlen" }
+    Write-Host $title -ForegroundColor Cyan
     Write-Host ""
     foreach ($choice in (Get-HsProfileChoice)) {
         $choiceProfile = Get-HsProfile -Name $choice.Name
-        $minutes = Get-HsProfileEstimateMinutes -ProfileConfig $choiceProfile -Components $selectedComponents
-        Write-Host ("  [{0}] {1,-7} ca. {2} Min. Lastphasen + RAM/Datentraeger" -f $choice.Key, $choice.Label, [math]::Round($minutes)) -ForegroundColor White
-        Write-Host ("      {0}" -f $choice.Summary) -ForegroundColor Gray
+        $minutes = Get-HsProfileEstimateMinutes -ProfileConfig $choiceProfile -Components $selectedComponents -PhysicalCores $script:HsPhysicalCores
+        if ($coreCycleOnly) {
+            Write-Host ("  [{0}] {1,-7} {2} Min. je Kern, ca. {3} Min. bei {4} Kernen" -f $choice.Key, $choice.Label, $choiceProfile.CoreCycleMinutesPerCore, [math]::Round($minutes), $script:HsPhysicalCores) -ForegroundColor White
+        } else {
+            Write-Host ("  [{0}] {1,-7} ca. {2} Min. Lastphasen + RAM/Datentraeger" -f $choice.Key, $choice.Label, [math]::Round($minutes)) -ForegroundColor White
+            Write-Host ("      {0}" -f $choice.Summary) -ForegroundColor Gray
+        }
     }
     Write-Host "  [0] Abbrechen" -ForegroundColor White
     Write-Host ""
-    Write-Host "  RAM-Test, Surface-Scan und SMART-Selbsttest dauern je nach RAM-Groesse und Datentraeger zusaetzlich." -ForegroundColor DarkGray
+    if (-not $coreCycleOnly) { Write-Host "  RAM-Test, Surface-Scan und SMART-Selbsttest dauern je nach RAM-Groesse und Datentraeger zusaetzlich." -ForegroundColor DarkGray }
     $answer = Read-HsChoice -Prompt "Auswahl [1-3, Enter = 1]" -Allowed @("0","1","2","3") -Default "1"
     if ($answer -eq "0") { return "" }
     return [string](@(Get-HsProfileChoice | Where-Object { $_.Key -eq $answer })[0].Name)
@@ -176,6 +191,19 @@ if (-not $Profile) {
             exit 0
         }
         $Profile = $chosenProfile
+    }
+}
+
+# Core by core (single-core boost) can be switched on for every profile.
+if (-not $coreCycleOnly -and $selectedComponents -notcontains "CoreCycle" -and $selectedComponents -contains "CPU" -and
+    -not $DryRun -and (Test-HsInteractiveConsole -NoPrompt:$NoPrompt)) {
+    $perCoreMinutes = (Get-HsProfile -Name $Profile).CoreCycleMinutesPerCore
+    Write-Host ""
+    Write-Host "Zusaetzlich: CPU Kern fuer Kern (Single-Core-Boost)" -ForegroundColor Cyan
+    Write-Host ("  Prime95 mit einem Thread, nacheinander auf jedem Kern - findet Fehler, die nur beim hoechsten") -ForegroundColor Gray
+    Write-Host ("  Boost eines einzelnen Kerns auftreten (Curve Optimizer/PBO, WHEA-Cache-Fehler). {0} Min. je Kern, ca. {1} Min." -f $perCoreMinutes, [math]::Round([math]::Max(1, $script:HsPhysicalCores) * $perCoreMinutes)) -ForegroundColor Gray
+    if ((Read-HsChoice -Prompt "Kern-fuer-Kern-Test dazunehmen? [j/N]" -Allowed @("j","J","n","N","ja","nein") -Default "n") -match '^(?i)j') {
+        $selectedComponents += "CoreCycle"
     }
 }
 
@@ -228,6 +256,8 @@ $script:HsStages = New-Object System.Collections.ArrayList
 $script:HsStorageBackground = $null
 $script:HsStorageBackgroundError = ""
 $script:HsSelfTestRun = $null
+# Cores that failed the core-by-core test in the main run (retest focus).
+$script:HsCoreCycleFocus = @()
 
 function Write-Progress2 {
     param([string]$Text, [string]$Color = "Gray")
@@ -323,7 +353,7 @@ if ($DryRun) {
     $profileConfig | Format-List | Out-String | Write-Host
     Write-Host "Available durations (without -Profile the real run asks):" -ForegroundColor Cyan
     foreach ($choice in (Get-HsProfileChoice)) {
-        $estimate = Get-HsProfileEstimateMinutes -ProfileConfig (Get-HsProfile -Name $choice.Name) -Components $selectedComponents
+        $estimate = Get-HsProfileEstimateMinutes -ProfileConfig (Get-HsProfile -Name $choice.Name) -Components $selectedComponents -PhysicalCores $script:HsPhysicalCores
         Write-Host ("  {0,-7} ({1,-8}) ca. {2} min load stages + RAM/storage - {3}" -f $choice.Label, $choice.Name, [math]::Round($estimate), $choice.Summary)
     }
     Write-Host "Planned components: $($selectedComponents -join ', ')" -ForegroundColor Cyan
@@ -484,6 +514,10 @@ function Get-HsStagePlan {
         switch ($key) {
             "CPU"   { [void]$plan.Add([pscustomobject]@{ Stage = "CPU_COMPUTE"; Seconds = [double]$StageProfile.CpuComputeMinutes * 60; Unknown = "" }) }
             "Cache" { [void]$plan.Add([pscustomobject]@{ Stage = "CPU_CACHE_IMC"; Seconds = [double]$StageProfile.CpuCacheImcMinutes * 60; Unknown = "" }) }
+            "CoreCycle" {
+                $cycleCores = [math]::Max(1, [int](@($inventory.Cpus) | ForEach-Object { [int]($_.Cores -as [int]) } | Measure-Object -Sum).Sum)
+                [void]$plan.Add([pscustomobject]@{ Stage = "CPU_CORE_CYCLE"; Seconds = $cycleCores * ([double]$StageProfile.CoreCycleMinutesPerCore * 60 + 5); Unknown = "" })
+            }
             "RAM" {
                 if ([double]$StageProfile.RamDurationMinutes -gt 0) {
                     [void]$plan.Add([pscustomobject]@{ Stage = "RAM"; Seconds = [double]$StageProfile.RamDurationMinutes * 60; Unknown = "" })
@@ -727,7 +761,7 @@ function Invoke-HsComponentStages {
         [string]$OverallActivity = "Hardware-Stabilitaetstest"
     )
 
-    $order = @("CPU","Cache","RAM","GPU","VRAM","VRAMMemory","GPULoad","Storage","PCIe","System")
+    $order = @("CPU","Cache","CoreCycle","RAM","GPU","VRAM","VRAMMemory","GPULoad","Storage","PCIe","System")
     $keys = @($order | Where-Object { $ComponentKeys -contains $_ })
     $script:HsStagePlan = Get-HsStagePlan -Keys $keys -StageProfile $StageProfile
     $script:HsStagePlanIndex = -1
@@ -782,6 +816,42 @@ function Invoke-HsComponentStages {
                     $stage.PeakTemperature = $r.PeakTemperature
                     $stage.ErrorCount = $r.FailurePatterns.Count
                     Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                } | Out-Null
+            }
+            "CoreCycle" {
+                Invoke-HsStageWrapper -StageName "CPU_CORE_CYCLE" -Component "CPU Kern fuer Kern (Single-Core-Boost)$StageSuffix" -Tool "Prime95" -Action {
+                    param($stage)
+                    $coreCount = [math]::Max(1, [int]$cpuInfo.Cores)
+                    $logicalCount = [math]::Max(1, [int]$cpuInfo.LogicalProcessors)
+                    $minutesPerCore = [double]$StageProfile.CoreCycleMinutesPerCore
+                    $cyclePlan = @(0..($coreCount - 1))
+                    if ($StageSuffix) {
+                        # Retest: the chosen time goes to each core that failed
+                        # before; without one it is spread over all cores.
+                        if (@($script:HsCoreCycleFocus).Count -gt 0) { $cyclePlan = @($script:HsCoreCycleFocus) }
+                        else { $minutesPerCore = [math]::Max(1, [math]::Round($minutesPerCore / $coreCount, 1)) }
+                    }
+                    $r = Invoke-HsCoreCycleTest -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory (Join-Path $StageDirs.Cpu "CoreCycle") `
+                        -MinutesPerCore $minutesPerCore -PhysicalCores $coreCount -LogicalProcessors $logicalCount -Cores $cyclePlan -NoDownload:$NoDownload `
+                        -TelemetrySample { param($s) Get-HsTelemetrySampleForStage -StageName $s } `
+                        -CancelCheck { Test-HsThermalAbortOrCancel -StageName "CPU_CORE_CYCLE" } -ProgressLabel "Kern fuer Kern$StageSuffix"
+                    if (-not $StageSuffix) { $script:HsCoreCycleFocus = @($r.FailedCores) }
+                    $stage.Coverage = "$(@($r.Cores).Count) of $(@($cyclePlan).Count) core(s) x $minutesPerCore min, 1 thread, Small FFT 36K-248K, SSE"
+                    $stage.ErrorCount = @($r.FailedCores).Count
+                    # Which cores the earlier WHEA processor errors came from.
+                    $wheaText = ""
+                    $wheaRows = @(Get-HsWheaProcessorHistory)
+                    if ($wheaRows.Count -gt 0) {
+                        $byCore = @($wheaRows | Group-Object { [math]::Floor([int]$_.ApicId / [math]::Max(1, [int]($logicalCount / $coreCount))) } | Sort-Object { [int]$_.Name } | ForEach-Object {
+                            $types = @($_.Group | ForEach-Object { $_.ErrorType } | Where-Object { $_ } | Select-Object -Unique)
+                            "core $($_.Name): $($_.Count)x$(if ($types.Count -gt 0) { " ($($types -join ', '))" })"
+                        })
+                        $wheaText = " Earlier WHEA processor errors by core (APIC ID / threads per core): $($byCore -join '; ')."
+                        foreach ($row in $wheaRows | Select-Object -First 20) {
+                            Add-HsNote -Stage $stage -Note "WHEA $($row.Id) at $($row.TimeCreated.ToString('yyyy-MM-dd HH:mm')): APIC ID $($row.ApicId), $($row.ErrorType)"
+                        }
+                    }
+                    Complete-HsStage $stage -Status $r.Status -Assessment "$($r.Reason)$wheaText"
                 } | Out-Null
             }
             "RAM" {
@@ -1114,6 +1184,7 @@ function Get-HsRetestKeysForStage {
     switch ($StageName) {
         "CPU_COMPUTE"            { return @("CPU") }
         "CPU_CACHE_IMC"          { return @("Cache") }
+        "CPU_CORE_CYCLE"         { return @("CoreCycle") }
         "RAM"                    { return @("RAM") }
         "GPU_COMPUTE"            { return @("GPU","GPULoad") }
         "VRAM"                   { return @("VRAMMemory") }

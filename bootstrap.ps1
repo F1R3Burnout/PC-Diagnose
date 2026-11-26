@@ -517,10 +517,11 @@ function Invoke-RemoteTool {
         if ($dependencyPaths.ContainsKey("HDMIDiagnostics.Core.psm1")) {
             $toolArgs.ModulePath = $dependencyPaths["HDMIDiagnostics.Core.psm1"]
         }
-    } elseif ($toolInfo.id -eq "hardwarestability") {
+    } elseif ($toolInfo.id -in @("hardwarestability", "corecycle")) {
         $toolArgs.OutputRoot = $OutputRoot
         if ($Profile) { $toolArgs.Profile = $Profile }
-        $toolArgs.Components = $Components
+        # "corecycle" is the stability test with only its core-by-core stage.
+        $toolArgs.Components = if ($toolInfo.id -eq "corecycle") { "CoreCycle" } else { $Components }
         $toolArgs.SurfaceScanMaxBytes = $SurfaceScanMaxBytes
         if ($NoDownload) { $toolArgs.NoDownload = $true }
         if ($SkipTelemetry) { $toolArgs.SkipTelemetry = $true }

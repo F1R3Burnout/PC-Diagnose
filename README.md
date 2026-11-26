@@ -22,6 +22,7 @@ Das PowerShell-Werkzeug bietet System-, Netzwerk- und Displaydiagnose sowie eine
 | NetzwerkDiagnose | Adapter, DNS, Erreichbarkeit, Geschwindigkeit, VPN und Netzwerkereignisse |
 | HDMI-/Displaydiagnose | Displaypfade, EDID, HDR, Audio, Live-Überwachung und Vorher-/Nachher-Vergleich |
 | Hardware-Stabilitätstest | CPU, RAM, GPU/VRAM und Datenträger mit Datenvergleich, Temperaturüberwachung und Reset-Auswertung |
+| CPU Kern-für-Kern-Test | Single-Core-Boost-Test Kern für Kern (wie CoreCycler), auch als Option im Hardware-Stabilitätstest; ordnet WHEA-Fehler den Kernen zu |
 | Stresstest (Prime95 + FurMark) | Klassischer Belastungstest: CPU + GPU, nur CPU oder nur GPU, Dauer wählbar, Temperaturanzeige mit Maximalwerten und Temperaturschutz |
 
 ## Start

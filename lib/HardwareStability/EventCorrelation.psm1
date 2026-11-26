@@ -28,6 +28,41 @@ function Get-HsEventsSafe {
     }
 }
 
+function ConvertFrom-HsWheaMessage {
+    <#
+        APIC ID and error type from a WHEA-Logger message, English
+        ("Processor APIC ID: 3", "Error Type: Cache Hierarchy Error") or
+        German ("Prozessor-APIC-ID: 3", "Fehlertyp: ..."). ApicId is $null if
+        the entry names no processor.
+    #>
+    param([AllowEmptyString()][string]$Message)
+    $apic = [regex]::Match([string]$Message, '(?i)APIC[- ]ID\s*:\s*(\d+)')
+    $type = [regex]::Match([string]$Message, '(?im)^\s*(?:Error Type|Fehlertyp)\s*:\s*(.+?)\s*$')
+    return [pscustomobject]@{
+        ApicId    = $(if ($apic.Success) { [int]$apic.Groups[1].Value } else { $null })
+        ErrorType = $(if ($type.Success) { $type.Groups[1].Value } else { "" })
+    }
+}
+
+function Get-HsWheaProcessorHistory {
+    <#
+    .SYNOPSIS
+        Earlier WHEA processor errors with their APIC ID (the logical
+        processor that reported them), newest first - so a core-by-core test
+        can say which core the old errors belong to.
+    #>
+    param([int]$Maximum = 200)
+    $rows = @()
+    $events = @()
+    try { $events = @(Get-HsEventsSafe -Filter @{ LogName = "System"; ProviderName = "Microsoft-Windows-WHEA-Logger" } -Maximum $Maximum) } catch {}
+    foreach ($event in $events) {
+        $parsed = ConvertFrom-HsWheaMessage -Message ([string]$event.Message)
+        if ($null -eq $parsed.ApicId) { continue }
+        $rows += [pscustomobject]@{ TimeCreated = $event.TimeCreated; Id = $event.Id; ApicId = $parsed.ApicId; ErrorType = $parsed.ErrorType }
+    }
+    return $rows
+}
+
 function Get-HsProcessCrashEvidence {
     <#
     .SYNOPSIS
