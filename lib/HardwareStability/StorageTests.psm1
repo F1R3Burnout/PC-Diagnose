@@ -92,6 +92,19 @@ function Invoke-HsSmartQuery {
     return $result
 }
 
+function Test-HsSmartSelfTestStarted {
+    <#
+        Did "smartctl -t short|long" start a self-test? ATA prints "Testing
+        has begun." plus "Please wait N minutes", NVMe prints "Self-test has
+        begun" without a "please wait" line. Only "begin"/"started" were
+        matched before, so every NVMe drive (e.g. a WD SN570 that lists
+        Self_Test in its optional admin commands) was reported as
+        UNSUPPORTED.
+    #>
+    param([AllowNull()][string]$SmartOutput)
+    return ([string]$SmartOutput -match '(?i)\b(has begun|has started|test (?:begun|started))\b|please wait|self-test.*(?:begun|started)')
+}
+
 function Get-HsSmartSelfTestProgress {
     <#
         Reads "is a self-test still running, and how far" from smartctl -a.
@@ -160,9 +173,10 @@ function Start-HsSmartSelfTest {
         $result.Reason = "Could not start SMART $TestType self-test (exit code $($start.ExitCode))."
         return $result
     }
-    if ($start.StdOut -notmatch "(?i)test.*(begin|started)|please wait") {
+    if (-not (Test-HsSmartSelfTestStarted -SmartOutput $start.StdOut)) {
+        $firstLines = (($start.StdOut -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 3) -join " / "
         $result.Status = "UNSUPPORTED"
-        $result.Reason = "Drive/controller does not appear to support self-tests."
+        $result.Reason = "Drive/controller does not appear to support self-tests (smartctl: $firstLines)."
         return $result
     }
 

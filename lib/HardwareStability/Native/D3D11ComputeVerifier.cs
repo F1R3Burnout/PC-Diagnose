@@ -442,7 +442,10 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
             public string ErrorMessage = "";
         }
 
-        private const double TargetDispatchMs = 150.0;
+        // 60 ms per dispatch: plenty to keep the GPU busy (dispatches run back
+        // to back), and a large margin to the 2 s TDR limit even when a hot GPU
+        // throttles its clocks.
+        private const double TargetDispatchMs = 60.0;
         private const int MaxRounds = 1 << 22;
 
         private const string LoadShaderTemplate = @"
@@ -540,8 +543,16 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                 }
                 return hr;
             }
-            Marshal.Copy(mapped.pData, target, 0, target.Length);
             var unmap = GetMethod<UnmapDelegate>(context, Slot_Context_Unmap);
+            if (mapped.pData == IntPtr.Zero)
+            {
+                // Never copy from a null mapping (seen as a possible crash path
+                // after a driver reset) - report it instead.
+                unmap(context, stagingBuffer, 0);
+                result.ErrorMessage = "Map(staging) returned no data pointer";
+                return -1;
+            }
+            Marshal.Copy(mapped.pData, target, 0, target.Length);
             unmap(context, stagingBuffer, 0);
             return 0;
         }

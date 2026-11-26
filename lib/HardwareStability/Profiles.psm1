@@ -159,6 +159,8 @@ function Get-HsThermalDefaults {
         GpuCoreAbort     = 95
         GpuHotspotWarning = 105
         GpuHotspotAbort   = 110
+        GpuMemoryWarning = 100 # GDDR6/6X junction; vendors throttle around 105-110
+        GpuMemoryAbort   = 110
         NvmeWarning      = 80
         NvmeAbort        = 85
         VrmWarning       = 105

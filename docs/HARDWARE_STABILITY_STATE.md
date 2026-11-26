@@ -2,6 +2,29 @@
 
 Letztes Update: 2026-11-26 (Telemetrie unter PS 5.1, Review-Fixes, PCDiagLite-Tests)
 
+## Nachtrag 2026-11-26 (3) — erster realer Standard-Lauf (DESKTOP-DITMECS)
+
+Ryzen 7 5700X, RX 6700, B450 GAMING X (IT8686E), WD SN570 + SATA-SSD, PS 5.1.
+PawnIO-Installation und CPU-/VRM-Temperaturen funktionierten. Gefundene Fehler:
+
+- GPU Load: Fehlabbruch nach 4 s - "GPU Hot Spot" (mit Leerzeichen) wurde als
+  GPU Core gegen 95 C geprüft (99 C Hotspot ist unter Volllast normal, Limit 110 C).
+  Jetzt eigene Klassen für Hotspot und GPU-Speicher; VRM-Sensoren kommen vom
+  Super-I/O-Chip und wurden bisher gar nicht geprüft.
+- Thermal Guard bricht ab -> Stage jetzt THERMAL_ABORT mit Sensorname statt INTERRUPTED.
+- System Stability BLOCKED: der GPU-Lastprozess (Job) endete ohne Ergebnis
+  ("Vom Hintergrundvorgang wurde ein Fehler ... : ."). Jetzt robust: Job-Fehler
+  werden als Teilergebnis gemeldet, Windows-Treiber-Resets (Display 4101) im
+  Stage-Zeitraum werden geprüft und genannt, der GPU-Job wird bei Thermal Abort
+  gestoppt, Dispatch-Ziel 60 ms (statt 150) mit Halbierung bei > 400 ms,
+  kein Kopieren aus einem Null-Mapping. Ursache auf dem Rechner noch offen.
+- Surface Scan SKIPPED ("Unzulässige Funktion"): GetFileSizeEx funktioniert nicht
+  auf \\.\PhysicalDriveN; jetzt IOCTL_DISK_GET_LENGTH_INFO.
+- SMART-Selbsttest UNSUPPORTED bei NVMe: "Self-test has begun" wurde nicht als
+  Start erkannt (nur "begin/started"/"please wait").
+- PCIe/WHEA unterscheidet jetzt Ereignisse während des Laufs von älteren.
+- Neu: 02_Telemetry\StageTelemetry.csv (Temperatur/Last/Leistung je Stage, alle 5 s).
+
 ## Nachtrag 2026-11-26 (2) — Bedienung: Dauer, Fortschritt, Wiederholung
 
 - Start ohne `-Profile`: Auswahl Kurz/Mittel/Lang (Quick/Standard/Extended) mit

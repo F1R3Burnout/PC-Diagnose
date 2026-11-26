@@ -24,12 +24,23 @@ function Test-HsThermalState {
         Value  = $null
     }
 
+    # Sensor classes. GPU names differ by vendor and LibreHardwareMonitor
+    # version: AMD reports "GPU Hot Spot" (with a space) and "GPU Memory",
+    # NVIDIA "GPU Hot Spot"/"GPU Memory Junction". The hotspot used to be
+    # matched as "hotspot" only, so an AMD hotspot of 99 C (normal under
+    # full load, limit 110 C) was judged as GPU CORE against 95 C and aborted
+    # the GPU stage after 4 s on a real RX 6700. Motherboard sensors come
+    # from the Super I/O chip (HardwareType "SuperIO"), so VRM limits were
+    # never applied before either.
+    $gpuHotspotPattern = '(?i)hot\s*spot|junction'
+    $gpuMemoryPattern = '(?i)memory|vram|mem\b'
     $checks = @(
         @{ Match = { param($r) $r.HardwareType -eq "Cpu" -and $r.SensorType -eq "Temperature" }; Warning = $Thresholds.CpuWarning; Abort = $Thresholds.CpuAbort; Label = "CPU" }
-        @{ Match = { param($r) $r.HardwareType -like "Gpu*" -and $r.SensorType -eq "Temperature" -and $r.SensorName -notmatch "(?i)hotspot" }; Warning = $Thresholds.GpuCoreWarning; Abort = $Thresholds.GpuCoreAbort; Label = "GPU Core" }
-        @{ Match = { param($r) $r.HardwareType -like "Gpu*" -and $r.SensorType -eq "Temperature" -and $r.SensorName -match "(?i)hotspot" }; Warning = $Thresholds.GpuHotspotWarning; Abort = $Thresholds.GpuHotspotAbort; Label = "GPU Hotspot" }
+        @{ Match = { param($r) $r.HardwareType -like "Gpu*" -and $r.SensorType -eq "Temperature" -and $r.SensorName -notmatch $gpuHotspotPattern -and $r.SensorName -notmatch $gpuMemoryPattern }; Warning = $Thresholds.GpuCoreWarning; Abort = $Thresholds.GpuCoreAbort; Label = "GPU Core" }
+        @{ Match = { param($r) $r.HardwareType -like "Gpu*" -and $r.SensorType -eq "Temperature" -and $r.SensorName -match $gpuMemoryPattern }; Warning = $Thresholds.GpuMemoryWarning; Abort = $Thresholds.GpuMemoryAbort; Label = "GPU Memory" }
+        @{ Match = { param($r) $r.HardwareType -like "Gpu*" -and $r.SensorType -eq "Temperature" -and $r.SensorName -match $gpuHotspotPattern -and $r.SensorName -notmatch $gpuMemoryPattern }; Warning = $Thresholds.GpuHotspotWarning; Abort = $Thresholds.GpuHotspotAbort; Label = "GPU Hotspot" }
         @{ Match = { param($r) $r.HardwareType -eq "Storage" -and $r.SensorType -eq "Temperature" }; Warning = $Thresholds.NvmeWarning; Abort = $Thresholds.NvmeAbort; Label = "Storage" }
-        @{ Match = { param($r) $r.HardwareType -eq "Motherboard" -and $r.SensorType -eq "Temperature" -and $r.SensorName -match "(?i)vrm" }; Warning = $Thresholds.VrmWarning; Abort = $Thresholds.VrmAbort; Label = "VRM" }
+        @{ Match = { param($r) $r.HardwareType -in @("Motherboard","SuperIO") -and $r.SensorType -eq "Temperature" -and $r.SensorName -match "(?i)vrm|mos" }; Warning = $Thresholds.VrmWarning; Abort = $Thresholds.VrmAbort; Label = "VRM" }
     )
 
     foreach ($check in $checks) {
@@ -42,13 +53,13 @@ function Test-HsThermalState {
         foreach ($row in $matching) {
             if ($row.Value -ge $check.Abort) {
                 $result.State = "ABORT"
-                $result.Reason = "$($check.Label) reached $($row.Value) C (abort threshold $($check.Abort) C)"
+                $result.Reason = "$($check.Label) ($($row.SensorName)) reached $($row.Value) C (abort threshold $($check.Abort) C)"
                 $result.Value = $row.Value
                 return $result
             }
             if ($row.Value -ge $check.Warning -and $result.State -ne "ABORT") {
                 $result.State = "WARNING"
-                $result.Reason = "$($check.Label) reached $($row.Value) C (warning threshold $($check.Warning) C)"
+                $result.Reason = "$($check.Label) ($($row.SensorName)) reached $($row.Value) C (warning threshold $($check.Warning) C)"
                 $result.Value = $row.Value
             }
         }

@@ -28,7 +28,7 @@ if ($runDir.Count -eq 0) {
     $failures += "No result folder was created"
 } else {
     $run = $runDir[0].FullName
-    foreach ($file in @("00_Result.html", "00_Summary.txt", "00_TestStages.csv", "02_Telemetry\TelemetryStatus.json")) {
+    foreach ($file in @("00_Result.html", "00_Summary.txt", "00_TestStages.csv", "02_Telemetry\TelemetryStatus.json", "02_Telemetry\StageTelemetry.csv")) {
         if (-not (Test-Path -LiteralPath (Join-Path $run $file))) { $failures += "Missing $file" }
     }
     if (-not (Test-Path -LiteralPath "$run.zip")) { $failures += "Missing result ZIP" }
@@ -40,6 +40,8 @@ if ($runDir.Count -eq 0) {
     }
     $unhandled = @($stages | Where-Object { [string]$_.Assessment -match "unexpected error" })
     foreach ($stage in $unhandled) { $failures += "Unhandled script error in '$($stage.Component)': $($stage.Assessment)" }
+    $surface = @($stages | Where-Object { $_.StageName -eq "STORAGE_SURFACE" -and $_.Status -ne "SKIPPED" })
+    if ($RetestComponents -match "Storage" -and $surface.Count -eq 0) { $failures += "The surface scan never ran (physical disk could not be opened)" }
     $retests = @($stages | Where-Object { [string]$_.Component -match "\(Retest 1" })
     if ($retests.Count -eq 0) { $failures += "No retest stage was recorded" }
     $system = @($stages | Where-Object { $_.StageName -eq "SYSTEM_STABILITY" })

@@ -222,6 +222,7 @@ $ComputerSafe = ConvertTo-HsSafeFileName $env:COMPUTERNAME
 $RunId = "PCStability_${ComputerSafe}_${Timestamp}"
 $Out = Join-Path $OutputRoot $RunId
 
+$script:HsRunStartTime = Get-Date
 $Dirs = @{
     Root      = $Out
     System    = Join-Path $Out "01_System"
@@ -272,7 +273,31 @@ function Get-HsTelemetrySampleForStage {
     # row). Plain pass-through here, and plain "$x = Get-HsTelemetrySampleForStage"
     # at every caller, is the only combination that stays correct.
     if ($SkipTelemetry) { return ,@() }
-    return Get-HsTelemetrySample -Stage $StageName
+    $rows = Get-HsTelemetrySample -Stage $StageName
+    Save-HsStageTelemetry -Rows $rows
+    return ,$rows
+}
+
+$script:HsStageTelemetryLast = [datetime]::MinValue
+$script:HsThermalAbortReason = ""
+$script:HsThermalWarningLast = @{ Reason = ""; At = [datetime]::MinValue }
+
+function Save-HsStageTelemetry {
+    <#
+        Keeps temperatures, loads and power of every stage in
+        02_Telemetry\StageTelemetry.csv (at most every 5 s). Without it a
+        thermal abort could not be checked afterwards - only the idle
+        baseline was written before.
+    #>
+    param([AllowNull()][object[]]$Rows)
+    if ($null -eq $Rows -or $DryRun) { return }
+    $now = Get-Date
+    if (($now - $script:HsStageTelemetryLast).TotalSeconds -lt 5) { return }
+    $script:HsStageTelemetryLast = $now
+    try {
+        @($Rows | Where-Object { $null -ne $_ -and $_.SensorType -in @("Temperature","Load","Power") }) |
+            Export-Csv -LiteralPath (Join-Path $Dirs.Telemetry "StageTelemetry.csv") -Append -NoTypeInformation -Encoding UTF8
+    } catch {}
 }
 
 function Test-HsThermalAbortOrCancel {
@@ -280,13 +305,21 @@ function Test-HsThermalAbortOrCancel {
     if ($script:HsCancelRequested) { return $true }
     if ($SkipTelemetry) { return $false }
     $rows = Get-HsTelemetrySample -Stage $StageName
+    Save-HsStageTelemetry -Rows $rows
     $state = Test-HsThermalState -Rows $rows -Thresholds $thermalDefaults
     if ($state.State -eq "ABORT") {
         Write-Progress2 "THERMAL ABORT: $($state.Reason)" "Red"
+        $script:HsThermalAbortReason = $state.Reason
         return $true
     }
     if ($state.State -eq "WARNING") {
-        Write-Progress2 "Thermal warning: $($state.Reason)" "Yellow"
+        # Some stages check several times per second; repeat a warning only
+        # when it changes or once a minute.
+        $now = Get-Date
+        if ($state.Reason -ne $script:HsThermalWarningLast.Reason -or ($now - $script:HsThermalWarningLast.At).TotalSeconds -ge 60) {
+            Write-Progress2 "Thermal warning: $($state.Reason)" "Yellow"
+            $script:HsThermalWarningLast = @{ Reason = $state.Reason; At = $now }
+        }
     }
     return $false
 }
@@ -447,8 +480,12 @@ function Invoke-HsStageWrapper {
     Set-HsPendingRun -RunId $RunId -ResultDirectory $Out -Profile $Profile -Stage $StageName `
         -ExpectedEnd ([datetime]::Now.AddMinutes(60)) -Status "Running" | Out-Null
 
+    $script:HsThermalAbortReason = ""
     try {
         & $Action $stage
+        if ($script:HsThermalAbortReason -and $stage.Status -eq "INTERRUPTED") {
+            Complete-HsStage $stage -Status "THERMAL_ABORT" -Assessment "Stopped by the thermal guard: $($script:HsThermalAbortReason). The stage did not run for its planned time; this is a safety stop, not a verified hardware error."
+        }
     } catch {
         Add-HsNote -Stage $stage -Note "Unhandled error: $($_.Exception.Message)"
         Complete-HsStage $stage -Status "BLOCKED" -Assessment "Stage could not complete due to an unexpected error: $($_.Exception.Message)"
@@ -738,7 +775,14 @@ function Invoke-HsComponentStages {
                     -CancelCheck { Test-HsThermalAbortOrCancel -StageName "GPU_LOAD_THERMAL" } -ProgressLabel "GPU Last / Temperatur$StageSuffix"
                 $stage.Coverage = if ($r.HeavyKernel) { "$($r.Iterations) full-load dispatch(es), 1M threads x $($r.Rounds) rounds, $($r.VerifiedValues) value(s) verified" } else { "$($r.Iterations) sustained load iteration(s) (light mode)" }
                 $stage.PeakTemperature = $r.PeakTemperature
-                Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                $loadStatus = $r.Status
+                $loadReason = $r.Reason
+                $driverResets = @(Get-HsGpuDriverResetEvents -Since $stage.Started)
+                if ($driverResets.Count -gt 0 -and $loadStatus -eq "PASS") {
+                    $loadStatus = "WARNING"
+                    $loadReason = "Windows logged $($driverResets.Count) display driver reset(s) during the load (first: $($driverResets[0].TimeCreated.ToString('HH:mm:ss'))). $loadReason"
+                }
+                Complete-HsStage $stage -Status $loadStatus -Assessment $loadReason
             } | Out-Null
         }
 
@@ -822,8 +866,14 @@ function Invoke-HsComponentStages {
                 } else {
                     $categories = @($wheaEvents | ForEach-Object { Get-HsWheaCategory -Event $_ } | Select-Object -Unique)
                     $assessment = ($categories | ForEach-Object { Get-HsWheaAssessment -Category $_ }) -join " "
-                    $stage.Coverage = "$($wheaEvents.Count) WHEA event(s): $($categories -join ', ')"
-                    Complete-HsStage $stage -Status "WARNING" -Assessment $assessment
+                    # Separate errors logged DURING this test from older ones:
+                    # only the former were triggered by this load.
+                    $duringRun = @($wheaEvents | Where-Object { $_.TimeCreated -and $_.TimeCreated -ge $script:HsRunStartTime })
+                    $newest = @($wheaEvents | Where-Object { $_.TimeCreated } | Sort-Object TimeCreated -Descending | Select-Object -First 1)
+                    $newestText = if ($newest.Count -gt 0) { ", newest $($newest[0].TimeCreated.ToString('yyyy-MM-dd HH:mm'))" } else { "" }
+                    $stage.Coverage = "$($wheaEvents.Count) WHEA event(s), $($duringRun.Count) during this run$newestText`: $($categories -join ', ')"
+                    $timing = if ($duringRun.Count -gt 0) { "$($duringRun.Count) of them were logged DURING this test run, i.e. under this load." } else { "None of them was logged during this test run; they come from earlier use of the PC." }
+                    Complete-HsStage $stage -Status "WARNING" -Assessment "$timing $assessment"
                 }
             } | Out-Null
         }
@@ -860,8 +910,35 @@ function Invoke-HsComponentStages {
                         -ProgressLabel "Systemtest CPU + GPU + RAM$StageSuffix"
                 } finally {
                     $ramResult = Complete-HsRamBackgroundLoad -Load $ramLoad
+                    # A thermal abort or Ctrl+C ends the CPU part early: the GPU
+                    # load must stop then too, not keep running unguarded.
+                    if ($gpuJob -and ($null -eq $cpuResult -or $cpuResult.Status -eq "INTERRUPTED") -and $gpuJob.State -eq "Running") {
+                        Stop-Job -Job $gpuJob -ErrorAction SilentlyContinue
+                    }
                 }
-                $gpuResult = Receive-Job -Job $gpuJob -Wait -AutoRemoveJob | Select-Object -Last 1
+                $gpuResult = $null
+                $gpuJobError = ""
+                try {
+                    $gpuResult = Receive-Job -Job $gpuJob -Wait -ErrorAction Stop | Select-Object -Last 1
+                } catch {
+                    $gpuJobError = $_.Exception.Message
+                } finally {
+                    Remove-Job -Job $gpuJob -Force -ErrorAction SilentlyContinue
+                }
+                $driverResets = @(Get-HsGpuDriverResetEvents -Since $stage.Started)
+                if ($null -eq $gpuResult) {
+                    $gpuStatus = if ($cpuResult.Status -eq "INTERRUPTED") { "INTERRUPTED" } else { "BLOCKED" }
+                    $resetText = if ($driverResets.Count -gt 0) { " Windows logged $($driverResets.Count) display driver reset(s) during this stage (first: $($driverResets[0].TimeCreated.ToString('HH:mm:ss')))." } else { "" }
+                    $gpuResult = [pscustomobject]@{
+                        Status     = $gpuStatus
+                        Reason     = "The GPU load process ended without a result$(if ($gpuJobError) { " ($gpuJobError)" })$resetText"
+                        Iterations = 0
+                        DeviceLost = $false
+                    }
+                } elseif ($driverResets.Count -gt 0 -and $gpuResult.Status -eq "PASS") {
+                    $gpuResult.Status = "WARNING"
+                    $gpuResult.Reason = "Windows logged $($driverResets.Count) display driver reset(s) during the combined load. $($gpuResult.Reason)"
+                }
 
                 $stage.Coverage = "CPU: $($cpuResult.Workers) worker(s); GPU: $($gpuResult.Iterations) iteration(s); RAM: $systemRamPercent% continuous, $($ramResult.Passes) complete pass(es)"
                 $partsText = "CPU: $($cpuResult.Status), GPU: $($gpuResult.Status), RAM: $($ramResult.Status)"
@@ -870,6 +947,8 @@ function Invoke-HsComponentStages {
                     Complete-HsStage $stage -Status "FAIL" -Assessment "Combined CPU+GPU+RAM activity produced a verified error ($partsText). Individual components may still pass in isolation; under combined load the power supply, VRM, memory controller and mainboard become more suspect.$ramDetail"
                 } elseif ($gpuResult.DeviceLost) {
                     Complete-HsStage $stage -Status "FAIL" -Assessment "GPU device was lost during combined system activity ($partsText)."
+                } elseif ($cpuResult.Status -eq "PASS" -and $gpuResult.Status -eq "WARNING" -and $ramResult.Status -eq "PASS") {
+                    Complete-HsStage $stage -Status "WARNING" -Assessment "CPU, GPU and RAM workloads ran concurrently without a verified calculation error, but: $($gpuResult.Reason)"
                 } elseif ($cpuResult.Status -eq "PASS" -and $gpuResult.Status -eq "PASS" -and $ramResult.Status -eq "PASS") {
                     Complete-HsStage $stage -Status "PASS" -Assessment "CPU, GPU and RAM workloads ran concurrently for $($StageProfile.SystemStabilityMinutes) minute(s) with no verified errors."
                 } else {

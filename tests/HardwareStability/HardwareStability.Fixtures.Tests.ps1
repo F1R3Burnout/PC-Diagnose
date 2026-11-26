@@ -258,6 +258,9 @@ Assert-True ($ataProgress.InProgress -and $ataProgress.PercentDone -eq 30) "HS-0
 $nvmeRunning = "Self-test status: Short self-test in progress (40% completed)`r`nNum  Test_Description  Status`r`n 0   Short             Completed without error"
 $nvmeProgress = Get-HsSmartSelfTestProgress -SmartOutput $nvmeRunning
 Assert-True ($nvmeProgress.InProgress -and $nvmeProgress.PercentDone -eq 40) "HS-059 NVMe 'self-test in progress (40% completed)' => running, even though an older log entry says 'Completed without error'"
+Assert-True (Test-HsSmartSelfTestStarted -SmartOutput "=== START OF OFFLINE IMMEDIATE AND SELF-TEST SECTION ===`r`nSelf-test has begun`r`nUse smartctl -X to abort test") "HS-059 NVMe 'Self-test has begun' counts as started (was UNSUPPORTED)"
+Assert-True (Test-HsSmartSelfTestStarted -SmartOutput "Sending command: `"Execute SMART Short self-test routine immediately in off-line mode`".`r`nDrive command successful.`r`nTesting has begun.`r`nPlease wait 2 minutes for test to complete.") "HS-059 ATA 'Testing has begun / Please wait' counts as started"
+Assert-True (-not (Test-HsSmartSelfTestStarted -SmartOutput "SMART Self-test not supported")) "HS-059 'not supported' is not a started test"
 $nvmeIdle = Get-HsSmartSelfTestProgress -SmartOutput "Self-test status: No self-test in progress"
 Assert-True (-not $nvmeIdle.InProgress) "HS-059 NVMe 'No self-test in progress' => not running"
 
@@ -358,6 +361,16 @@ $warnRows = @([pscustomobject]@{ HardwareType = "Cpu"; SensorType = "Temperature
 Assert-True ((Test-HsThermalState -Rows $warnRows -Thresholds $thresholds).State -eq "WARNING") "HS-040 Temperature above warning threshold => WARNING"
 $abortRows = @([pscustomobject]@{ HardwareType = "Cpu"; SensorType = "Temperature"; SensorName = "CPU Package"; Value = 101 })
 Assert-True ((Test-HsThermalState -Rows $abortRows -Thresholds $thresholds).State -eq "ABORT") "HS-041 Temperature above abort threshold => ABORT"
+# Real sensor names from an AMD RX 6700 / Gigabyte B450 (IT8686E) run.
+$amdHot = @([pscustomobject]@{ HardwareType = "GpuAmd"; SensorType = "Temperature"; SensorName = "GPU Hot Spot"; Value = 99 })
+Assert-True ((Test-HsThermalState -Rows $amdHot -Thresholds $thresholds).State -eq "OK") "HS-041 AMD 'GPU Hot Spot' 99 C is judged as hotspot (limit 110), not as GPU core (was a false abort)"
+$amdCore = @([pscustomobject]@{ HardwareType = "GpuAmd"; SensorType = "Temperature"; SensorName = "GPU Core"; Value = 96 })
+Assert-True ((Test-HsThermalState -Rows $amdCore -Thresholds $thresholds).State -eq "ABORT") "HS-041 'GPU Core' above 95 C still aborts"
+$gpuMem = @([pscustomobject]@{ HardwareType = "GpuNvidia"; SensorType = "Temperature"; SensorName = "GPU Memory Junction"; Value = 102 })
+$gpuMemState = Test-HsThermalState -Rows $gpuMem -Thresholds $thresholds
+Assert-True ($gpuMemState.State -eq "WARNING" -and $gpuMemState.Reason -match "GPU Memory") "HS-041 GPU memory junction uses its own limits (102 C => WARNING, not ABORT)"
+$superIoVrm = @([pscustomobject]@{ HardwareType = "SuperIO"; SensorType = "Temperature"; SensorName = "VRM MOS"; Value = 116 })
+Assert-True ((Test-HsThermalState -Rows $superIoVrm -Thresholds $thresholds).State -eq "ABORT") "HS-041 VRM sensors reported by the Super I/O chip are guarded too"
 
 Write-Host "`n=== HS-042 / HS-043 / HS-045 / HS-046 Reporting ===" -ForegroundColor Cyan
 $partialStage = New-HsStage -StageName "RAM" -Component "RAM"

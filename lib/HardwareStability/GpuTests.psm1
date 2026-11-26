@@ -237,6 +237,22 @@ function Invoke-HsVramVerification {
     return $result
 }
 
+function Get-HsGpuDriverResetEvents {
+    <#
+        Display driver resets (TDR) Windows logged since the given time:
+        System log, source "Display", event 4101 ("Display driver ... stopped
+        responding and has successfully recovered"). A reset during a GPU
+        load is evidence that the driver/GPU stopped responding; it is
+        reported, never silently ignored.
+    #>
+    param([Parameter(Mandatory=$true)][datetime]$Since)
+    try {
+        return @(Get-WinEvent -FilterHashtable @{ LogName = "System"; ProviderName = "Display"; Id = 4101; StartTime = $Since } -ErrorAction Stop)
+    } catch {
+        return @()
+    }
+}
+
 function Invoke-HsGpuLoadThermalValidation {
     <#
     .SYNOPSIS
@@ -308,6 +324,10 @@ function Invoke-HsGpuLoadThermalValidation {
                 continue
             }
             $rounds = $slice.Rounds
+            # A hot GPU clocks down and each dispatch takes longer. Keep a
+            # wide margin to the 2 s Windows TDR limit by halving the work per
+            # dispatch when it drifts above 400 ms.
+            if ($slice.LastDispatchMs -gt 400 -and $rounds -gt 32) { $rounds = [int][math]::Floor($rounds / 2) }
             $iterations += [int]$slice.Dispatches
             $mismatches += $slice.MismatchCount
             $verified += $slice.VerifiedValues

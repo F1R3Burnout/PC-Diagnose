@@ -72,6 +72,24 @@ namespace PCDiagnose.HardwareStability
 
         private const uint IOCTL_DISK_GET_DRIVE_GEOMETRY = 0x00070000;
 
+        // Size of a physical disk. GetFileSizeEx does not work on
+        // \\.\PhysicalDriveN handles (ERROR_INVALID_FUNCTION, seen on a real
+        // WD SN570 and on CI), which made every surface scan SKIPPED.
+        // IOCTL_DISK_GET_LENGTH_INFO is a read-only query (FILE_READ_ACCESS).
+        private const uint IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C;
+
+        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "DeviceIoControl")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeviceIoControlLength(
+            SafeFileHandle hDevice,
+            uint dwIoControlCode,
+            IntPtr lpInBuffer,
+            uint nInBufferSize,
+            out long lpOutBuffer,
+            uint nOutBufferSize,
+            out uint lpBytesReturned,
+            IntPtr lpOverlapped);
+
         public class OpenResult
         {
             public bool Success;
@@ -105,11 +123,19 @@ namespace PCDiagnose.HardwareStability
                 }
 
                 long size;
-                if (!GetFileSizeEx(handle, out size))
+                uint lengthReturned;
+                bool haveSize = DeviceIoControlLength(handle, IOCTL_DISK_GET_LENGTH_INFO, IntPtr.Zero, 0, out size, 8, out lengthReturned, IntPtr.Zero) && size > 0;
+                if (!haveSize)
                 {
-                    result.Success = false;
-                    result.ErrorMessage = new Win32Exception(Marshal.GetLastWin32Error()).Message;
-                    return result;
+                    int ioctlError = Marshal.GetLastWin32Error();
+                    // Regular files (fixtures) have no disk IOCTLs; their size
+                    // comes from GetFileSizeEx.
+                    if (!GetFileSizeEx(handle, out size))
+                    {
+                        result.Success = false;
+                        result.ErrorMessage = new Win32Exception(ioctlError != 0 ? ioctlError : Marshal.GetLastWin32Error()).Message;
+                        return result;
+                    }
                 }
 
                 var geometry = new DISK_GEOMETRY();
