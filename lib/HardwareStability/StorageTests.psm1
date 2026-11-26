@@ -3,6 +3,7 @@ Set-StrictMode -Version 2.0
 $moduleDir = $PSScriptRoot
 Import-Module (Join-Path $moduleDir "ToolManager.psm1") -Force
 Import-Module (Join-Path $moduleDir "ProcessRunner.psm1") -Force
+Import-Module (Join-Path $moduleDir "Common.psm1") -Force
 
 function Invoke-HsSmartQuery {
     <#
@@ -91,6 +92,34 @@ function Invoke-HsSmartQuery {
     return $result
 }
 
+function Get-HsSmartSelfTestProgress {
+    <#
+        Reads "is a self-test still running, and how far" from smartctl -a.
+        ATA drives report "Self-test routine in progress... 70% of test
+        remaining."; NVMe drives report "Self-test status: Short self-test in
+        progress (30% completed)". Only the ATA wording was recognized before,
+        so on NVMe the old log entry of an EARLIER test ("Completed without
+        error") could be read as the result of a test that was still running.
+    #>
+    param([AllowNull()][string]$SmartOutput)
+    $text = [string]$SmartOutput
+    $inProgress = $false
+    $percentDone = -1
+    # ATA prints the percentage on the line after the status text.
+    $ata = [regex]::Match($text, '(?i)Self-test routine in progress[\s\S]{0,160}?(\d{1,3})%\s+of test remaining')
+    $nvme = [regex]::Match($text, '(?i)(?<!No )self-test in progress\s*\((\d{1,3})%\s*completed\)')
+    if ($ata.Success) {
+        $inProgress = $true
+        $percentDone = 100 - [int]$ata.Groups[1].Value
+    } elseif ($nvme.Success) {
+        $inProgress = $true
+        $percentDone = [int]$nvme.Groups[1].Value
+    } elseif ($text -match '(?i)Self-test routine in progress|(?<!No )self-test in progress') {
+        $inProgress = $true
+    }
+    return [pscustomobject]@{ InProgress = $inProgress; PercentDone = $percentDone }
+}
+
 function Start-HsSmartSelfTest {
     <#
     .SYNOPSIS
@@ -102,9 +131,14 @@ function Start-HsSmartSelfTest {
         [Parameter(Mandatory=$true)][string]$ToolCacheRoot,
         [Parameter(Mandatory=$true)][int]$DriveIndex,
         [Parameter(Mandatory=$true)][ValidateSet("Short","Extended")][string]$TestType,
-        [int]$MaxWaitMinutes = 5,
-        [switch]$NoDownload
+        [int]$MaxWaitMinutes = 0,
+        [switch]$NoDownload,
+        [string]$ProgressLabel = "SMART-Selbsttest"
     )
+
+    # Short tests take about 2 minutes; an extended test takes from several
+    # minutes (NVMe) to hours (HDD) - 5 minutes could never be enough there.
+    if ($MaxWaitMinutes -le 0) { $MaxWaitMinutes = if ($TestType -eq "Short") { 5 } else { 120 } }
 
     $result = [pscustomobject]@{
         Status  = "SKIPPED"
@@ -133,23 +167,44 @@ function Start-HsSmartSelfTest {
     }
 
     $deadline = [datetime]::Now.AddMinutes($MaxWaitMinutes)
+    $waitWatch = [Diagnostics.Stopwatch]::StartNew()
     $lastOutput = ""
-    while ([datetime]::Now -lt $deadline) {
-        Start-Sleep -Seconds 15
-        $poll = Invoke-HsProcess -FilePath $tool.ExecutablePath -ArgumentList @("-a", "/dev/pd$DriveIndex") -TimeoutSeconds 30 -Stage "STORAGE_SMART_SELFTEST"
-        $lastOutput = $poll.StdOut
-        if ($lastOutput -match "(?i)Self-test routine in progress") { continue }
-        break
+    $percentDone = -1
+    try {
+        while ([datetime]::Now -lt $deadline) {
+            for ($wait = 0; $wait -lt 15 -and [datetime]::Now -lt $deadline; $wait++) {
+                Start-Sleep -Seconds 1
+                $statusText = if ($percentDone -ge 0) { "$percentDone % erledigt" } else { "laeuft" }
+                Write-HsStageProgress -Activity $ProgressLabel -Status "$TestType, $statusText, seit $(Format-HsDuration $waitWatch.Elapsed.TotalSeconds)" -Percent $percentDone
+            }
+            $poll = Invoke-HsProcess -FilePath $tool.ExecutablePath -ArgumentList @("-a", "/dev/pd$DriveIndex") -TimeoutSeconds 30 -Stage "STORAGE_SMART_SELFTEST"
+            $lastOutput = $poll.StdOut
+            $progress = Get-HsSmartSelfTestProgress -SmartOutput $lastOutput
+            if ($progress.InProgress) {
+                $percentDone = $progress.PercentDone
+                continue
+            }
+            break
+        }
+    } finally {
+        Write-HsStageProgress -Activity $ProgressLabel -Completed
     }
 
     $result.RawOutput = $lastOutput
-    if ($lastOutput -match "(?i)completed without error") {
-        $result.Status = "PASS"
-        $result.Reason = "SMART $TestType self-test completed without error."
-    } elseif ($lastOutput -match "(?i)Self-test routine in progress") {
+    # Judge the NEWEST self-test log entry (ATA "# 1 ...", NVMe " 0 ...")
+    # rather than the whole output: older entries from earlier tests are
+    # listed too and must not decide this test's result.
+    $stillRunning = (Get-HsSmartSelfTestProgress -SmartOutput $lastOutput).InProgress
+    $verdictText = [string]$lastOutput
+    $newestEntry = [regex]::Match([string]$lastOutput, '(?im)^\s*(?:#\s*1|0)\s+(?:Short|Extended|Offline|Conveyance)\b.*$')
+    if ($newestEntry.Success) { $verdictText = $newestEntry.Value }
+    if ($stillRunning) {
         $result.Status = "WARNING"
         $result.Reason = "SMART $TestType self-test did not finish within $MaxWaitMinutes minute(s) (still in progress)."
-    } elseif ($lastOutput -match "(?i)completed.*read failure|completed.*error") {
+    } elseif ($verdictText -match "(?i)completed without error") {
+        $result.Status = "PASS"
+        $result.Reason = "SMART $TestType self-test completed without error."
+    } elseif ($verdictText -match "(?i)completed.*read failure|completed.*error|failed") {
         $result.Status = "FAIL"
         $result.Reason = "SMART $TestType self-test reported a failure."
     } else {

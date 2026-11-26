@@ -115,8 +115,8 @@
         {
           "name": "Profile",
           "type": "string",
-          "default": "Quick",
-          "description": "Quick, Standard, or Extended - controls pass counts, data volume, and coverage."
+          "default": "",
+          "description": "Quick (Kurz), Standard (Mittel) or Extended (Lang) - controls duration, pass counts, data volume and coverage. Empty = the test asks at start."
         },
         {
           "name": "Components",

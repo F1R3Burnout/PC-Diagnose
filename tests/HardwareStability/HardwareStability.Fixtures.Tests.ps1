@@ -18,6 +18,7 @@ Import-Module (Join-Path $LibRoot "CpuTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "MemoryTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "GpuTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "StorageWriteVerify.psm1") -Force
+Import-Module (Join-Path $LibRoot "StorageTests.psm1") -Force
 Import-Module (Join-Path $LibRoot "Reporting.psm1") -Force
 Import-Module (Join-Path $LibRoot "Telemetry.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "FixtureTools.psm1") -Force
@@ -63,7 +64,57 @@ Assert-True ($ramPass.Status -eq "PASS") "HS-009 RAM PASS fixture (exit code 0) 
 Remove-Item -Recurse -Force $mcCache -ErrorAction SilentlyContinue
 New-HsFakeMemoryChecker -Path (Join-Path $mcCache "MemoryChecker.exe") -ExitCode 1
 $ramFail = Invoke-HsRamVerification -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "ram_fail_out") -Passes 1 -PercentOfPhysicalRam 1 -NoDownload
-Assert-True ($ramFail.Status -eq "FAIL") "HS-010 RAM Error fixture (exit code 1) => FAIL"
+Assert-True ($ramFail.Status -eq "FAIL") "HS-010 RAM corruption fixture ('Memory corrupted', exit code 1) => FAIL"
+
+Write-Host "`n=== HS-055 / HS-056 / HS-057 RAM verdicts, duration mode, progress parsing ===" -ForegroundColor Cyan
+Remove-Item -Recurse -Force $mcCache -ErrorAction SilentlyContinue
+New-HsFakeMemoryChecker -Path (Join-Path $mcCache "MemoryChecker.exe") -Mode "allocfail"
+$ramAlloc = Invoke-HsRamVerification -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "ram_alloc_out") -Passes 1 -PercentOfPhysicalRam 1 -NoDownload
+Assert-True ($ramAlloc.Status -eq "BLOCKED") "HS-055 Exit code 1 without 'Memory corrupted' (allocation failure) => BLOCKED, not a RAM FAIL (got $($ramAlloc.Status))"
+
+Remove-Item -Recurse -Force $mcCache -ErrorAction SilentlyContinue
+New-HsFakeMemoryChecker -Path (Join-Path $mcCache "MemoryChecker.exe") -Mode "continuous"
+$ramTimed = Invoke-HsRamVerification -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "ram_timed_out") -Passes 1 -PercentOfPhysicalRam 1 -DurationSeconds 4 -NoDownload
+Assert-True ($ramTimed.Status -eq "PASS" -and $ramTimed.Command -match "--continuous") "HS-056 Duration mode runs --continuous and reaching the time limit without errors => PASS (got $($ramTimed.Status))"
+
+Remove-Item -Recurse -Force $mcCache -ErrorAction SilentlyContinue
+New-HsFakeMemoryChecker -Path (Join-Path $mcCache "MemoryChecker.exe") -Mode "continuous-corrupt"
+$ramTimedFail = Invoke-HsRamVerification -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "ram_timedfail_out") -Passes 1 -PercentOfPhysicalRam 1 -DurationSeconds 15 -NoDownload
+Assert-True ($ramTimedFail.Status -eq "FAIL") "HS-056 Duration mode reports corruption during the run => FAIL (got $($ramTimedFail.Status))"
+
+$mcState = New-HsMemoryCheckerState
+foreach ($line in @("--- [ Pass 2 of 4 ] ---", "Writing memory, please be patient...", "0.0%", "100.0% [OK]", "Reading memory, please be patient...", "50.0%")) {
+    Update-HsMemoryCheckerState -State $mcState -Line $line
+}
+$mcProgress = Get-HsMemoryCheckerProgress -State $mcState
+Assert-True ([math]::Abs($mcProgress.Percent - 43.75) -lt 0.01 -and $mcProgress.Text -match "Durchlauf 2/4") "HS-057 MemoryChecker output is turned into overall progress (pass 2 of 4, reading 50% => 43.75%, got $($mcProgress.Percent))"
+Update-HsMemoryCheckerState -State $mcState -Line "Error: Sorry, not enough physical memory!"
+Assert-True (-not $mcState.Corrupted -and $mcState.ErrorLine -match "not enough") "HS-057 A tool error line is recorded but is not memory corruption"
+Update-HsMemoryCheckerState -State $mcState -Line "Error: 2 hash check(s) have failed. Memory corrupted :-("
+Assert-True ($mcState.Corrupted) "HS-057 'Memory corrupted' is recognized as verification evidence"
+
+Write-Host "`n=== HS-058 RAM load during the combined system test ===" -ForegroundColor Cyan
+Remove-Item -Recurse -Force $mcCache -ErrorAction SilentlyContinue
+New-HsFakeMemoryChecker -Path (Join-Path $mcCache "MemoryChecker.exe") -Mode "continuous"
+$bgLoad = Start-HsRamBackgroundLoad -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "ram_bg_out") -PercentOfPhysicalRam 1 -NoDownload
+Start-Sleep -Seconds 3
+$bgResult = Complete-HsRamBackgroundLoad -Load $bgLoad
+Assert-True ($bgResult.Status -eq "PASS" -and $bgResult.Passes -ge 1) "HS-058 Background RAM load still running at the end without errors => PASS (got $($bgResult.Status), $($bgResult.Passes) pass(es))"
+Assert-True (@(Get-HsTrackedProcesses | Where-Object { $_.Stage -eq "SYSTEM_STABILITY_RAM" }).Count -eq 0) "HS-058 Background RAM process is stopped and unregistered"
+
+Remove-Item -Recurse -Force $mcCache -ErrorAction SilentlyContinue
+New-HsFakeMemoryChecker -Path (Join-Path $mcCache "MemoryChecker.exe") -Mode "continuous-corrupt"
+$bgLoad = Start-HsRamBackgroundLoad -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "ram_bgfail_out") -PercentOfPhysicalRam 1 -NoDownload
+Start-Sleep -Seconds 4
+$bgResult = Complete-HsRamBackgroundLoad -Load $bgLoad
+Assert-True ($bgResult.Status -eq "FAIL") "HS-058 Corruption reported during the combined test => FAIL (got $($bgResult.Status))"
+
+Remove-Item -Recurse -Force $mcCache -ErrorAction SilentlyContinue
+New-HsFakeMemoryChecker -Path (Join-Path $mcCache "MemoryChecker.exe") -Mode "allocfail"
+$bgLoad = Start-HsRamBackgroundLoad -ConfigPath $ConfigPath -ToolCacheRoot $FixtureCache -OutputDirectory (Join-Path $FixtureCache "ram_bgalloc_out") -PercentOfPhysicalRam 1 -NoDownload
+Start-Sleep -Seconds 2
+$bgResult = Complete-HsRamBackgroundLoad -Load $bgLoad
+Assert-True ($bgResult.Status -eq "BLOCKED") "HS-058 RAM load that ended on its own without corruption => BLOCKED, never PASS (got $($bgResult.Status))"
 
 Write-Host "`n=== HS-011 / HS-012 / HS-013 / HS-014 Prime95 fixtures ===" -ForegroundColor Cyan
 $p95Cache = Join-Path $FixtureCache "prime95"
@@ -137,6 +188,27 @@ Assert-True (@($fakeRows | Where-Object { $_.SensorType -eq "Load" }).Count -eq 
 $skippedCard = New-HsTelemetryHtmlCard -TelemetrySkipped
 Assert-True ($skippedCard -match "SkipTelemetry") "HS-054 Report states that telemetry was disabled"
 
+Write-Host "`n=== HS-059 SMART self-test progress parsing ===" -ForegroundColor Cyan
+$ataRunning = "Self-test execution status:      ( 249)`tSelf-test routine in progress...`r`n`t`t`t`t`t70% of test remaining."
+$ataProgress = Get-HsSmartSelfTestProgress -SmartOutput $ataRunning
+Assert-True ($ataProgress.InProgress -and $ataProgress.PercentDone -eq 30) "HS-059 ATA 'in progress / 70% remaining' (two lines) => running, 30% done"
+$nvmeRunning = "Self-test status: Short self-test in progress (40% completed)`r`nNum  Test_Description  Status`r`n 0   Short             Completed without error"
+$nvmeProgress = Get-HsSmartSelfTestProgress -SmartOutput $nvmeRunning
+Assert-True ($nvmeProgress.InProgress -and $nvmeProgress.PercentDone -eq 40) "HS-059 NVMe 'self-test in progress (40% completed)' => running, even though an older log entry says 'Completed without error'"
+$nvmeIdle = Get-HsSmartSelfTestProgress -SmartOutput "Self-test status: No self-test in progress"
+Assert-True (-not $nvmeIdle.InProgress) "HS-059 NVMe 'No self-test in progress' => not running"
+
+Write-Host "`n=== HS-060 Retest profile and progress helpers ===" -ForegroundColor Cyan
+$baseProfile = Get-HsProfile -Name "Quick"
+$retest = Get-HsRetestProfile -BaseProfile $baseProfile -Minutes 30
+Assert-True ($retest.CpuCacheImcMinutes -eq 30 -and $retest.RamDurationMinutes -eq 30 -and $retest.SurfaceScanMaxMinutes -eq 30 -and $retest.SurfaceScanEnabled) "HS-060 Retest profile applies the chosen duration to CPU, RAM and the surface scan"
+Assert-True ($baseProfile.CpuCacheImcMinutes -eq 5 -and $baseProfile.RamDurationMinutes -eq 0) "HS-060 Retest profile does not change the base profile"
+Assert-True (@(Get-HsProfileChoice).Count -eq 3 -and ((@(Get-HsProfileChoice) | ForEach-Object { $_.Label }) -join ",") -eq "Kurz,Mittel,Lang") "HS-060 Start offers Kurz, Mittel, Lang"
+Assert-True ((Get-HsProfileEstimateMinutes -ProfileConfig (Get-HsProfile -Name "Standard") -Components @("CPU","Cache","System")) -eq 55) "HS-060 Duration estimate adds the time-bound stages (20+20+15)"
+$tp = Get-HsTimeProgress -ElapsedSeconds 90 -TotalSeconds 360
+Assert-True ([math]::Abs($tp.Percent - 25) -lt 0.01 -and $tp.Remaining -eq 270 -and $tp.Text -eq "1:30 von 6:00") "HS-060 Time-based progress text and percentage"
+Assert-True ((Format-HsDuration 3725) -eq "1:02:05") "HS-060 Durations over an hour are shown as h:mm:ss"
+
 Write-Host "`n=== HS-015 / HS-016 / HS-018 / HS-019 GPU Compute ===" -ForegroundColor Cyan
 $gpuPass = Invoke-HsGpuComputeVerification -ElementCount 1024 -Iterations 1
 Assert-True ($gpuPass.Status -in @("PASS","UNSUPPORTED")) "HS-015 GPU Compute real run completes as PASS or (if no D3D11) UNSUPPORTED"
@@ -161,6 +233,7 @@ Assert-True (-not (Test-Path $wv.TestFilePath)) "HS-030 Test file is removed aft
 $crcA = Get-HsCrc32 -Bytes ([byte[]](1,2,3,4,5))
 $crcB = Get-HsCrc32 -Bytes ([byte[]](1,2,3,4,6))
 Assert-True ($crcA -ne $crcB) "HS-031 Checksum comparison detects a single-byte difference (mismatch => FAIL path)"
+Assert-True ((Get-HsCrc32 -Bytes ([Text.Encoding]::ASCII.GetBytes("123456789"))) -eq [uint32]3421780262) "HS-031 CRC32 of '123456789' is the standard check value 0xCBF43926"
 
 Write-Host "`n=== HS-027 / HS-028 / HS-029 Raw disk read-only safety (static check) ===" -ForegroundColor Cyan
 $rawDiskSource = Get-Content -Raw (Join-Path $LibRoot "Native\RawDiskReader.cs")

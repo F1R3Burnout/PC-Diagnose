@@ -37,8 +37,9 @@ param(
     [switch]$IncludeSubnetDiscovery,
     [switch]$NoInternetTest,
     [switch]$NoWriteTests,
+    # Empty = the hardware test asks for Kurz/Mittel/Lang itself.
     [ValidateSet("Quick","Standard","Extended")]
-    [string]$Profile = "Quick",
+    [string]$Profile = "",
     [string]$Components = "CPU,Cache,RAM,GPU,VRAM,Storage,PCIe,System",
     [switch]$NoDownload,
     [switch]$SkipTelemetry,
@@ -142,6 +143,12 @@ function Start-ElevatedBootstrap {
             "$(if ($PrivacyMode) { '-PrivacyMode ' } else { '' })" +
             "$(if ($AutoInstallDebugTools) { '-AutoInstallDebugTools ' } else { '' })" +
             "$(if ($DaysBackWasProvided) { '-DaysBackProvided ' } else { '' })" +
+            "$(if ($Profile) { "-Profile $(Quote-ForSingleQuotedPowerShell $Profile) " } else { '' })" +
+            "-Components $(Quote-ForSingleQuotedPowerShell $Components) " +
+            "$(if ($NoDownload) { '-NoDownload ' } else { '' })" +
+            "$(if ($SkipTelemetry) { '-SkipTelemetry ' } else { '' })" +
+            "$(if ($HsDryRun) { '-HsDryRun ' } else { '' })" +
+            "$(if ($SurfaceScanMaxBytes -gt 0) { "-SurfaceScanMaxBytes $SurfaceScanMaxBytes " } else { '' })" +
             "-NoElevate"
     ) -join "; "
 
@@ -507,7 +514,7 @@ function Invoke-RemoteTool {
         }
     } elseif ($toolInfo.id -eq "hardwarestability") {
         $toolArgs.OutputRoot = $OutputRoot
-        $toolArgs.Profile = $Profile
+        if ($Profile) { $toolArgs.Profile = $Profile }
         $toolArgs.Components = $Components
         $toolArgs.SurfaceScanMaxBytes = $SurfaceScanMaxBytes
         if ($NoDownload) { $toolArgs.NoDownload = $true }

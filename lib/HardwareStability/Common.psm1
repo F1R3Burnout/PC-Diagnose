@@ -94,6 +94,95 @@ function Add-HsNote {
     $Stage.Notes = @($Stage.Notes) + $Note
 }
 
+$script:HsProgressLastRender = [datetime]::MinValue
+
+function Format-HsDuration {
+    <# Formats seconds as m:ss or h:mm:ss for console progress text. #>
+    param([double]$Seconds)
+    if ($Seconds -lt 0) { $Seconds = 0 }
+    $span = [TimeSpan]::FromSeconds([math]::Round($Seconds))
+    if ($span.TotalHours -ge 1) { return "{0}:{1:00}:{2:00}" -f [int][math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds }
+    return "{0}:{1:00}" -f [int][math]::Floor($span.TotalMinutes), $span.Seconds
+}
+
+function Write-HsStageProgress {
+    <#
+    .SYNOPSIS
+        Live console progress for the running stage (child bar under the
+        overall bar). Throttled to a few updates per second so tight loops
+        (surface scan, write/verify) are not slowed down by rendering.
+
+    .DESCRIPTION
+        $ProgressPreference is set locally on purpose: the launcher sets it to
+        SilentlyContinue globally (to keep Invoke-WebRequest fast), which would
+        otherwise hide every bar. Pass -Percent -1 when no real percentage is
+        known; the bar then only shows the status text instead of a guessed
+        value.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$Activity,
+        [string]$Status = "",
+        [double]$Percent = -1,
+        [double]$SecondsRemaining = -1,
+        [switch]$Completed,
+        [switch]$Force
+    )
+    $ProgressPreference = "Continue"
+    try {
+        if ($Completed) {
+            Write-Progress -Id 2 -ParentId 1 -Activity $Activity -Completed
+            return
+        }
+        $now = [datetime]::UtcNow
+        if (-not $Force -and ($now - $script:HsProgressLastRender).TotalMilliseconds -lt 250) { return }
+        $script:HsProgressLastRender = $now
+        $progressArgs = @{ Id = 2; ParentId = 1; Activity = $Activity; Status = $(if ($Status) { $Status } else { " " }) }
+        if ($Percent -ge 0) { $progressArgs.PercentComplete = [int][math]::Min(100, [math]::Max(0, [math]::Floor($Percent))) }
+        if ($SecondsRemaining -ge 0) { $progressArgs.SecondsRemaining = [int][math]::Ceiling($SecondsRemaining) }
+        Write-Progress @progressArgs
+    } catch {
+        # Progress output is a convenience only and must never fail a stage.
+    }
+}
+
+function Write-HsOverallProgress {
+    <# Top-level bar: which component of the run is active. #>
+    param(
+        [Parameter(Mandatory=$true)][string]$Activity,
+        [string]$Status = "",
+        [double]$Percent = -1,
+        [switch]$Completed
+    )
+    $ProgressPreference = "Continue"
+    try {
+        if ($Completed) {
+            Write-Progress -Id 2 -ParentId 1 -Activity $Activity -Completed
+            Write-Progress -Id 1 -Activity $Activity -Completed
+            return
+        }
+        $progressArgs = @{ Id = 1; Activity = $Activity; Status = $(if ($Status) { $Status } else { " " }) }
+        if ($Percent -ge 0) { $progressArgs.PercentComplete = [int][math]::Min(100, [math]::Max(0, [math]::Floor($Percent))) }
+        Write-Progress @progressArgs
+    } catch {}
+}
+
+function Get-HsTimeProgress {
+    <#
+        Percent/remaining seconds for time-bound stages (Prime95, VRAM, GPU
+        load, combined system test): their only honest progress measure is
+        elapsed time against the planned duration.
+    #>
+    param([Parameter(Mandatory=$true)][double]$ElapsedSeconds, [Parameter(Mandatory=$true)][double]$TotalSeconds)
+    if ($TotalSeconds -le 0) { return [pscustomobject]@{ Percent = -1; Remaining = -1; Text = "" } }
+    $percent = [math]::Min(100, 100.0 * $ElapsedSeconds / $TotalSeconds)
+    $remaining = [math]::Max(0, $TotalSeconds - $ElapsedSeconds)
+    return [pscustomobject]@{
+        Percent   = $percent
+        Remaining = $remaining
+        Text      = "{0} von {1}" -f (Format-HsDuration $ElapsedSeconds), (Format-HsDuration $TotalSeconds)
+    }
+}
+
 function Write-HsLog {
     param(
         [Parameter(Mandatory=$true)][string]$Path,

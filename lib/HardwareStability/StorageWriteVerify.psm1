@@ -1,5 +1,48 @@
 Set-StrictMode -Version 2.0
 
+Import-Module (Join-Path $PSScriptRoot "Common.psm1") -Force
+
+# CRC32 in compiled code: the previous byte-by-byte PowerShell loop needed
+# several seconds per 4 MB block, which made the 1 GB (Standard) and 4 GB
+# (Extended) write/verify sizes take far longer than the I/O itself. Same
+# polynomial and result as before (verified by fixture HS-034).
+if (-not ("PCDiagnose.HardwareStability.Crc32" -as [type])) {
+    Add-Type -Language CSharp -TypeDefinition @'
+namespace PCDiagnose.HardwareStability
+{
+    public static class Crc32
+    {
+        private static readonly uint[] Table = CreateTable();
+
+        private static uint[] CreateTable()
+        {
+            uint[] table = new uint[256];
+            for (uint i = 0; i < 256; i++)
+            {
+                uint c = i;
+                for (int k = 0; k < 8; k++)
+                {
+                    c = ((c & 1) != 0) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+                }
+                table[i] = c;
+            }
+            return table;
+        }
+
+        public static uint Compute(byte[] bytes, int count)
+        {
+            uint crc = 0xFFFFFFFFu;
+            for (int i = 0; i < count; i++)
+            {
+                crc = Table[(crc ^ bytes[i]) & 0xFF] ^ (crc >> 8);
+            }
+            return crc ^ 0xFFFFFFFFu;
+        }
+    }
+}
+'@
+}
+
 function Invoke-HsStorageWriteReadVerify {
     <#
     .SYNOPSIS
@@ -13,7 +56,8 @@ function Invoke-HsStorageWriteReadVerify {
         [Parameter(Mandatory=$true)][string]$Directory,
         [int]$SizeMB = 256,
         [int]$BlockSizeBytes = 4MB,
-        [int]$Seed = 12345
+        [int]$Seed = 12345,
+        [string]$ProgressLabel = "Schreib-/Lesepruefung (Testdatei)"
     )
 
     $result = [pscustomobject]@{
@@ -46,6 +90,7 @@ function Invoke-HsStorageWriteReadVerify {
                 $stream.Write($buffer, 0, $thisBlockSize)
                 $blockChecksums.Add((Get-HsCrc32 -Bytes $buffer))
                 $written += $thisBlockSize
+                Write-HsStageProgress -Activity $ProgressLabel -Status ("Schreiben {0:N0} / {1:N0} MB" -f ($written / 1MB), ($totalBytes / 1MB)) -Percent (50.0 * $written / $totalBytes)
             }
             $stream.Flush($true)
         } finally {
@@ -73,6 +118,7 @@ function Invoke-HsStorageWriteReadVerify {
                 }
                 $verified += $thisBlockSize
                 $blockIndex++
+                Write-HsStageProgress -Activity $ProgressLabel -Status ("Lesen und vergleichen {0:N0} / {1:N0} MB, {2} Abweichung(en)" -f ($verified / 1MB), ($totalBytes / 1MB), $mismatches) -Percent (50.0 + 50.0 * $verified / $totalBytes)
             }
         } finally {
             $readStream.Dispose()
@@ -92,6 +138,7 @@ function Invoke-HsStorageWriteReadVerify {
         $result.Status = "FAIL"
         $result.Reason = "Write/read verification failed: $($_.Exception.Message)"
     } finally {
+        Write-HsStageProgress -Activity $ProgressLabel -Completed
         $sw.Stop()
         $result.DurationSeconds = $sw.Elapsed.TotalSeconds
         if (Test-Path -LiteralPath $testFile) {
@@ -102,35 +149,9 @@ function Invoke-HsStorageWriteReadVerify {
     return $result
 }
 
-$script:HsCrc32Table = $null
-
 function Get-HsCrc32 {
     param([Parameter(Mandatory=$true)][byte[]]$Bytes)
-
-    $polynomial = [uint32]3988292384 # 0xEDB88320, written decimal to avoid PowerShell hex-literal widening
-
-    if ($null -eq $script:HsCrc32Table) {
-        $table = New-Object uint32[] 256
-        for ($i = 0; $i -lt 256; $i++) {
-            [uint32]$c = [uint32]$i
-            for ($k = 0; $k -lt 8; $k++) {
-                if (($c -band [uint32]1) -ne 0) {
-                    [uint32]$c = [uint32]($polynomial -bxor ($c -shr 1))
-                } else {
-                    [uint32]$c = [uint32]($c -shr 1)
-                }
-            }
-            $table[$i] = $c
-        }
-        $script:HsCrc32Table = $table
-    }
-
-    [uint32]$crc = [uint32]4294967295 # 0xFFFFFFFF
-    foreach ($b in $Bytes) {
-        $index = [int](($crc -bxor [uint32]$b) -band [uint32]0xFF)
-        [uint32]$crc = [uint32]($script:HsCrc32Table[$index] -bxor ($crc -shr 8))
-    }
-    return [uint32]($crc -bxor [uint32]4294967295)
+    return [PCDiagnose.HardwareStability.Crc32]::Compute($Bytes, $Bytes.Length)
 }
 
 Export-ModuleMember -Function * -Variable *

@@ -146,7 +146,8 @@ function Invoke-HsProcess {
         [string]$Stage = "",
         [scriptblock]$OnOutputLine = $null,
         [scriptblock]$CancelCheck = $null,
-        [hashtable]$EnvironmentVariables = $null
+        [hashtable]$EnvironmentVariables = $null,
+        [scriptblock]$OnTick = $null
     )
 
     $psi = New-Object Diagnostics.ProcessStartInfo
@@ -213,6 +214,12 @@ function Invoke-HsProcess {
         while (-not $process.HasExited) {
             Start-Sleep -Milliseconds 500
 
+            # Progress hook for the console (runs on this thread, unlike the
+            # output event handlers, so Write-Progress reaches the console).
+            if ($OnTick) {
+                try { & $OnTick $sw.Elapsed.TotalSeconds } catch {}
+            }
+
             if ($TimeoutSeconds -gt 0 -and $sw.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
                 $result.TimedOut = $true
                 Stop-HsProcessTree -ProcessId $process.Id -Reason "Timeout ($TimeoutSeconds s)" -LogPath $StdErrPath
@@ -248,6 +255,123 @@ function Invoke-HsProcess {
     }
 
     return $result
+}
+
+function Start-HsBackgroundProcess {
+    <#
+    .SYNOPSIS
+        Starts an external tool WITHOUT waiting for it, with the same
+        Unicode-safe start, live stdout callback and process registry as
+        Invoke-HsProcess. Used when a tool must run alongside another
+        blocking stage (RAM load during the combined System Stability test).
+        Being registered here means the Ctrl+C / exit cleanup stops it too.
+        Always pair with Stop-HsBackgroundProcess.
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [string]$StdOutPath = "",
+        [string]$Stage = "",
+        [scriptblock]$OnOutputLine = $null,
+        [hashtable]$EnvironmentVariables = $null
+    )
+
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = ConvertTo-HsWin32ArgumentString -Arguments $ArgumentList
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $psi.CreateNoWindow = $true
+    if ($EnvironmentVariables) {
+        foreach ($key in $EnvironmentVariables.Keys) {
+            $psi.EnvironmentVariables[$key] = [string]$EnvironmentVariables[$key]
+        }
+    }
+
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $psi
+    $process.EnableRaisingEvents = $true
+
+    $stdoutBuilder = New-Object Text.StringBuilder
+    $stderrBuilder = New-Object Text.StringBuilder
+    $handler = {
+        param($sender, $e)
+        if ($null -eq $e.Data) { return }
+        [void]$Event.MessageData.Builder.AppendLine($e.Data)
+        if ($Event.MessageData.OutFile) {
+            try { $e.Data | Out-File -FilePath $Event.MessageData.OutFile -Encoding UTF8 -Append } catch {}
+        }
+        if ($Event.MessageData.Callback) {
+            try { & $Event.MessageData.Callback $e.Data } catch {}
+        }
+    }
+    $outState = [pscustomobject]@{ Builder = $stdoutBuilder; OutFile = $StdOutPath; Callback = $OnOutputLine }
+    $errState = [pscustomobject]@{ Builder = $stderrBuilder; OutFile = ""; Callback = $null }
+    $outSub = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action $handler -MessageData $outState
+    $errSub = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action $handler -MessageData $errState
+
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        [void]$process.Start()
+    } catch {
+        try { Unregister-Event -SourceIdentifier $outSub.Name -ErrorAction SilentlyContinue } catch {}
+        try { Unregister-Event -SourceIdentifier $errSub.Name -ErrorAction SilentlyContinue } catch {}
+        throw
+    }
+    if ($Stage) { Register-HsProcess -ProcessId $process.Id -Stage $Stage -LogFile $StdOutPath | Out-Null }
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
+
+    return [pscustomobject]@{
+        Process       = $process
+        ProcessId     = $process.Id
+        Stopwatch     = $sw
+        OutSubscriber = $outSub
+        ErrSubscriber = $errSub
+        StdOutBuilder = $stdoutBuilder
+        StdErrBuilder = $stderrBuilder
+        Stage         = $Stage
+    }
+}
+
+function Stop-HsBackgroundProcess {
+    <#
+        Stops (if still running) and collects a process started with
+        Start-HsBackgroundProcess. ExitedOnItsOwn tells the caller whether the
+        tool ended by itself before it was stopped - for a tool that should
+        have kept running, that is a finding in its own right.
+    #>
+    param([Parameter(Mandatory=$true)]$Handle, [string]$Reason = "Stage end")
+
+    $process = $Handle.Process
+    $exitedOnItsOwn = $process.HasExited
+    $exitCode = $null
+    if ($exitedOnItsOwn) {
+        try { $process.WaitForExit() } catch {}
+        try { $exitCode = $process.ExitCode } catch {}
+    } else {
+        Stop-HsProcessTree -ProcessId $Handle.ProcessId -Reason $Reason
+        try { $process.WaitForExit(5000) | Out-Null } catch {}
+    }
+    # Let queued output events run before the subscriptions are removed.
+    Start-Sleep -Milliseconds 300
+    $Handle.Stopwatch.Stop()
+    try { Unregister-Event -SourceIdentifier $Handle.OutSubscriber.Name -ErrorAction SilentlyContinue } catch {}
+    try { Unregister-Event -SourceIdentifier $Handle.ErrSubscriber.Name -ErrorAction SilentlyContinue } catch {}
+    Remove-Job -Name $Handle.OutSubscriber.Name -Force -ErrorAction SilentlyContinue
+    Remove-Job -Name $Handle.ErrSubscriber.Name -Force -ErrorAction SilentlyContinue
+    if ($Handle.Stage) { Unregister-HsProcess -ProcessId $Handle.ProcessId }
+
+    return [pscustomobject]@{
+        ExitedOnItsOwn  = $exitedOnItsOwn
+        ExitCode        = $exitCode
+        DurationSeconds = $Handle.Stopwatch.Elapsed.TotalSeconds
+        StdOut          = $Handle.StdOutBuilder.ToString()
+        StdErr          = $Handle.StdErrBuilder.ToString()
+    }
 }
 
 Export-ModuleMember -Function * -Variable *

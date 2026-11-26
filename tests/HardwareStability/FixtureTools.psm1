@@ -53,16 +53,59 @@ function New-HsFixtureExe {
 }
 
 function New-HsFakeMemoryChecker {
-    param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)][int]$ExitCode)
-    $src = @"
+    <#
+        Simulates MemoryChecker.exe with its real output format
+        ("--- [ Pass N of M ] ---", "Writing memory...", "\r12.3%",
+        "Error: N hash check(s) have failed. Memory corrupted :-(").
+        Modes: pass, corrupt, allocfail, continuous (runs until stopped),
+        continuous-corrupt (reports corruption after about 1 s).
+        -ExitCode 0/1 is kept for older calls (0 = pass, 1 = corrupt).
+    #>
+    param([Parameter(Mandatory=$true)][string]$Path, [int]$ExitCode = 0, [string]$Mode = "")
+    if (-not $Mode) { $Mode = if ($ExitCode -eq 0) { "pass" } else { "corrupt" } }
+    if ($Mode -notin @("pass","corrupt","allocfail","continuous","continuous-corrupt")) { throw "Unknown fake MemoryChecker mode: $Mode" }
+    $src = @'
 using System;
+using System.Threading;
 class FakeMemoryChecker {
+    static void Phase(string text) {
+        Console.Write(text + "\n");
+        Console.Write("0.0%");
+        Console.Write("\r50.0%");
+        Console.Write("\r100.0% [OK]\n\n");
+    }
     static int Main(string[] args) {
-        Console.WriteLine("Fake MemoryChecker fixture, args=" + string.Join(" ", args));
-        return $ExitCode;
+        string mode = "__MODE__";
+        Console.Write("Fake MemoryChecker fixture, args=" + string.Join(" ", args) + "\n");
+        if (mode == "allocfail") {
+            Console.Write("\nError: Failed to allocate the requested amount of physical memory!\n\n");
+            return 1;
+        }
+        bool continuous = mode.StartsWith("continuous");
+        DateTime start = DateTime.UtcNow;
+        int pass = 0;
+        while (true) {
+            pass++;
+            if (continuous) { Console.Write("--- [ Testing pass " + pass + " ] ---\n\n"); }
+            else { Console.Write("--- [ Pass " + pass + " of 1 ] ---\n\n"); }
+            Phase("Writing memory, please be patient, this will take a while...");
+            Thread.Sleep(150);
+            Phase("Reading memory, please be patient, this will take a while...");
+            bool corruptNow = (mode == "corrupt") || (mode == "continuous-corrupt" && (DateTime.UtcNow - start).TotalSeconds > 1.0);
+            if (corruptNow) {
+                Console.Write("\rFailed!\n\nError: 3 hash check(s) have failed. Memory corrupted :-(\n\n");
+                return 1;
+            }
+            Console.Write("Pass completed after 0.15 seconds.\n\n");
+            if (!continuous) { break; }
+            Thread.Sleep(250);
+        }
+        Console.Write("--- [ Completed ] ---\n\nNo errors have been detected during the test :-)\n\n");
+        return 0;
     }
 }
-"@
+'@
+    $src = $src.Replace("__MODE__", $Mode)
     New-HsFixtureExe -CSharpSource $src -OutputPath $Path
 }
 

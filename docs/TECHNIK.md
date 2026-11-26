@@ -202,14 +202,38 @@ error, or a real read/write error was actually detected.
   17/18/19/20) recorded during other stages. A single corrected PCIe error
   is reported as a possible cause among several (GPU, slot, mainboard, power
   delivery, signal integrity) - never as a definitive mainboard diagnosis.
-- **System Stability** - runs CPU and GPU workloads concurrently to check
-  whether components that pass individually remain stable together. If an
-  unexpected reset happens here, the report explicitly says PSU/VRM/
-  mainboard become more suspect without naming a single proven cause.
+- **System Stability** - runs CPU (Prime95), GPU (D3D11 load) and RAM
+  (MemoryChecker, continuous, 40/50/60% of physical RAM) concurrently to
+  check whether components that pass individually remain stable together.
+  PASS requires all three workloads to have run without a verified error. If
+  an unexpected reset happens here, the report explicitly says PSU/VRM/
+  memory controller/mainboard become more suspect without naming a single
+  proven cause.
 
-**Testprofiles (Quick / Standard / Extended)** differ primarily in pass
-count, data volume, and coverage, not just runtime - see
-`lib/HardwareStability/Profiles.psm1`.
+**Duration and intensity (Kurz / Mittel / Lang = Quick / Standard /
+Extended)**: without `-Profile`, the test asks at start and shows the
+planned minutes of the load stages for each choice. The profiles differ in
+duration and intensity - RAM share and passes, GPU workload size, file size
+of the write/verify check, surface scan, SMART self-test type - see
+`lib/HardwareStability/Profiles.psm1`. `-Profile` still selects one directly;
+`-NoPrompt` never asks (Quick when no profile is given).
+
+**Live progress**: every stage shows a progress bar under an overall bar
+("Komponente n von m"). Real percentages where the work is countable
+(surface scan in bytes with MB/s and remaining time, write/verify in MB, RAM
+passes and write/read phases parsed from MemoryChecker, SMART self-test as
+reported by the drive, GPU compute iterations); elapsed against planned time
+for the time-bound stages (Prime95, VRAM, GPU load, combined test).
+
+**Targeted retest**: after the run, every noticeable stage (FAIL, WARNING,
+BLOCKED, INTERRUPTED, THERMAL_ABORT) is listed and the tool asks whether to
+test it again and for how long (10/30/60 minutes or a custom value).
+CPU/Cache/VRAM/GPU load/combined test run for that time, RAM runs
+MemoryChecker continuously for that time, storage reads the Windows disk for
+that time and repeats the write/verify check. Retest stages are added to the
+same report as "(Retest n, x min)"; they add evidence and never replace the
+original result. PCIe/WHEA is not offered because it only reads past event
+log entries. Unattended: `-RetestComponents "Cache,RAM" -RetestMinutes 30`.
 
 **Thermal Guard**: conservative default abort/warning temperatures for CPU,
 GPU core, GPU hotspot, NVMe, and VRM stop an active stage and produce a
@@ -323,5 +347,6 @@ Tests (no hardware load unless noted):
 .\tests\HDMIDiagnose.Tests.ps1                   # display diagnostics core
 .\tests\HardwareStability\HardwareStability.Fixtures.Tests.ps1   # fixtures, short real GPU/disk checks
 .\tests\HardwareStability\Telemetry.Smoke.ps1   # downloads and loads LibreHardwareMonitorLib, one sample
+.\tests\HardwareStability\EndToEnd.Smoke.ps1    # Administrator: real run with 30 s stages + automatic retest
 .\tests\HardwareStability\Validate-HardwareStability.ps1   # all gates, fixtures under pwsh and powershell.exe
 ```

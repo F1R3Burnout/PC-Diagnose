@@ -3,6 +3,7 @@ Set-StrictMode -Version 2.0
 $moduleDir = $PSScriptRoot
 Import-Module (Join-Path $moduleDir "ToolManager.psm1") -Force
 Import-Module (Join-Path $moduleDir "ProcessRunner.psm1") -Force
+Import-Module (Join-Path $moduleDir "Common.psm1") -Force
 
 $script:HsD3D11Loaded = $false
 
@@ -31,7 +32,8 @@ function Invoke-HsGpuComputeVerification {
     #>
     param(
         [Parameter(Mandatory=$true)][int]$ElementCount,
-        [int]$Iterations = 1
+        [int]$Iterations = 1,
+        [string]$ProgressLabel = "GPU Compute (D3D11)"
     )
 
     $result = [pscustomobject]@{
@@ -82,7 +84,10 @@ function Invoke-HsGpuComputeVerification {
         $totalMismatches += $r.MismatchCount
         $totalElements += $r.ElementCount
         $completedIterations++
+        Write-HsStageProgress -Activity $ProgressLabel -Status "Durchlauf $completedIterations von $Iterations, $totalElements Werte geprueft, $totalMismatches Abweichung(en)" `
+            -Percent (100.0 * $completedIterations / [math]::Max(1, $Iterations))
     }
+    Write-HsStageProgress -Activity $ProgressLabel -Completed
 
     $result.Iterations = $completedIterations
     $result.ElementsVerified = $totalElements
@@ -133,8 +138,9 @@ function Invoke-HsVramVerification {
         [Parameter(Mandatory=$true)][string]$ConfigPath,
         [Parameter(Mandatory=$true)][string]$ToolCacheRoot,
         [Parameter(Mandatory=$true)][string]$OutputDirectory,
-        [Parameter(Mandatory=$true)][int]$DurationMinutes,
-        [switch]$NoDownload
+        [Parameter(Mandatory=$true)][double]$DurationMinutes,
+        [switch]$NoDownload,
+        [string]$ProgressLabel = "VRAM (memtest_vulkan)"
     )
 
     $result = [pscustomobject]@{
@@ -179,8 +185,20 @@ function Invoke-HsVramVerification {
     # auto-selects the first device after a short timeout; feeding it an
     # empty line lets that auto-selection happen immediately when stdin is
     # redirected instead of an interactive console.
-    $run = Invoke-HsProcess -FilePath $tool.ExecutablePath -TimeoutSeconds ($DurationMinutes * 60) `
-        -StdOutPath $logPath -Stage "VRAM" -OnOutputLine $cb
+    $script:HsVramPlannedSeconds = [double]$DurationMinutes * 60
+    $script:HsVramProgressLabel = $ProgressLabel
+    $tick = {
+        param($elapsed)
+        $tp = Get-HsTimeProgress -ElapsedSeconds $elapsed -TotalSeconds $script:HsVramPlannedSeconds
+        $errorText = if ($script:errorFound) { ", FEHLER erkannt" } else { "" }
+        Write-HsStageProgress -Activity $script:HsVramProgressLabel -Status "$($tp.Text)$errorText" -Percent $tp.Percent -SecondsRemaining $tp.Remaining
+    }
+    try {
+        $run = Invoke-HsProcess -FilePath $tool.ExecutablePath -TimeoutSeconds ([int][math]::Ceiling($DurationMinutes * 60)) `
+            -StdOutPath $logPath -Stage "VRAM" -OnOutputLine $cb -OnTick $tick
+    } finally {
+        Write-HsStageProgress -Activity $ProgressLabel -Completed
+    }
 
     $result.DurationSeconds = $run.DurationSeconds
 
@@ -234,7 +252,9 @@ function Invoke-HsGpuLoadThermalValidation {
         [Parameter(Mandatory=$true)][int]$DurationSeconds,
         [int]$ElementCount = 262144,
         [scriptblock]$TelemetrySample = $null,
-        [scriptblock]$CancelCheck = { $false }
+        [scriptblock]$CancelCheck = { $false },
+        [string]$ProgressLabel = "GPU Last / Temperatur",
+        [switch]$Quiet
     )
 
     $result = [pscustomobject]@{
@@ -255,6 +275,7 @@ function Invoke-HsGpuLoadThermalValidation {
     }
 
     $deadline = [datetime]::Now.AddSeconds($DurationSeconds)
+    $loadWatch = [Diagnostics.Stopwatch]::StartNew()
     $iterations = 0
     $mismatches = [int64]0
     $deviceLost = $false
@@ -279,8 +300,15 @@ function Invoke-HsGpuLoadThermalValidation {
             if ($temp) { $peakTemp = if ($null -eq $peakTemp) { $temp } else { [math]::Max($peakTemp, $temp) } }
         }
 
+        if (-not $Quiet) {
+            $tp = Get-HsTimeProgress -ElapsedSeconds $loadWatch.Elapsed.TotalSeconds -TotalSeconds $DurationSeconds
+            $tempText = if ($null -ne $peakTemp) { ", Spitze $peakTemp C" } else { "" }
+            Write-HsStageProgress -Activity $ProgressLabel -Status "$iterations Durchlaeufe, $($tp.Text)$tempText" -Percent $tp.Percent -SecondsRemaining $tp.Remaining
+        }
+
         if (& $CancelCheck) { $cancelled = $true; break }
     }
+    if (-not $Quiet) { Write-HsStageProgress -Activity $ProgressLabel -Completed }
 
     $result.Iterations = $iterations
     $result.Mismatches = $mismatches

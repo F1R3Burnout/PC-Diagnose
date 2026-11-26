@@ -15,8 +15,9 @@
     status.
 
 .PARAMETER Profile
-    Quick, Standard, or Extended. Controls pass counts, data volume, and
-    coverage - not just runtime (spec section 9).
+    Quick (Kurz), Standard (Mittel), or Extended (Lang). Controls pass counts,
+    data volume, and coverage - not just runtime (spec section 9). When it is
+    not given and the console is interactive, the tool asks for it.
 
 .PARAMETER Components
     Comma-separated subset to run: CPU,Cache,RAM,GPU,VRAM,Storage,PCIe,System
@@ -34,12 +35,26 @@
 
 .PARAMETER SurfaceScanMaxBytes
     Bounds the Storage Surface Read scan (0 = full drive).
+
+.PARAMETER NoPrompt
+    Never ask anything (profile, retest). Without -Profile, Quick is used.
+
+.PARAMETER RetestComponents
+    Non-interactive targeted retest after the main run, e.g. "Cache,RAM".
+    Keys: CPU, Cache, RAM, GPU, VRAM, GPULoad, Storage, System.
+
+.PARAMETER RetestMinutes
+    Duration per component for -RetestComponents (default 10).
+
+.PARAMETER MaxStageMinutes
+    Caps every time-bound stage (and switches RAM to a time-bound run) for
+    quick smoke checks. Results then only cover that shortened range.
 #>
 
 [CmdletBinding()]
 param(
     [ValidateSet("Quick","Standard","Extended")]
-    [string]$Profile = "Quick",
+    [string]$Profile = "",
 
     [string]$Components = "CPU,Cache,RAM,GPU,VRAM,Storage,PCIe,System",
 
@@ -50,6 +65,10 @@ param(
     [switch]$Resume,
     [switch]$DryRun,
     [long]$SurfaceScanMaxBytes = 0,
+    [switch]$NoPrompt,
+    [string]$RetestComponents = "",
+    [double]$RetestMinutes = 0,
+    [double]$MaxStageMinutes = 0,
 
     [string]$ModuleRootOverride = "",
     [string]$ConfigPathOverride = ""
@@ -114,9 +133,78 @@ if (-not $DryRun) {
 $ToolCacheRoot = Join-Path $env:TEMP "PC-Diagnose\HardwareStabilityTools"
 New-Item -ItemType Directory -Force -Path $ToolCacheRoot | Out-Null
 
-$profileConfig = Get-HsProfile -Name $Profile
-$thermalDefaults = Get-HsThermalDefaults
 $selectedComponents = @($Components -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+function Test-HsInteractiveConsole {
+    # Prompts only make sense with a real console user: not in CI, not with
+    # redirected input, not in a non-interactive remote session.
+    if ($NoPrompt) { return $false }
+    try {
+        if (-not [Environment]::UserInteractive) { return $false }
+        if ([Console]::IsInputRedirected) { return $false }
+    } catch { return $false }
+    return $true
+}
+
+function Read-HsChoice {
+    <# Reads one of the allowed answers; repeats on anything else. #>
+    param([Parameter(Mandatory=$true)][string]$Prompt, [Parameter(Mandatory=$true)][string[]]$Allowed, [string]$Default = "")
+    while ($true) {
+        $answer = ([string](Read-Host $Prompt)).Trim()
+        if ([string]::IsNullOrEmpty($answer) -and $Default) { return $Default }
+        if ($Allowed -contains $answer) { return $answer }
+        Write-Host "  Bitte eine der Optionen eingeben: $($Allowed -join ', ')" -ForegroundColor Yellow
+    }
+}
+
+function Select-HsProfileInteractive {
+    Write-Host ""
+    Write-Host "Hardware-Stabilitaetstest - Dauer und Intensitaet waehlen" -ForegroundColor Cyan
+    Write-Host ""
+    foreach ($choice in (Get-HsProfileChoice)) {
+        $choiceProfile = Get-HsProfile -Name $choice.Name
+        $minutes = Get-HsProfileEstimateMinutes -ProfileConfig $choiceProfile -Components $selectedComponents
+        Write-Host ("  [{0}] {1,-7} ca. {2} Min. Lastphasen + RAM/Datentraeger" -f $choice.Key, $choice.Label, [math]::Round($minutes)) -ForegroundColor White
+        Write-Host ("      {0}" -f $choice.Summary) -ForegroundColor Gray
+    }
+    Write-Host "  [0] Abbrechen" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  RAM-Test, Surface-Scan und SMART-Selbsttest dauern je nach RAM-Groesse und Datentraeger zusaetzlich." -ForegroundColor DarkGray
+    $answer = Read-HsChoice -Prompt "Auswahl [1-3, Enter = 1]" -Allowed @("0","1","2","3") -Default "1"
+    if ($answer -eq "0") { return "" }
+    return [string](@(Get-HsProfileChoice | Where-Object { $_.Key -eq $answer })[0].Name)
+}
+
+if (-not $Profile) {
+    if ($DryRun -or -not (Test-HsInteractiveConsole)) {
+        $Profile = "Quick"
+    } else {
+        # Not assigned to $Profile directly: the parameter keeps its
+        # ValidateSet, so assigning "" (cancel) would throw.
+        $chosenProfile = Select-HsProfileInteractive
+        if (-not $chosenProfile) {
+            Write-Host "Abgebrochen - es wurde kein Test gestartet." -ForegroundColor Yellow
+            exit 0
+        }
+        $Profile = $chosenProfile
+    }
+}
+
+function Set-HsProfileCap {
+    <# Applies -MaxStageMinutes to a profile copy (smoke checks only). #>
+    param([Parameter(Mandatory=$true)]$ProfileConfig, [Parameter(Mandatory=$true)][double]$Minutes)
+    $capped = Get-HsRetestProfile -BaseProfile $ProfileConfig -Minutes $Minutes
+    $capped.Name = $ProfileConfig.Name
+    $capped.SurfaceScanEnabled = $ProfileConfig.SurfaceScanEnabled
+    $capped.StorageWriteVerifyMB = [math]::Min([int]$ProfileConfig.StorageWriteVerifyMB, 64)
+    $capped.GpuComputeIterations = [int]$ProfileConfig.GpuComputeIterations
+    return $capped
+}
+
+$profileConfig = Get-HsProfile -Name $Profile
+if ($MaxStageMinutes -gt 0) { $profileConfig = Set-HsProfileCap -ProfileConfig $profileConfig -Minutes $MaxStageMinutes }
+$profileLabel = "$Profile ($((Get-HsProfile -Name $Profile).DisplayName))"
+$thermalDefaults = Get-HsThermalDefaults
 
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $ComputerSafe = ConvertTo-HsSafeFileName $env:COMPUTERNAME
@@ -196,7 +284,7 @@ function Test-HsThermalAbortOrCancel {
 # Inventory
 # ---------------------------------------------------------------------------
 
-Write-Progress2 "$ToolName $ToolVersion - profile $Profile" "Cyan"
+Write-Progress2 "$ToolName $ToolVersion - profile $profileLabel" "Cyan"
 Write-Progress2 "Output folder: $Out" "Gray"
 Write-Progress2 "Components: $($selectedComponents -join ', ')" "Gray"
 if (-not $DryRun) {
@@ -220,8 +308,13 @@ if ($DryRun) {
     Write-Host "  GPU: $((@($inventory.Gpus) | ForEach-Object { $_.Name }) -join ', ')"
     Write-Host "  Storage: $((@($inventory.PhysicalDisks) | ForEach-Object { "$($_.DeviceId) ($($_.Model))" }) -join ', ')"
     Write-Host ""
-    Write-Host "Profile '$Profile':" -ForegroundColor Cyan
+    Write-Host "Profile '$profileLabel':" -ForegroundColor Cyan
     $profileConfig | Format-List | Out-String | Write-Host
+    Write-Host "Available durations (without -Profile the real run asks):" -ForegroundColor Cyan
+    foreach ($choice in (Get-HsProfileChoice)) {
+        $estimate = Get-HsProfileEstimateMinutes -ProfileConfig (Get-HsProfile -Name $choice.Name) -Components $selectedComponents
+        Write-Host ("  {0,-7} ({1,-8}) ca. {2} min load stages + RAM/storage - {3}" -f $choice.Label, $choice.Name, [math]::Round($estimate), $choice.Summary)
+    }
     Write-Host "Planned components: $($selectedComponents -join ', ')" -ForegroundColor Cyan
     Write-Host "Planned tools (resolved without downloading):" -ForegroundColor Cyan
     $cfg = Get-HsToolConfig -ConfigPath $ConfigPath
@@ -252,7 +345,7 @@ if ($pending -and [string]$pending.Status -eq "Running") {
     Write-Host "[1] Analyze the previous incident and continue with a new run"
     Write-Host "[2] Continue with a new run without further analysis"
     Write-Host "[3] Exit"
-    $choice = Read-Host "Select"
+    $choice = if (Test-HsInteractiveConsole) { Read-Host "Select" } else { "1" }
     if ($choice -eq "3") { exit 0 }
     if ($choice -eq "1") {
         $incidentPath = Join-Path $pending.ResultDirectory "PreviousIncident.json"
@@ -308,6 +401,7 @@ function Invoke-HsStageWrapper {
     [void]$script:HsStages.Add($stage)
     Start-HsStage $stage
     Write-Progress2 "START: $Component" "Cyan"
+    Write-HsOverallProgress -Activity $script:HsOverallActivity -Status "$($script:HsOverallStatus) - $Component" -Percent $script:HsOverallPercent
 
     if ($idleState.State -eq "ABORT") {
         Complete-HsStage $stage -Status "THERMAL_ABORT" -Assessment "Configured safety threshold was already reached before this stage's load began."
@@ -333,226 +427,375 @@ function Invoke-HsStageWrapper {
     return $stage
 }
 
-# ---------------------------------------------------------------------------
-# CPU
-# ---------------------------------------------------------------------------
-
-if ($selectedComponents -contains "CPU") {
-    Invoke-HsStageWrapper -StageName "CPU_COMPUTE" -Component "CPU Compute" -Tool "Prime95" -Action {
-        param($stage)
-        $cpuCount = (@($inventory.Cpus)[0])
-        $r = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot `
-            -OutputDirectory $Dirs.Cpu -DurationMinutes $profileConfig.CpuComputeMinutes `
-            -LogicalProcessors ([int]$cpuCount.LogicalProcessors) -PhysicalCores ([int]$cpuCount.Cores) `
-            -NoDownload:$NoDownload -TelemetrySample { param($s) Get-HsTelemetrySampleForStage -StageName $s } `
-            -CancelCheck { Test-HsThermalAbortOrCancel -StageName "CPU_COMPUTE" }
-        $stage.Tool = $r.Tool; $stage.ToolVersion = $r.ToolVersion; $stage.Command = $r.Command
-        $stage.Coverage = "$($r.Workers) worker(s), $([math]::Round($r.DurationSeconds/60,1)) minute(s)"
-        $stage.PeakTemperature = $r.PeakTemperature
-        $stage.ErrorCount = $r.FailurePatterns.Count
-        Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+function New-HsStageDirs {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $stageDirs = @{
+        Cpu     = Join-Path $Root "03_CPU"
+        Ram     = Join-Path $Root "04_RAM"
+        Gpu     = Join-Path $Root "05_GPU"
+        Storage = Join-Path $Root "06_Storage"
     }
+    foreach ($dir in $stageDirs.Values) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    return $stageDirs
 }
 
-if ($selectedComponents -contains "Cache") {
-    Invoke-HsStageWrapper -StageName "CPU_CACHE_IMC" -Component "CPU Cache / IMC" -Tool "Prime95" -Action {
-        param($stage)
-        $cpuCount = (@($inventory.Cpus)[0])
-        $r = Invoke-HsCpuTortureTest -StageName "CPU_CACHE_IMC" -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot `
-            -OutputDirectory $Dirs.Cpu -DurationMinutes $profileConfig.CpuCacheImcMinutes `
-            -LogicalProcessors ([int]$cpuCount.LogicalProcessors) -PhysicalCores ([int]$cpuCount.Cores) `
-            -NoDownload:$NoDownload -TelemetrySample { param($s) Get-HsTelemetrySampleForStage -StageName $s } `
-            -CancelCheck { Test-HsThermalAbortOrCancel -StageName "CPU_CACHE_IMC" }
-        $stage.Tool = $r.Tool; $stage.ToolVersion = $r.ToolVersion; $stage.Command = $r.Command
-        $stage.Coverage = "$($r.Workers) worker(s) (all logical processors), $([math]::Round($r.DurationSeconds/60,1)) minute(s)"
-        $stage.PeakTemperature = $r.PeakTemperature
-        $stage.ErrorCount = $r.FailurePatterns.Count
-        Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
-    }
-}
+function Invoke-HsComponentStages {
+    <#
+    .SYNOPSIS
+        Runs the stages for the given component keys with the given profile.
+        Used for the main run and, with a retest profile and a label suffix,
+        for targeted retests - so both always run the identical stage code.
 
-# ---------------------------------------------------------------------------
-# RAM
-# ---------------------------------------------------------------------------
+    .DESCRIPTION
+        Component keys: CPU, Cache, RAM, GPU, VRAM (VRAM + GPU load, as in
+        -Components), Storage, PCIe, System, plus the retest-only keys
+        VRAMMemory (memtest_vulkan only) and GPULoad (sustained load only).
+        The stage actions below read $StageProfile / $StageDirs /
+        $StageSuffix through PowerShell's dynamic scoping (they are invoked
+        from Invoke-HsStageWrapper, which is called from here).
+    #>
+    param(
+        [Parameter(Mandatory=$true)][string[]]$ComponentKeys,
+        [Parameter(Mandatory=$true)]$StageProfile,
+        [Parameter(Mandatory=$true)][hashtable]$StageDirs,
+        [string]$StageSuffix = "",
+        [string]$OverallActivity = "Hardware-Stabilitaetstest"
+    )
 
-if ($selectedComponents -contains "RAM") {
-    Invoke-HsStageWrapper -StageName "RAM" -Component "RAM" -Tool "MemoryChecker" -Action {
-        param($stage)
-        $r = Invoke-HsRamVerification -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory $Dirs.Ram `
-            -Passes $profileConfig.RamPasses -PercentOfPhysicalRam $profileConfig.RamPercentOfPhysical `
-            -CancelCheck { Test-HsThermalAbortOrCancel -StageName "RAM" }
-        $stage.Tool = $r.Tool; $stage.ToolVersion = $r.ToolVersion; $stage.Command = $r.Command
-        $stage.Coverage = "$($r.TargetPercent)% of physical RAM, $($r.Passes) pass(es)"
-        $stage.ExitCode = $r.ExitCode
-        Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
-    }
-}
+    $order = @("CPU","Cache","RAM","GPU","VRAM","VRAMMemory","GPULoad","Storage","PCIe","System")
+    $keys = @($order | Where-Object { $ComponentKeys -contains $_ })
+    $cpuInfo = @($inventory.Cpus)[0]
+    $script:HsOverallActivity = $OverallActivity
+    $keyIndex = 0
 
-# ---------------------------------------------------------------------------
-# GPU / VRAM
-# ---------------------------------------------------------------------------
+    foreach ($key in $keys) {
+        $keyIndex++
+        $script:HsOverallStatus = "Komponente $keyIndex von $($keys.Count)"
+        $script:HsOverallPercent = 100.0 * ($keyIndex - 1) / [math]::Max(1, $keys.Count)
 
-if ($selectedComponents -contains "GPU") {
-    Invoke-HsStageWrapper -StageName "GPU_COMPUTE" -Component "GPU Compute" -Action {
-        param($stage)
-        $r = Invoke-HsGpuComputeVerification -ElementCount $profileConfig.GpuComputeWorkgroups -Iterations ([math]::Max(1,[int]($profileConfig.GpuComputeIterations/100)))
-        $stage.Coverage = "$($r.ElementsVerified) integer operation(s), $($r.Iterations) iteration(s)"
-        $stage.ErrorCount = $r.Mismatches
-        Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
-    }
-}
+        switch ($key) {
+            "CPU" {
+                Invoke-HsStageWrapper -StageName "CPU_COMPUTE" -Component "CPU Compute$StageSuffix" -Tool "Prime95" -Action {
+                    param($stage)
+                    $r = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot `
+                        -OutputDirectory $StageDirs.Cpu -DurationMinutes $StageProfile.CpuComputeMinutes `
+                        -LogicalProcessors ([int]$cpuInfo.LogicalProcessors) -PhysicalCores ([int]$cpuInfo.Cores) `
+                        -NoDownload:$NoDownload -TelemetrySample { param($s) Get-HsTelemetrySampleForStage -StageName $s } `
+                        -CancelCheck { Test-HsThermalAbortOrCancel -StageName "CPU_COMPUTE" } -ProgressLabel "CPU Compute$StageSuffix (Prime95)"
+                    $stage.Tool = $r.Tool; $stage.ToolVersion = $r.ToolVersion; $stage.Command = $r.Command
+                    $stage.Coverage = "$($r.Workers) worker(s), $([math]::Round($r.DurationSeconds/60,1)) minute(s)"
+                    $stage.PeakTemperature = $r.PeakTemperature
+                    $stage.ErrorCount = $r.FailurePatterns.Count
+                    Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                } | Out-Null
+            }
+            "Cache" {
+                Invoke-HsStageWrapper -StageName "CPU_CACHE_IMC" -Component "CPU Cache / IMC$StageSuffix" -Tool "Prime95" -Action {
+                    param($stage)
+                    $r = Invoke-HsCpuTortureTest -StageName "CPU_CACHE_IMC" -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot `
+                        -OutputDirectory $StageDirs.Cpu -DurationMinutes $StageProfile.CpuCacheImcMinutes `
+                        -LogicalProcessors ([int]$cpuInfo.LogicalProcessors) -PhysicalCores ([int]$cpuInfo.Cores) `
+                        -NoDownload:$NoDownload -TelemetrySample { param($s) Get-HsTelemetrySampleForStage -StageName $s } `
+                        -CancelCheck { Test-HsThermalAbortOrCancel -StageName "CPU_CACHE_IMC" } -ProgressLabel "CPU Cache / IMC$StageSuffix (Prime95)"
+                    $stage.Tool = $r.Tool; $stage.ToolVersion = $r.ToolVersion; $stage.Command = $r.Command
+                    $stage.Coverage = "$($r.Workers) worker(s) (all logical processors), $([math]::Round($r.DurationSeconds/60,1)) minute(s)"
+                    $stage.PeakTemperature = $r.PeakTemperature
+                    $stage.ErrorCount = $r.FailurePatterns.Count
+                    Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                } | Out-Null
+            }
+            "RAM" {
+                Invoke-HsStageWrapper -StageName "RAM" -Component "RAM$StageSuffix" -Tool "MemoryChecker" -Action {
+                    param($stage)
+                    $ramSeconds = [int][math]::Round([double]$StageProfile.RamDurationMinutes * 60)
+                    $r = Invoke-HsRamVerification -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory $StageDirs.Ram `
+                        -Passes $StageProfile.RamPasses -PercentOfPhysicalRam $StageProfile.RamPercentOfPhysical `
+                        -DurationSeconds $ramSeconds -NoDownload:$NoDownload `
+                        -CancelCheck { Test-HsThermalAbortOrCancel -StageName "RAM" } -ProgressLabel "RAM$StageSuffix (MemoryChecker)"
+                    $stage.Tool = $r.Tool; $stage.ToolVersion = $r.ToolVersion; $stage.Command = $r.Command
+                    $stage.Coverage = if ($ramSeconds -gt 0) { "$($r.TargetPercent)% of physical RAM, continuous for $([math]::Round($r.DurationSeconds/60,1)) minute(s)" } else { "$($r.TargetPercent)% of physical RAM, $($r.Passes) pass(es)" }
+                    $stage.ExitCode = $r.ExitCode
+                    if ($r.VerificationErrors) { $stage.ErrorCount = $r.VerificationErrors }
+                    Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                } | Out-Null
+            }
+            "GPU" {
+                Invoke-HsStageWrapper -StageName "GPU_COMPUTE" -Component "GPU Compute$StageSuffix" -Action {
+                    param($stage)
+                    $r = Invoke-HsGpuComputeVerification -ElementCount $StageProfile.GpuComputeWorkgroups `
+                        -Iterations ([math]::Max(1,[int]($StageProfile.GpuComputeIterations/100))) -ProgressLabel "GPU Compute$StageSuffix (D3D11)"
+                    $stage.Coverage = "$($r.ElementsVerified) integer operation(s), $($r.Iterations) iteration(s)"
+                    $stage.ErrorCount = $r.Mismatches
+                    Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                } | Out-Null
+            }
+            { $_ -in @("VRAM","VRAMMemory") } {
+                Invoke-HsStageWrapper -StageName "VRAM" -Component "VRAM$StageSuffix" -Tool "memtest_vulkan" -Action {
+                    param($stage)
+                    $r = Invoke-HsVramVerification -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory $StageDirs.Gpu `
+                        -DurationMinutes $StageProfile.VramTestMinutes -NoDownload:$NoDownload -ProgressLabel "VRAM$StageSuffix (memtest_vulkan)"
+                    $stage.ToolVersion = $r.ToolVersion
+                    $stage.Coverage = "$([math]::Round($r.DurationSeconds/60,1)) minute(s)"
+                    Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                } | Out-Null
+            }
+        }
 
-if ($selectedComponents -contains "VRAM") {
-    Invoke-HsStageWrapper -StageName "VRAM" -Component "VRAM" -Tool "memtest_vulkan" -Action {
-        param($stage)
-        $r = Invoke-HsVramVerification -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory $Dirs.Gpu `
-            -DurationMinutes $profileConfig.VramTestMinutes -NoDownload:$NoDownload
-        $stage.ToolVersion = $r.ToolVersion
-        $stage.Coverage = "$([math]::Round($r.DurationSeconds/60,1)) minute(s)"
-        Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
-    }
+        if ($key -in @("VRAM","GPULoad")) {
+            Invoke-HsStageWrapper -StageName "GPU_LOAD_THERMAL" -Component "GPU Load / Thermal Validation$StageSuffix" -Action {
+                param($stage)
+                $r = Invoke-HsGpuLoadThermalValidation -DurationSeconds ([int][math]::Round([double]$StageProfile.GpuLoadMinutes * 60)) `
+                    -TelemetrySample { param($s) Get-HsTelemetrySampleForStage -StageName $s } `
+                    -CancelCheck { Test-HsThermalAbortOrCancel -StageName "GPU_LOAD_THERMAL" } -ProgressLabel "GPU Last / Temperatur$StageSuffix"
+                $stage.Coverage = "$($r.Iterations) sustained load iteration(s)"
+                $stage.PeakTemperature = $r.PeakTemperature
+                Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+            } | Out-Null
+        }
 
-    Invoke-HsStageWrapper -StageName "GPU_LOAD_THERMAL" -Component "GPU Load / Thermal Validation" -Action {
-        param($stage)
-        $r = Invoke-HsGpuLoadThermalValidation -DurationSeconds ($profileConfig.VramTestMinutes * 60 / 3) `
-            -TelemetrySample { param($s) Get-HsTelemetrySampleForStage -StageName $s } `
-            -CancelCheck { Test-HsThermalAbortOrCancel -StageName "GPU_LOAD_THERMAL" }
-        $stage.Coverage = "$($r.Iterations) sustained load iteration(s)"
-        $stage.PeakTemperature = $r.PeakTemperature
-        Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
-    }
-}
+        if ($key -eq "Storage") {
+            # SMART is read-only and cheap, so every physical disk is queried (the
+            # first disk alone could be a USB bridge that reports UNSUPPORTED while
+            # the Windows disk stayed unchecked). The disk holding Windows is listed
+            # first by the inventory; the SMART self-test runs only on that disk.
+            $smartDisks = @($inventory.PhysicalDisks)
+            if ($smartDisks.Count -eq 0) {
+                Invoke-HsStageWrapper -StageName "STORAGE_SMART" -Component "Storage SMART$StageSuffix" -Tool "smartctl" -Action {
+                    param($stage)
+                    Complete-HsStage $stage -Status "SKIPPED" -Assessment "No physical disk found."
+                } | Out-Null
+            }
+            $smartIsFirstDisk = $true
+            foreach ($smartDisk in $smartDisks) {
+                $smartIndex = [int]($smartDisk.DeviceId -replace '[^0-9]','')
+                $smartRunSelfTest = $smartIsFirstDisk
+                $smartIsFirstDisk = $false
+                Invoke-HsStageWrapper -StageName "STORAGE_SMART" -Component "Storage SMART ($($smartDisk.DeviceId))$StageSuffix" -Tool "smartctl" -Action {
+                    param($stage)
+                    Write-HsStageProgress -Activity "SMART$StageSuffix" -Status "Lese SMART-Daten von $($smartDisk.DeviceId)" -Force
+                    $r = Invoke-HsSmartQuery -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $smartIndex -OutputDirectory $StageDirs.Storage -NoDownload:$NoDownload
+                    Write-HsStageProgress -Activity "SMART$StageSuffix" -Completed
+                    $stage.ToolVersion = $r.ToolVersion
+                    $stage.Coverage = "$($smartDisk.DeviceId): $($smartDisk.Model)"
+                    $stage.LogPaths = @($r.RawOutputPath)
+                    Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+                } | Out-Null
 
-# ---------------------------------------------------------------------------
-# Storage
-# ---------------------------------------------------------------------------
+                $smartStage = $script:HsStages[$script:HsStages.Count - 1]
+                if ($smartRunSelfTest -and $smartStage.Status -in @("PASS","WARNING")) {
+                    Invoke-HsStageWrapper -StageName "STORAGE_SMART_SELFTEST" -Component "Storage SMART Self-Test ($($smartDisk.DeviceId))$StageSuffix" -Tool "smartctl" -Action {
+                        param($innerStage)
+                        $selfTest = Start-HsSmartSelfTest -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $smartIndex `
+                            -TestType $StageProfile.SmartSelfTest -NoDownload:$NoDownload -ProgressLabel "SMART-Selbsttest $($smartDisk.DeviceId)$StageSuffix"
+                        Complete-HsStage $innerStage -Status $selfTest.Status -Assessment $selfTest.Reason
+                    } | Out-Null
+                }
+            }
 
-if ($selectedComponents -contains "Storage") {
-    # SMART is read-only and cheap, so every physical disk is queried (the
-    # first disk alone could be a USB bridge that reports UNSUPPORTED while
-    # the Windows disk stayed unchecked). The disk holding Windows is listed
-    # first by the inventory; the SMART self-test runs only on that disk.
-    $smartDisks = @($inventory.PhysicalDisks)
-    if ($smartDisks.Count -eq 0) {
-        Invoke-HsStageWrapper -StageName "STORAGE_SMART" -Component "Storage SMART" -Tool "smartctl" -Action {
-            param($stage)
-            Complete-HsStage $stage -Status "SKIPPED" -Assessment "No physical disk found."
-        } | Out-Null
-    }
-    $smartIsFirstDisk = $true
-    foreach ($smartDisk in $smartDisks) {
-        $smartIndex = [int]($smartDisk.DeviceId -replace '[^0-9]','')
-        $smartRunSelfTest = $smartIsFirstDisk
-        $smartIsFirstDisk = $false
-        Invoke-HsStageWrapper -StageName "STORAGE_SMART" -Component "Storage SMART ($($smartDisk.DeviceId))" -Tool "smartctl" -Action {
-            param($stage)
-            $r = Invoke-HsSmartQuery -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $smartIndex -OutputDirectory $Dirs.Storage -NoDownload:$NoDownload
-            $stage.ToolVersion = $r.ToolVersion
-            $stage.Coverage = "$($smartDisk.DeviceId): $($smartDisk.Model)"
-            $stage.LogPaths = @($r.RawOutputPath)
-            Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
-        } | Out-Null
+            Invoke-HsStageWrapper -StageName "STORAGE_SURFACE" -Component "Storage Surface Read$StageSuffix" -Action {
+                param($stage)
+                $disk = @($inventory.PhysicalDisks) | Select-Object -First 1
+                if (-not $disk -or -not $StageProfile.SurfaceScanEnabled) {
+                    Complete-HsStage $stage -Status "SKIPPED" -Assessment "Surface scan disabled for this profile or no disk found."
+                    return
+                }
+                $index = [int]($disk.DeviceId -replace '[^0-9]','')
+                $maxBytes = if ($SurfaceScanMaxBytes -gt 0) { $SurfaceScanMaxBytes } else { $StageProfile.SurfaceScanMaxBytes }
+                $maxSeconds = [int][math]::Round([double]$StageProfile.SurfaceScanMaxMinutes * 60)
+                $r = Invoke-HsStorageSurfaceScan -DriveIndex $index -MaxBytes $maxBytes -MaxSeconds $maxSeconds `
+                    -CancelCheck { Test-HsThermalAbortOrCancel -StageName "STORAGE_SURFACE" } -ProgressLabel "Surface-Scan $($disk.DeviceId)$StageSuffix (nur lesen)"
+                $stage.Coverage = "$($disk.DeviceId) (Windows disk first): $([math]::Round($r.BytesRead/1GB,2)) / $([math]::Round($r.TotalBytes/1GB,2)) GB read"
+                $stage.ErrorCount = $r.Errors.Count
+                Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+            } | Out-Null
 
-        $smartStage = $script:HsStages[$script:HsStages.Count - 1]
-        if ($smartRunSelfTest -and $smartStage.Status -in @("PASS","WARNING")) {
-            $selfTest = Start-HsSmartSelfTest -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -DriveIndex $smartIndex `
-                -TestType $profileConfig.SmartSelfTest -NoDownload:$NoDownload
-            Invoke-HsStageWrapper -StageName "STORAGE_SMART_SELFTEST" -Component "Storage SMART Self-Test ($($smartDisk.DeviceId))" -Tool "smartctl" -Action {
-                param($innerStage)
-                Complete-HsStage $innerStage -Status $selfTest.Status -Assessment $selfTest.Reason
+            Invoke-HsStageWrapper -StageName "STORAGE_WRITE_VERIFY" -Component "Storage Write/Read Verification$StageSuffix" -Action {
+                param($stage)
+                $r = Invoke-HsStorageWriteReadVerify -Directory (Join-Path $env:TEMP "PC-Diagnose_HS_WriteVerify") -SizeMB $StageProfile.StorageWriteVerifyMB `
+                    -ProgressLabel "Schreib-/Lesepruefung$StageSuffix"
+                $stage.Coverage = "$([math]::Round($r.BytesVerified/1MB,1)) MB written/read/verified"
+                $stage.ErrorCount = $r.Mismatches
+                Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+            } | Out-Null
+        }
+
+        if ($key -eq "PCIe") {
+            Invoke-HsStageWrapper -StageName "PCIE_WHEA" -Component "PCIe / WHEA$StageSuffix" -Action {
+                param($stage)
+                $wheaEvents = @()
+                try {
+                    $raw = Get-HsEventsSafe -Filter @{ LogName = "System"; ProviderName = "Microsoft-Windows-WHEA-Logger" } -Maximum 100
+                    $wheaEvents = @($raw | ForEach-Object { ConvertTo-HsEventRow -Event $_ })
+                } catch {}
+                $stage.EventsFound = $wheaEvents
+                if ($wheaEvents.Count -eq 0) {
+                    Complete-HsStage $stage -Status "PASS" -Assessment "No WHEA hardware error events found."
+                } else {
+                    $categories = @($wheaEvents | ForEach-Object { Get-HsWheaCategory -Event $_ } | Select-Object -Unique)
+                    $assessment = ($categories | ForEach-Object { Get-HsWheaAssessment -Category $_ }) -join " "
+                    $stage.Coverage = "$($wheaEvents.Count) WHEA event(s): $($categories -join ', ')"
+                    Complete-HsStage $stage -Status "WARNING" -Assessment $assessment
+                }
+            } | Out-Null
+        }
+
+        if ($key -eq "System") {
+            Invoke-HsStageWrapper -StageName "SYSTEM_STABILITY" -Component "System Stability (CPU+GPU+RAM)$StageSuffix" -Action {
+                param($stage)
+                $durationSeconds = [int][math]::Round([double]$StageProfile.SystemStabilityMinutes * 60)
+
+                # RAM is verified WHILE CPU and GPU are loaded: a weak PSU, VRM
+                # or memory controller often only shows up with all three busy.
+                # MemoryChecker runs in this process (registered for Ctrl+C
+                # cleanup), the GPU load in a background job, Prime95 blocks.
+                $ramLoad = Start-HsRamBackgroundLoad -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory $StageDirs.Ram `
+                    -PercentOfPhysicalRam $StageProfile.SystemStabilityRamPercent -NoDownload:$NoDownload
+                $gpuJob = $null
+                $ramResult = $null
+                try {
+                    $gpuJob = Start-Job -ScriptBlock {
+                        param($moduleRoot, $seconds)
+                        Import-Module (Join-Path $moduleRoot "GpuTests.psm1") -Force
+                        Invoke-HsGpuLoadThermalValidation -DurationSeconds $seconds -Quiet
+                    } -ArgumentList $ModuleRoot, $durationSeconds
+
+                    # Own output folder: the combined run reuses the CPU_COMPUTE workload
+                    # and would otherwise overwrite the CPU Compute stage's log.
+                    $cpuResult = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot `
+                        -OutputDirectory (Join-Path $StageDirs.Cpu "SystemStability") -DurationMinutes $StageProfile.SystemStabilityMinutes `
+                        -LogicalProcessors ([int]$cpuInfo.LogicalProcessors) -PhysicalCores ([int]$cpuInfo.Cores) `
+                        -NoDownload:$NoDownload -CancelCheck { Test-HsThermalAbortOrCancel -StageName "SYSTEM_STABILITY" } `
+                        -ProgressLabel "Systemtest CPU + GPU + RAM$StageSuffix"
+                } finally {
+                    $ramResult = Complete-HsRamBackgroundLoad -Load $ramLoad
+                }
+                $gpuResult = Receive-Job -Job $gpuJob -Wait -AutoRemoveJob | Select-Object -Last 1
+
+                $stage.Coverage = "CPU: $($cpuResult.Workers) worker(s); GPU: $($gpuResult.Iterations) iteration(s); RAM: $($StageProfile.SystemStabilityRamPercent)% continuous, $($ramResult.Passes) complete pass(es)"
+                $partsText = "CPU: $($cpuResult.Status), GPU: $($gpuResult.Status), RAM: $($ramResult.Status)"
+                if ($cpuResult.Status -eq "FAIL" -or $gpuResult.Status -eq "FAIL" -or $ramResult.Status -eq "FAIL") {
+                    $ramDetail = if ($ramResult.Status -eq "FAIL") { " RAM: $($ramResult.Reason)" } else { "" }
+                    Complete-HsStage $stage -Status "FAIL" -Assessment "Combined CPU+GPU+RAM activity produced a verified error ($partsText). Individual components may still pass in isolation; under combined load the power supply, VRM, memory controller and mainboard become more suspect.$ramDetail"
+                } elseif ($gpuResult.DeviceLost) {
+                    Complete-HsStage $stage -Status "FAIL" -Assessment "GPU device was lost during combined system activity ($partsText)."
+                } elseif ($cpuResult.Status -eq "PASS" -and $gpuResult.Status -eq "PASS" -and $ramResult.Status -eq "PASS") {
+                    Complete-HsStage $stage -Status "PASS" -Assessment "CPU, GPU and RAM workloads ran concurrently for $($StageProfile.SystemStabilityMinutes) minute(s) with no verified errors."
+                } else {
+                    # A combined PASS is only meaningful if ALL workloads really ran.
+                    $allNotRun = (@($cpuResult.Status, $gpuResult.Status, $ramResult.Status) | Where-Object { $_ -notin @("SKIPPED","UNSUPPORTED") }).Count -eq 0
+                    $partStatus = if ($cpuResult.Status -eq "INTERRUPTED") { "INTERRUPTED" } elseif ($allNotRun) { "SKIPPED" } else { "BLOCKED" }
+                    Complete-HsStage $stage -Status $partStatus -Assessment "Combined stability could not be verified because not all workloads completed ($partsText). CPU: $($cpuResult.Reason) GPU: $($gpuResult.Reason) RAM: $($ramResult.Reason)"
+                }
             } | Out-Null
         }
     }
 
-    Invoke-HsStageWrapper -StageName "STORAGE_SURFACE" -Component "Storage Surface Read" -Action {
-        param($stage)
-        $disk = @($inventory.PhysicalDisks) | Select-Object -First 1
-        if (-not $disk -or -not $profileConfig.SurfaceScanEnabled) {
-            Complete-HsStage $stage -Status "SKIPPED" -Assessment "Surface scan disabled for this profile or no disk found."
-            return
-        }
-        $index = [int]($disk.DeviceId -replace '[^0-9]','')
-        $maxBytes = if ($SurfaceScanMaxBytes -gt 0) { $SurfaceScanMaxBytes } else { $profileConfig.SurfaceScanMaxBytes }
-        $r = Invoke-HsStorageSurfaceScan -DriveIndex $index -MaxBytes $maxBytes -CancelCheck { Test-HsThermalAbortOrCancel -StageName "STORAGE_SURFACE" }
-        $stage.Coverage = "$($disk.DeviceId) (Windows disk first): $([math]::Round($r.BytesRead/1GB,2)) / $([math]::Round($r.TotalBytes/1GB,2)) GB read"
-        $stage.ErrorCount = $r.Errors.Count
-        Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
-    }
+    Write-HsOverallProgress -Activity $OverallActivity -Completed
+}
 
-    Invoke-HsStageWrapper -StageName "STORAGE_WRITE_VERIFY" -Component "Storage Write/Read Verification" -Action {
-        param($stage)
-        $r = Invoke-HsStorageWriteReadVerify -Directory (Join-Path $env:TEMP "PC-Diagnose_HS_WriteVerify") -SizeMB $profileConfig.StorageWriteVerifyMB
-        $stage.Coverage = "$([math]::Round($r.BytesVerified/1MB,1)) MB written/read/verified"
-        $stage.ErrorCount = $r.Mismatches
-        Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
+function Get-HsRetestKeysForStage {
+    <# Component keys that re-run the given stage; empty = not retestable. #>
+    param([Parameter(Mandatory=$true)][string]$StageName)
+    switch ($StageName) {
+        "CPU_COMPUTE"            { return @("CPU") }
+        "CPU_CACHE_IMC"          { return @("Cache") }
+        "RAM"                    { return @("RAM") }
+        "GPU_COMPUTE"            { return @("GPU","GPULoad") }
+        "VRAM"                   { return @("VRAMMemory") }
+        "GPU_LOAD_THERMAL"       { return @("GPULoad") }
+        "STORAGE_SMART"          { return @("Storage") }
+        "STORAGE_SMART_SELFTEST" { return @("Storage") }
+        "STORAGE_SURFACE"        { return @("Storage") }
+        "STORAGE_WRITE_VERIFY"   { return @("Storage") }
+        "SYSTEM_STABILITY"       { return @("System") }
+        # PCIE_WHEA reads past event log entries; running it again tests nothing new.
+        default                  { return @() }
     }
 }
 
-# ---------------------------------------------------------------------------
-# PCIe / WHEA
-# ---------------------------------------------------------------------------
+function Get-HsNoticeableStages {
+    <# Stages worth a targeted retest: verified errors, warnings, or runs that did not complete. #>
+    param([object[]]$Stages)
+    return @($Stages | Where-Object {
+        $_.Status -in @("FAIL","WARNING","BLOCKED","INTERRUPTED","THERMAL_ABORT","SYSTEM_RESET") -and
+        @(Get-HsRetestKeysForStage -StageName $_.StageName).Count -gt 0
+    })
+}
 
-if ($selectedComponents -contains "PCIe") {
-    Invoke-HsStageWrapper -StageName "PCIE_WHEA" -Component "PCIe / WHEA" -Action {
-        param($stage)
-        $wheaEvents = @()
-        try {
-            $raw = Get-HsEventsSafe -Filter @{ LogName = "System"; ProviderName = "Microsoft-Windows-WHEA-Logger" } -Maximum 100
-            $wheaEvents = @($raw | ForEach-Object { ConvertTo-HsEventRow -Event $_ })
-        } catch {}
-        $stage.EventsFound = $wheaEvents
-        if ($wheaEvents.Count -eq 0) {
-            Complete-HsStage $stage -Status "PASS" -Assessment "No WHEA hardware error events found."
-        } else {
-            $categories = @($wheaEvents | ForEach-Object { Get-HsWheaCategory -Event $_ } | Select-Object -Unique)
-            $assessment = ($categories | ForEach-Object { Get-HsWheaAssessment -Category $_ }) -join " "
-            $stage.Coverage = "$($wheaEvents.Count) WHEA event(s): $($categories -join ', ')"
-            Complete-HsStage $stage -Status "WARNING" -Assessment $assessment
-        }
+function Show-HsStageSummary {
+    param([object[]]$Stages, [string]$Title)
+    Write-Host ""
+    Write-Host $Title -ForegroundColor Cyan
+    foreach ($s in $Stages) {
+        $color = switch ($s.Status) { "PASS" { "Green" } "FAIL" { "Red" } { $_ -in @("SKIPPED","UNSUPPORTED") } { "DarkGray" } default { "Yellow" } }
+        Write-Host ("  {0,-14} {1}" -f $s.Status, $s.Component) -ForegroundColor $color
     }
 }
 
-# ---------------------------------------------------------------------------
-# System stability (combined)
-# ---------------------------------------------------------------------------
+function Read-HsRetestRequest {
+    <#
+        Asks which noticeable component(s) to test again and for how long.
+        Returns $null for "no retest".
+    #>
+    param([Parameter(Mandatory=$true)][object[]]$Noticeable)
 
-if ($selectedComponents -contains "System") {
-    Invoke-HsStageWrapper -StageName "SYSTEM_STABILITY" -Component "System Stability" -Action {
-        param($stage)
-        $cpuCount = (@($inventory.Cpus)[0])
-        $durationSeconds = $profileConfig.SystemStabilityMinutes * 60
-        $deadline = [datetime]::Now.AddSeconds($durationSeconds)
-        $gpuJob = Start-Job -ScriptBlock {
-            param($moduleRoot, $seconds)
-            Import-Module (Join-Path $moduleRoot "GpuTests.psm1") -Force
-            Invoke-HsGpuLoadThermalValidation -DurationSeconds $seconds
-        } -ArgumentList $ModuleRoot, $durationSeconds
-
-        # Own output folder: the combined run reuses the CPU_COMPUTE workload
-        # and would otherwise overwrite the CPU Compute stage's log.
-        $cpuResult = Invoke-HsCpuTortureTest -StageName "CPU_COMPUTE" -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot `
-            -OutputDirectory (Join-Path $Dirs.Cpu "SystemStability") -DurationMinutes $profileConfig.SystemStabilityMinutes `
-            -LogicalProcessors ([int]$cpuCount.LogicalProcessors) -PhysicalCores ([int]$cpuCount.Cores) `
-            -NoDownload:$NoDownload -CancelCheck { Test-HsThermalAbortOrCancel -StageName "SYSTEM_STABILITY" }
-
-        $gpuResult = Receive-Job -Job $gpuJob -Wait -AutoRemoveJob
-
-        $stage.Coverage = "CPU: $($cpuResult.Workers) worker(s); GPU: $($gpuResult.Iterations) iteration(s)"
-        if ($cpuResult.Status -eq "FAIL" -or $gpuResult.Status -eq "FAIL") {
-            Complete-HsStage $stage -Status "FAIL" -Assessment "Combined CPU+GPU activity produced a verified error (CPU: $($cpuResult.Status), GPU: $($gpuResult.Status)). Individual components may still pass in isolation."
-        } elseif ($gpuResult.DeviceLost) {
-            Complete-HsStage $stage -Status "FAIL" -Assessment "GPU device was lost during combined system activity."
-        } elseif ($cpuResult.Status -eq "PASS" -and $gpuResult.Status -eq "PASS") {
-            Complete-HsStage $stage -Status "PASS" -Assessment "CPU and GPU workloads ran concurrently for $($profileConfig.SystemStabilityMinutes) minute(s) with no verified errors."
-        } else {
-            # A combined PASS is only meaningful if BOTH workloads really ran.
-            # Previously a skipped Prime95 (e.g. -NoDownload) or an unsupported
-            # GPU still produced PASS here.
-            $partStatus = if ($cpuResult.Status -eq "INTERRUPTED") { "INTERRUPTED" } elseif ($cpuResult.Status -in @("SKIPPED","UNSUPPORTED") -and $gpuResult.Status -in @("SKIPPED","UNSUPPORTED")) { "SKIPPED" } else { "BLOCKED" }
-            Complete-HsStage $stage -Status $partStatus -Assessment "Combined CPU+GPU stability could not be verified because not both workloads completed (CPU: $($cpuResult.Status) - $($cpuResult.Reason) GPU: $($gpuResult.Status) - $($gpuResult.Reason))."
-        }
+    Write-Host ""
+    Write-Host "Auffaellige Ergebnisse:" -ForegroundColor Yellow
+    $options = @()
+    $number = 0
+    foreach ($s in $Noticeable) {
+        $number++
+        $reason = ([string]$s.Assessment -replace '\s+', ' ')
+        if ($reason.Length -gt 110) { $reason = $reason.Substring(0, 110) + "..." }
+        Write-Host ("  [{0}] {1} - {2}" -f $number, $s.Component, $s.Status) -ForegroundColor White
+        if ($reason) { Write-Host "      $reason" -ForegroundColor Gray }
+        $options += [pscustomobject]@{ Number = [string]$number; Keys = @(Get-HsRetestKeysForStage -StageName $s.StageName) }
     }
+    Write-Host ""
+    Write-Host "Soll eine Komponente gezielt erneut getestet werden?" -ForegroundColor Cyan
+    while ($true) {
+        $answer = ([string](Read-Host "Nummer(n) eingeben, z. B. 1 oder 1,3 - Enter = nein")).Trim()
+        if (-not $answer) { return $null }
+        $picked = @($answer -split '[,; ]+' | Where-Object { $_ })
+        $invalid = @($picked | Where-Object { $_ -notin @($options | ForEach-Object { $_.Number }) })
+        if ($invalid.Count -eq 0) { break }
+        Write-Host "  Unbekannte Nummer(n): $($invalid -join ', ')" -ForegroundColor Yellow
+    }
+    $keys = @($options | Where-Object { $picked -contains $_.Number } | ForEach-Object { $_.Keys } | Select-Object -Unique)
+
+    Write-Host ""
+    Write-Host "Wie lange soll jede gewaehlte Komponente getestet werden?" -ForegroundColor Cyan
+    Write-Host "  [1] Kurz   - 10 Minuten"
+    Write-Host "  [2] Mittel - 30 Minuten"
+    Write-Host "  [3] Lang   - 60 Minuten"
+    Write-Host "  [4] Eigene Dauer in Minuten"
+    Write-Host "  Datentraeger: Surface-Scan der Windows-Platte fuer diese Dauer plus Schreib-/Lesepruefung." -ForegroundColor DarkGray
+    $durationChoice = Read-HsChoice -Prompt "Auswahl [1-4, Enter = 1]" -Allowed @("1","2","3","4") -Default "1"
+    $minutes = switch ($durationChoice) { "1" { 10 } "2" { 30 } "3" { 60 } default { 0 } }
+    while ($minutes -le 0) {
+        $custom = ([string](Read-Host "Minuten (1-600)")).Trim()
+        $parsed = 0
+        if ([int]::TryParse($custom, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 600) { $minutes = $parsed }
+        else { Write-Host "  Bitte eine ganze Zahl von 1 bis 600 eingeben." -ForegroundColor Yellow }
+    }
+    return [pscustomobject]@{ Keys = $keys; Minutes = [double]$minutes }
 }
+
+function Save-HsRunReport {
+    $html = New-HsHtmlReport -Stages @($script:HsStages) -Inventory $inventory -Profile $profileLabel -RunId $RunId -SystemResetInfo $systemResetInfo `
+        -TelemetryStatus $telemetryStatus -TelemetrySkipped:$SkipTelemetry
+    [IO.File]::WriteAllText((Join-Path $Out "00_Result.html"), $html, [Text.UTF8Encoding]::new($false))
+    (New-HsSummaryText -Stages @($script:HsStages)) | Out-File (Join-Path $Out "00_Summary.txt") -Encoding UTF8
+    Export-HsStagesCsv -Stages @($script:HsStages) -Path (Join-Path $Out "00_TestStages.csv")
+}
+
+# ---------------------------------------------------------------------------
+# Main run
+# ---------------------------------------------------------------------------
+
+$mainDirs = @{ Cpu = $Dirs.Cpu; Ram = $Dirs.Ram; Gpu = $Dirs.Gpu; Storage = $Dirs.Storage }
+Invoke-HsComponentStages -ComponentKeys $selectedComponents -StageProfile $profileConfig -StageDirs $mainDirs `
+    -OverallActivity "Hardware-Stabilitaetstest ($profileLabel)"
 
 # ---------------------------------------------------------------------------
 # System-Reset check for THIS run and reporting
@@ -560,13 +803,49 @@ if ($selectedComponents -contains "System") {
 
 $systemResetInfo = [pscustomobject]@{ Classification = "NONE"; Notes = "" }
 
-Unregister-Event -SourceIdentifier $engineExitAction.Name -ErrorAction SilentlyContinue
+# Written right away so the results are safe even if the console is closed
+# at the retest question below.
+Save-HsRunReport
+Show-HsStageSummary -Stages @($script:HsStages) -Title "Ergebnis ($profileLabel): $(Get-HsOverallStatus -Stages @($script:HsStages))"
 
-$html = New-HsHtmlReport -Stages @($script:HsStages) -Inventory $inventory -Profile $Profile -RunId $RunId -SystemResetInfo $systemResetInfo `
-    -TelemetryStatus $telemetryStatus -TelemetrySkipped:$SkipTelemetry
-[IO.File]::WriteAllText((Join-Path $Out "00_Result.html"), $html, [Text.UTF8Encoding]::new($false))
-(New-HsSummaryText -Stages @($script:HsStages)) | Out-File (Join-Path $Out "00_Summary.txt") -Encoding UTF8
-Export-HsStagesCsv -Stages @($script:HsStages) -Path (Join-Path $Out "00_TestStages.csv")
+# ---------------------------------------------------------------------------
+# Targeted retest of noticeable components
+# ---------------------------------------------------------------------------
+
+$retestRound = 0
+$lastRoundStages = @($script:HsStages)
+while ($true) {
+    $noticeable = Get-HsNoticeableStages -Stages $lastRoundStages
+    $request = $null
+    if ($RetestComponents) {
+        if ($retestRound -gt 0) { break }
+        $request = [pscustomobject]@{
+            Keys    = @($RetestComponents -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            Minutes = $(if ($RetestMinutes -gt 0) { $RetestMinutes } else { 10.0 })
+        }
+    } elseif ($noticeable.Count -gt 0 -and (Test-HsInteractiveConsole)) {
+        $request = Read-HsRetestRequest -Noticeable $noticeable
+    }
+    if ($null -eq $request -or @($request.Keys).Count -eq 0) { break }
+
+    $retestRound++
+    $minutes = [double]$request.Minutes
+    if ($MaxStageMinutes -gt 0) { $minutes = [math]::Min($minutes, $MaxStageMinutes) }
+    $retestProfile = Get-HsRetestProfile -BaseProfile $profileConfig -Minutes $minutes
+    if ($MaxStageMinutes -gt 0) { $retestProfile.StorageWriteVerifyMB = [math]::Min([int]$retestProfile.StorageWriteVerifyMB, 64) }
+    $retestDirs = New-HsStageDirs -Root (Join-Path $Out ("Retest_{0}" -f $retestRound))
+    $suffix = " (Retest $retestRound, $minutes min)"
+    Write-Progress2 "Gezielter Wiederholungstest $retestRound - $(@($request.Keys) -join ', ') - $minutes Minute(n) je Komponente" "Cyan"
+
+    $before = $script:HsStages.Count
+    Invoke-HsComponentStages -ComponentKeys @($request.Keys) -StageProfile $retestProfile -StageDirs $retestDirs -StageSuffix $suffix `
+        -OverallActivity "Wiederholungstest $retestRound"
+    $lastRoundStages = @($script:HsStages | Select-Object -Skip $before)
+    Save-HsRunReport
+    Show-HsStageSummary -Stages $lastRoundStages -Title "Ergebnis Wiederholungstest $retestRound"
+}
+
+Unregister-Event -SourceIdentifier $engineExitAction.Name -ErrorAction SilentlyContinue
 
 @"
 Hardware-Stabilitaetstest result package for $($inventory.ComputerName)
@@ -577,6 +856,8 @@ compared against the expected result.
 
 PASS means: within the range actually tested, no errors were detected.
 It does not guarantee the hardware is completely free of defects.
+Stages marked "(Retest ...)" are targeted repeats chosen after the main run;
+they add evidence but do not replace the original result.
 "@ | Out-File (Join-Path $Out "README.txt") -Encoding UTF8
 
 Close-HsTelemetry
@@ -587,6 +868,8 @@ Write-Host "Overall: $(Get-HsOverallStatus -Stages @($script:HsStages))" -Foregr
 Write-Host "Result folder: $Out"
 Write-Host "Result package: $Out.zip"
 
-try {
-    Start-Process (Join-Path $Out "00_Result.html")
-} catch {}
+if ([Environment]::UserInteractive) {
+    try {
+        Start-Process (Join-Path $Out "00_Result.html")
+    } catch {}
+}

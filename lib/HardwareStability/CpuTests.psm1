@@ -54,7 +54,8 @@ function Invoke-HsCpuTortureTest {
         [Parameter(Mandatory=$true)][int]$PhysicalCores,
         [switch]$NoDownload,
         [scriptblock]$TelemetrySample = $null,
-        [scriptblock]$CancelCheck = { $false }
+        [scriptblock]$CancelCheck = { $false },
+        [string]$ProgressLabel = ""
     )
 
     $result = [pscustomobject]@{
@@ -117,9 +118,20 @@ function Invoke-HsCpuTortureTest {
     $exitedEarly = $false
     $earlyExitCode = $null
 
+    $plannedSeconds = [double]$DurationMinutes * 60
+    $activity = if ($ProgressLabel) { $ProgressLabel } else { "$StageName (Prime95)" }
     try {
         while ([datetime]::Now -lt $deadline) {
-            Start-Sleep -Seconds 5
+            # Sleep in 1 s steps so the console progress stays live; the
+            # actual checks below still run every 5 s as before.
+            for ($tick = 0; $tick -lt 5 -and [datetime]::Now -lt $deadline; $tick++) {
+                Start-Sleep -Seconds 1
+                $timeProgress = Get-HsTimeProgress -ElapsedSeconds $sw.Elapsed.TotalSeconds -TotalSeconds $plannedSeconds
+                $tempText = if ($null -ne $peakTemp) { ", Spitze $peakTemp C" } else { "" }
+                Write-HsStageProgress -Activity $activity -Status ("{0} Worker, {1}{2}" -f $workers, $timeProgress.Text, $tempText) `
+                    -Percent $timeProgress.Percent -SecondsRemaining $timeProgress.Remaining
+                if ($process.HasExited) { break }
+            }
 
             $processHasExited = $process.HasExited
 
@@ -166,6 +178,7 @@ function Invoke-HsCpuTortureTest {
             }
         }
     } finally {
+        Write-HsStageProgress -Activity $activity -Completed
         Stop-HsProcessTree -ProcessId $process.Id -Reason "Stage end" -LogPath $logPath
         Unregister-HsProcess -ProcessId $process.Id
         $sw.Stop()
