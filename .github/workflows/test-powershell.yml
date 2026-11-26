@@ -56,3 +56,18 @@ jobs:
             }
           }
           Write-Host "Manifest OK"
+
+  telemetry-smoke:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Telemetry load path (Windows PowerShell 5.1, net472 build)
+        shell: powershell
+        run: .\tests\HardwareStability\Telemetry.Smoke.ps1
+
+      - name: Telemetry load path (PowerShell 7, netstandard2.0 build)
+        shell: pwsh
+        run: .\tests\HardwareStability\Telemetry.Smoke.ps1 -ToolCacheRoot "$env:RUNNER_TEMP\telemetry-pwsh"
