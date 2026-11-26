@@ -2,6 +2,27 @@
 
 Letztes Update: 2026-11-26 (Telemetrie unter PS 5.1, Review-Fixes, PCDiagLite-Tests)
 
+## Nachtrag 2026-11-26 (2) — Bedienung: Dauer, Fortschritt, Wiederholung
+
+- Start ohne `-Profile`: Auswahl Kurz/Mittel/Lang (Quick/Standard/Extended) mit
+  geschätzten Minuten der Lastphasen. Der Starter erzwingt nicht mehr Quick und
+  reicht Profil/Komponenten/Optionen jetzt auch über die UAC-Erhöhung weiter
+  (gingen vorher verloren).
+- Fortschritt: Gesamtbalken + Balken je Phase (echte Prozente für Surface-Scan,
+  Schreib-/Lesetest, RAM-Durchläufe, SMART-Selbsttest, GPU Compute; Zeitanteil
+  für Prime95, VRAM, GPU-Last, Systemtest).
+- System Stability belastet jetzt CPU + GPU + RAM gleichzeitig.
+- Nach dem Lauf: auffällige Phasen gezielt wiederholen (10/30/60 Min. oder
+  eigene Dauer), Ergebnisse als "(Retest n, x min)" im selben Bericht.
+- Weitere Fixes: RAM-Exitcode 1 ohne "Memory corrupted" = BLOCKED statt FAIL;
+  NVMe-Selbsttest "in progress" wurde nicht erkannt; Surface-Scan nahm pro 4 MB
+  eine Sensormessung; CRC32 in C#.
+- CI: zusätzlicher echter End-to-End-Lauf unter PS 5.1 mit 30-s-Phasen und
+  automatischer Wiederholung (GitHub-Runner: Prime95-Server nicht erreichbar,
+  virtuelle Platten ohne SMART/Rohzugriff - dort korrekt SKIPPED/UNSUPPORTED).
+- Noch offen: Bedienung (Auswahlmenü, Wiederholungsfrage, Fortschrittsbalken)
+  real in einer elevierten Konsole ansehen.
+
 ## Nachtrag 2026-11-26 — Branch `feature/telemetry-ps51-pcdiaglite-tests`
 
 Status: implementiert, **noch nicht real auf Windows verifiziert** (die

@@ -22,7 +22,7 @@
       "archiveType": "zip",
       "executable": "prime95.exe",
       "sha256": "d9475f2ff3f4a6a701abc49a86a66126cb48abd10bda6fa87039d98fa8756bca",
-      "sha256Source": "locally computed from the official mersenne.ca HTTPS mirror linked from mersenne.org/download (no publisher-provided SHA256)",
+      "sha256Source": "published by GIMPS on mersenne.org/download (SHA256 listed next to the file) and matches the file on the linked official mersenne.ca download host",
       "license": "Freeware (GIMPS End User License Agreement, mersenne.org/legal)",
       "usedFor": ["CPU_COMPUTE", "CPU_CACHE_IMC"]
     },
