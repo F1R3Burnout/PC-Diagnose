@@ -11,6 +11,31 @@ function Get-HsFileHash256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-HsFileHash512 {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA512).Hash.ToLowerInvariant()
+}
+
+function ConvertTo-HsHexHash {
+    <#
+        Normalizes a configured hash to lowercase hex. NuGet publishes its
+        package hashes as base64 (88 characters for SHA512); everything else in
+        HardwareStabilityTools.json is already hex. Returns "" for input that is
+        neither, so a malformed value can never accidentally "match".
+    #>
+    param([AllowNull()][string]$Value, [Parameter(Mandatory=$true)][int]$ByteLength)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return "" }
+    $text = $Value.Trim()
+    if ($text -match '^[0-9a-fA-F]+$' -and $text.Length -eq ($ByteLength * 2)) { return $text.ToLowerInvariant() }
+    try {
+        $bytes = [Convert]::FromBase64String($text)
+        if ($bytes.Length -ne $ByteLength) { return "" }
+        return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
+    } catch {
+        return ""
+    }
+}
+
 function Get-HsFileHashMd5 {
     param([Parameter(Mandatory=$true)][string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm MD5).Hash.ToLowerInvariant()
@@ -48,6 +73,7 @@ function Resolve-HsTool {
         ToolId       = $ToolId
         Available    = $false
         ExecutablePath = ""
+        ToolDirectory = ""
         Reason       = ""
         Version      = ""
         License      = ""
@@ -64,6 +90,7 @@ function Resolve-HsTool {
 
     $toolDir = Join-Path $ToolCacheRoot $ToolId
     New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
+    $result.ToolDirectory = $toolDir
 
     $execRelative = [string]$entry.executable
     $execPath = Join-Path $toolDir $execRelative
@@ -77,6 +104,18 @@ function Resolve-HsTool {
 
     if ($NoDownload) {
         $result.Reason = "Not cached locally and -NoDownload was specified"
+        return $result
+    }
+
+    # Fail closed: a tool without any configured integrity hash is never
+    # downloaded and executed. Previously such an entry was silently accepted
+    # unverified, which would have turned a config mistake into running an
+    # unchecked binary with administrator rights.
+    $expectedSha256 = [string](Get-HsPropertyOrDefault -InputObject $entry -Name "sha256")
+    $expectedSha512 = [string](Get-HsPropertyOrDefault -InputObject $entry -Name "sha512")
+    $expectedMd5 = [string](Get-HsPropertyOrDefault -InputObject $entry -Name "md5")
+    if ([string]::IsNullOrWhiteSpace($expectedSha256) -and [string]::IsNullOrWhiteSpace($expectedSha512) -and [string]::IsNullOrWhiteSpace($expectedMd5)) {
+        $result.Reason = "No integrity hash (sha256/sha512/md5) configured for '$ToolId' - download refused"
         return $result
     }
 
@@ -109,7 +148,6 @@ function Resolve-HsTool {
         return $result
     }
 
-    $expectedSha256 = [string](Get-HsPropertyOrDefault -InputObject $entry -Name "sha256")
     if (-not [string]::IsNullOrWhiteSpace($expectedSha256)) {
         $actualSha256 = Get-HsFileHash256 -Path $downloadPath
         if ($actualSha256 -ne $expectedSha256.ToLowerInvariant()) {
@@ -119,7 +157,16 @@ function Resolve-HsTool {
         }
     }
 
-    $expectedMd5 = [string](Get-HsPropertyOrDefault -InputObject $entry -Name "md5")
+    if (-not [string]::IsNullOrWhiteSpace($expectedSha512)) {
+        $expectedSha512Hex = ConvertTo-HsHexHash -Value $expectedSha512 -ByteLength 64
+        $actualSha512 = Get-HsFileHash512 -Path $downloadPath
+        if ([string]::IsNullOrEmpty($expectedSha512Hex) -or $actualSha512 -ne $expectedSha512Hex) {
+            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+            $result.Reason = "SHA512 mismatch (expected $expectedSha512, got $actualSha512) - download rejected"
+            return $result
+        }
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($expectedMd5)) {
         $actualMd5 = Get-HsFileHashMd5 -Path $downloadPath
         if ($actualMd5 -ne $expectedMd5.ToLowerInvariant()) {

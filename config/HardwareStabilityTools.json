@@ -57,11 +57,112 @@
       "downloadUrl": "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.6",
       "archiveType": "nupkg",
       "executable": "runtimes\\win-x64\\lib\\netstandard2.0\\LibreHardwareMonitorLib.dll",
+      "executableDesktop": "runtimes\\win-x64\\lib\\net472\\LibreHardwareMonitorLib.dll",
+      "desktopDependencies": [
+        "nuget_system_memory",
+        "nuget_system_buffers",
+        "nuget_system_numerics_vectors",
+        "nuget_system_runtime_compilerservices_unsafe",
+        "nuget_system_threading_accesscontrol",
+        "nuget_system_security_accesscontrol",
+        "nuget_system_security_principal_windows"
+      ],
       "sha256": "60db5e0d9135f4658b385cae139d3b9eaeac0a8e867d322d20b5dbe4c4039197",
       "sha256Source": "locally computed from the official nuget.org HTTPS package endpoint (no separate publisher SHA256 file offered outside NuGet's own package signing)",
       "license": "MPL-2.0",
       "usedFor": ["TELEMETRY"],
-      "notes": "Optional dependencies DiskInfoToolkit and RAMSPDToolkit-NDD are not bundled/downloaded; Computer.IsStorageEnabled and Computer.IsMemoryEnabled are therefore left false (see Telemetry.psm1) so Open() does not abort before enumerating CPU/GPU/Motherboard hardware. Storage temperature is read from smartctl instead."
+      "notes": "executable (netstandard2.0) is loaded under PowerShell 7 (.NET); executableDesktop (net472) is loaded under Windows PowerShell 5.1 (.NET Framework) together with desktopDependencies, which are resolved by an AssemblyResolve handler in Telemetry.psm1 because powershell.exe has no binding redirects for them. Optional dependencies DiskInfoToolkit, RAMSPDToolkit-NDD and HidSharp are not downloaded; Computer.IsStorageEnabled, IsMemoryEnabled and IsControllerEnabled therefore stay false. Storage temperature is read from smartctl instead. Since 0.9.5 CPU temperature and motherboard (Super I/O) sensors need the separately installed PawnIO driver (https://pawnio.eu); this project never installs a driver and reports the missing driver instead."
+    },
+    "nuget_system_memory": {
+      "name": "System.Memory",
+      "version": "4.6.3",
+      "officialSource": "https://www.nuget.org/packages/System.Memory/4.6.3",
+      "downloadUrl": "https://api.nuget.org/v3-flatcontainer/system.memory/4.6.3/system.memory.4.6.3.nupkg",
+      "archiveType": "nupkg",
+      "executable": "lib\\net462\\System.Memory.dll",
+      "sha512": "NXcNYlWoXe5cz9sb8Huo6x2dCZVYkhwKtgE00n/MoI8V4ZI/7/t+EI5bOhQFlZfFjjqM8+U6prjU/aARt7H/tA==",
+      "sha512Source": "NuGet packageHash (SHA512, base64) published in the official nuget.org catalog entry for this exact version",
+      "license": "MIT",
+      "usedFor": ["TELEMETRY_PS51"],
+      "notes": "Required by the net472 LibreHardwareMonitorLib build (Span/Memory used by its CsWin32 interop)."
+    },
+    "nuget_system_buffers": {
+      "name": "System.Buffers",
+      "version": "4.6.1",
+      "officialSource": "https://www.nuget.org/packages/System.Buffers/4.6.1",
+      "downloadUrl": "https://api.nuget.org/v3-flatcontainer/system.buffers/4.6.1/system.buffers.4.6.1.nupkg",
+      "archiveType": "nupkg",
+      "executable": "lib\\net462\\System.Buffers.dll",
+      "sha512": "qve/dFwECwehSWlZmpkrrlIeATCvo/Hw2koyMrUVcDBy5gXAQrnwX8pHEoqgj8DgkrWuWW1DrQbFqoMbo+Fvrg==",
+      "sha512Source": "NuGet packageHash (SHA512, base64) published in the official nuget.org catalog entry for this exact version",
+      "license": "MIT",
+      "usedFor": ["TELEMETRY_PS51"],
+      "notes": "Dependency of System.Memory 4.6.3 on .NET Framework."
+    },
+    "nuget_system_numerics_vectors": {
+      "name": "System.Numerics.Vectors",
+      "version": "4.6.1",
+      "officialSource": "https://www.nuget.org/packages/System.Numerics.Vectors/4.6.1",
+      "downloadUrl": "https://api.nuget.org/v3-flatcontainer/system.numerics.vectors/4.6.1/system.numerics.vectors.4.6.1.nupkg",
+      "archiveType": "nupkg",
+      "executable": "lib\\net462\\System.Numerics.Vectors.dll",
+      "sha512": "/rkvpUeUPlCY/2qYVQKiUsj5IKaXZcy2+SQAGAfemAdyEF5AgIgYOFNSTMWDXo09JWFX9HB+wV1yCyi2Mwi3TA==",
+      "sha512Source": "NuGet packageHash (SHA512, base64) published in the official nuget.org catalog entry for this exact version",
+      "license": "MIT",
+      "usedFor": ["TELEMETRY_PS51"],
+      "notes": "Dependency of System.Memory 4.6.3 on .NET Framework."
+    },
+    "nuget_system_runtime_compilerservices_unsafe": {
+      "name": "System.Runtime.CompilerServices.Unsafe",
+      "version": "6.1.2",
+      "officialSource": "https://www.nuget.org/packages/System.Runtime.CompilerServices.Unsafe/6.1.2",
+      "downloadUrl": "https://api.nuget.org/v3-flatcontainer/system.runtime.compilerservices.unsafe/6.1.2/system.runtime.compilerservices.unsafe.6.1.2.nupkg",
+      "archiveType": "nupkg",
+      "executable": "lib\\net462\\System.Runtime.CompilerServices.Unsafe.dll",
+      "sha512": "t2aXWJZBkAkRrTOnw31OBELKEVSDD5YvC3O5dXaHFsR66/nRTKm1y3Iq6NwFI5u5IlKrWYfdan66V+GKKkY8hQ==",
+      "sha512Source": "NuGet packageHash (SHA512, base64) published in the official nuget.org catalog entry for this exact version",
+      "license": "MIT",
+      "usedFor": ["TELEMETRY_PS51"],
+      "notes": "Dependency of System.Memory 4.6.3 on .NET Framework."
+    },
+    "nuget_system_threading_accesscontrol": {
+      "name": "System.Threading.AccessControl",
+      "version": "10.0.3",
+      "officialSource": "https://www.nuget.org/packages/System.Threading.AccessControl/10.0.3",
+      "downloadUrl": "https://api.nuget.org/v3-flatcontainer/system.threading.accesscontrol/10.0.3/system.threading.accesscontrol.10.0.3.nupkg",
+      "archiveType": "nupkg",
+      "executable": "lib\\net462\\System.Threading.AccessControl.dll",
+      "sha512": "5XbRMPdcfSzmcwUHOnQyl0LSG+SHfqm0JO0woVFprV8KOLrk8xZVTpOyxGFg21baQx1jxjxV9zTXr3t6QwhHGQ==",
+      "sha512Source": "NuGet packageHash (SHA512, base64) published in the official nuget.org catalog entry for this exact version",
+      "license": "MIT",
+      "usedFor": ["TELEMETRY_PS51"],
+      "notes": "Used by LibreHardwareMonitorLib's global mutexes (Mutexes.Open)."
+    },
+    "nuget_system_security_accesscontrol": {
+      "name": "System.Security.AccessControl",
+      "version": "6.0.0",
+      "officialSource": "https://www.nuget.org/packages/System.Security.AccessControl/6.0.0",
+      "downloadUrl": "https://api.nuget.org/v3-flatcontainer/system.security.accesscontrol/6.0.0/system.security.accesscontrol.6.0.0.nupkg",
+      "archiveType": "nupkg",
+      "executable": "runtimes\\win\\lib\\net461\\System.Security.AccessControl.dll",
+      "sha512": "ZKNqEDuVSrS36KdsDodleb1ITDCOREwtkV+5oP0FrWNhRQHtI1xUSvybQxy4pM8PBxW47UFOhZWObWhXkWj7RQ==",
+      "sha512Source": "NuGet packageHash (SHA512, base64) published in the official nuget.org catalog entry for this exact version",
+      "license": "MIT",
+      "usedFor": ["TELEMETRY_PS51"],
+      "notes": "Dependency of System.Threading.AccessControl on .NET Framework."
+    },
+    "nuget_system_security_principal_windows": {
+      "name": "System.Security.Principal.Windows",
+      "version": "5.0.0",
+      "officialSource": "https://www.nuget.org/packages/System.Security.Principal.Windows/5.0.0",
+      "downloadUrl": "https://api.nuget.org/v3-flatcontainer/system.security.principal.windows/5.0.0/system.security.principal.windows.5.0.0.nupkg",
+      "archiveType": "nupkg",
+      "executable": "runtimes\\win\\lib\\net461\\System.Security.Principal.Windows.dll",
+      "sha512": "RKkgqq8ishctQTGbtXqyuOGkUx1fAhkqb1OoHYdRJRlbYLoLWkSkWYHRN/17DzplsSlZtf2Xr8BXjNhO8nRnzQ==",
+      "sha512Source": "NuGet packageHash (SHA512, base64) published in the official nuget.org catalog entry for this exact version",
+      "license": "MIT",
+      "usedFor": ["TELEMETRY_PS51"],
+      "notes": "Dependency of System.Threading.AccessControl / System.Security.AccessControl on .NET Framework."
     }
   }
 }

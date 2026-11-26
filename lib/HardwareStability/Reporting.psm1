@@ -53,6 +53,42 @@ function New-HsStageHtmlRow {
 "@
 }
 
+function New-HsTelemetryHtmlCard {
+    <#
+        States plainly which temperatures the thermal guard could actually
+        observe in this run. Without this, "Peak Temp" being empty and stages
+        passing could be read as "temperatures were fine", although no sensor
+        was available at all.
+    #>
+    param([AllowNull()]$TelemetryStatus = $null, [switch]$TelemetrySkipped)
+
+    if ($TelemetrySkipped) {
+        return '<div class="card" style="border-left:6px solid #f9a825;"><h2>Temperature monitoring</h2><p>Telemetry was disabled with -SkipTelemetry. The thermal guard did not monitor any temperature during this run.</p></div>'
+    }
+    if ($null -eq $TelemetryStatus) {
+        return '<div class="card" style="border-left:6px solid #f9a825;"><h2>Temperature monitoring</h2><p>No telemetry status was recorded. The thermal guard did not monitor any temperature during this run.</p></div>'
+    }
+
+    $complete = ($TelemetryStatus.Initialized -and $TelemetryStatus.CpuTemperatureAvailable -and $TelemetryStatus.GpuTemperatureAvailable)
+    $color = if ($complete) { "#2e7d32" } else { "#f9a825" }
+    $yesNo = { param($v) if ($v) { "yes" } else { "no" } }
+    $pawn = if ($TelemetryStatus.PawnIoInstalled) { "installed ($($TelemetryStatus.PawnIoVersion))" } else { "not installed" }
+    $notes = @($TelemetryStatus.Notes) + @($TelemetryStatus.MissingDependencies | ForEach-Object { "Missing dependency: $_" })
+    $unresolved = @($TelemetryStatus.UnresolvedAssemblies)
+    if ($unresolved.Count -gt 0) { $notes += "Assemblies requested but not available (optional sensor groups may be affected): $($unresolved -join ', ')" }
+    $noteHtml = if ($notes.Count -gt 0) { "<ul>" + (($notes | ForEach-Object { "<li>$(ConvertTo-HsHtml ([string]$_))</li>" }) -join "") + "</ul>" } else { "" }
+
+    return @"
+<div class="card" style="border-left:6px solid $color;">
+<h2>Temperature monitoring</h2>
+<p><strong>Telemetry active:</strong> $(& $yesNo $TelemetryStatus.Initialized) &nbsp; <strong>CPU temperature:</strong> $(& $yesNo $TelemetryStatus.CpuTemperatureAvailable) &nbsp; <strong>GPU temperature:</strong> $(& $yesNo $TelemetryStatus.GpuTemperatureAvailable) &nbsp; <strong>PawnIO driver:</strong> $(ConvertTo-HsHtml $pawn)</p>
+<p style="color:#555;font-size:0.9em;"><strong>Host:</strong> $(ConvertTo-HsHtml $TelemetryStatus.HostEdition) &nbsp; <strong>Library build:</strong> $(ConvertTo-HsHtml $TelemetryStatus.LibraryBuild) &nbsp; <strong>Sensor values:</strong> $(ConvertTo-HsHtml ([string]$TelemetryStatus.SensorValueCount))</p>
+$noteHtml
+<p style="color:#777;font-size:0.9em;">The thermal guard can only stop a stage on a temperature that is actually reported. Missing sensors are never estimated. Drive temperatures come from SMART (smartctl), not from this telemetry.</p>
+</div>
+"@
+}
+
 function New-HsHtmlReport {
     <#
     .SYNOPSIS
@@ -63,7 +99,9 @@ function New-HsHtmlReport {
         [Parameter(Mandatory=$true)]$Inventory,
         [Parameter(Mandatory=$true)][string]$Profile,
         [string]$RunId = "",
-        [pscustomobject]$SystemResetInfo = $null
+        [pscustomobject]$SystemResetInfo = $null,
+        [AllowNull()]$TelemetryStatus = $null,
+        [switch]$TelemetrySkipped
     )
 
     $overall = Get-HsOverallStatus -Stages $Stages
@@ -82,9 +120,13 @@ $(ConvertTo-HsHtml $SystemResetInfo.Notes)
 
     $rows = ($Stages | ForEach-Object { New-HsStageHtmlRow -Stage $_ }) -join "`n"
 
+    $telemetryCard = New-HsTelemetryHtmlCard -TelemetryStatus $TelemetryStatus -TelemetrySkipped:$TelemetrySkipped
+
     $cpuInv = ($Inventory.Cpus | ForEach-Object { "$($_.Name) ($($_.LogicalProcessors) logical / $($_.Cores) cores)" }) -join ", "
     $gpuInv = ($Inventory.Gpus | ForEach-Object { $_.Name }) -join ", "
-    $diskInv = ($Inventory.PhysicalDisks | ForEach-Object { "$($_.DeviceId): $($_.Model) ($([math]::Round($_.CapacityBytes/1GB,1)) GB, $($_.BusType), $($_.HealthStatus))" }) -join "<br/>"
+    # Encoded per disk: model strings come from the device firmware and must
+    # not be able to inject markup into the report.
+    $diskInv = ($Inventory.PhysicalDisks | ForEach-Object { ConvertTo-HsHtml "$($_.DeviceId): $($_.Model) ($([math]::Round($_.CapacityBytes/1GB,1)) GB, $($_.BusType), $($_.HealthStatus))" }) -join "<br/>"
 
     $html = @"
 <!DOCTYPE html>
@@ -114,6 +156,7 @@ th { background:#eceff1; }
 <p><strong>Storage:</strong><br/>$diskInv</p>
 </div>
 $resetBanner
+$telemetryCard
 <div class="card">
 <h2>Stage Results</h2>
 <table>
