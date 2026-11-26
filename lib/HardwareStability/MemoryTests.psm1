@@ -129,6 +129,37 @@ function Get-HsRamResultFromRun {
     }
 }
 
+function Get-HsMaxRamPercent {
+    <#
+    .SYNOPSIS
+        Largest share of physical RAM MemoryChecker can test right now: the
+        currently available memory minus a reserve for Windows (and for the
+        other workloads of the combined test via -ExtraReserveMB), capped by
+        the profile. Using a fixed share either left most RAM untested or
+        failed on machines with less free memory.
+    #>
+    param([int]$ExtraReserveMB = 0, [int]$MaxPercent = 90, [int]$MinPercent = 10)
+    $totalMB = 0.0
+    $freeMB = 0.0
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $totalMB = [double]$os.TotalVisibleMemorySize / 1024
+        $freeMB = [double]$os.FreePhysicalMemory / 1024
+    } catch {}
+    if ($totalMB -le 0) {
+        return [pscustomobject]@{ Percent = [math]::Min(50, $MaxPercent); TotalMB = 0; FreeMB = 0; ReserveMB = 0 }
+    }
+    $reserveMB = [math]::Max(1536.0, $totalMB * 0.06) + $ExtraReserveMB
+    $percent = [int][math]::Floor(100.0 * ($freeMB - $reserveMB) / $totalMB)
+    $percent = [math]::Max($MinPercent, [math]::Min($MaxPercent, $percent))
+    return [pscustomobject]@{
+        Percent   = $percent
+        TotalMB   = [math]::Round($totalMB)
+        FreeMB    = [math]::Round($freeMB)
+        ReserveMB = [math]::Round($reserveMB)
+    }
+}
+
 function Invoke-HsRamVerification {
     <#
     .SYNOPSIS

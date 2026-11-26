@@ -15,7 +15,7 @@ function Get-HsProfile {
             DisplayName                = "Kurz"
             Description                = "Kurze sinnvolle Verifikation aller verfuegbaren Kernkomponenten."
             RamPasses                  = 4
-            RamPercentOfPhysical       = 50
+            RamPercentOfPhysical       = 90 # upper cap; the run uses as much of the AVAILABLE RAM as possible
             CpuComputeMinutes          = 5
             CpuCacheImcMinutes         = 5
             CpuFftMode                 = "Smallest"
@@ -24,7 +24,7 @@ function Get-HsProfile {
             VramTestMinutes            = 6
             GpuLoadMinutes             = 2
             RamDurationMinutes         = 0 # 0 = run RamPasses; >0 = continuous for this long (retests)
-            SystemStabilityRamPercent  = 40
+            SystemStabilityRamPercent  = 90 # upper cap; available RAM minus a reserve for Prime95/GPU load
             SurfaceScanEnabled         = $false
             SurfaceScanMaxBytes        = 2GB
             SurfaceScanMaxMinutes      = 0 # >0 = time-limited scan (retests)
@@ -39,7 +39,7 @@ function Get-HsProfile {
             DisplayName                = "Mittel"
             Description                = "Gruendlicher Stabilitaetstest inklusive Storage Surface Read."
             RamPasses                  = 8
-            RamPercentOfPhysical       = 75
+            RamPercentOfPhysical       = 90 # upper cap; the run uses as much of the AVAILABLE RAM as possible
             CpuComputeMinutes          = 20
             CpuCacheImcMinutes         = 20
             CpuFftMode                 = "Small"
@@ -48,7 +48,7 @@ function Get-HsProfile {
             VramTestMinutes            = 15
             GpuLoadMinutes             = 5
             RamDurationMinutes         = 0 # 0 = run RamPasses; >0 = continuous for this long (retests)
-            SystemStabilityRamPercent  = 50
+            SystemStabilityRamPercent  = 90 # upper cap; available RAM minus a reserve for Prime95/GPU load
             SurfaceScanEnabled         = $true
             SurfaceScanMaxBytes        = 0 # 0 = full drive
             SurfaceScanMaxMinutes      = 0 # >0 = time-limited scan (retests)
@@ -63,7 +63,7 @@ function Get-HsProfile {
             DisplayName                = "Lang"
             Description                = "Mehr Passes, laengere Berechnungen, volle Coverage, Extended SMART Self-Test."
             RamPasses                  = 16
-            RamPercentOfPhysical       = 85
+            RamPercentOfPhysical       = 90 # upper cap; the run uses as much of the AVAILABLE RAM as possible
             CpuComputeMinutes          = 60
             CpuCacheImcMinutes         = 60
             CpuFftMode                 = "Large"
@@ -72,7 +72,7 @@ function Get-HsProfile {
             VramTestMinutes            = 45
             GpuLoadMinutes             = 15
             RamDurationMinutes         = 0 # 0 = run RamPasses; >0 = continuous for this long (retests)
-            SystemStabilityRamPercent  = 60
+            SystemStabilityRamPercent  = 90 # upper cap; available RAM minus a reserve for Prime95/GPU load
             SurfaceScanEnabled         = $true
             SurfaceScanMaxBytes        = 0
             SurfaceScanMaxMinutes      = 0 # >0 = time-limited scan (retests)
@@ -95,9 +95,9 @@ function Get-HsProfileChoice {
         surface scan, SMART self-test type) - see the profile table above.
     #>
     return @(
-        [pscustomobject]@{ Key = "1"; Name = "Quick";    Label = "Kurz";   Summary = "je 5 Min. CPU/Cache, RAM 50% x4, Datei 256 MB, kein Surface-Scan" }
-        [pscustomobject]@{ Key = "2"; Name = "Standard"; Label = "Mittel"; Summary = "je 20 Min. CPU/Cache, RAM 75% x8, Datei 1 GB, Surface-Scan der Windows-Platte" }
-        [pscustomobject]@{ Key = "3"; Name = "Extended"; Label = "Lang";   Summary = "je 60 Min. CPU/Cache, RAM 85% x16, Datei 4 GB, voller Surface-Scan, erweiterter SMART-Test" }
+        [pscustomobject]@{ Key = "1"; Name = "Quick";    Label = "Kurz";   Summary = "je 5 Min. CPU/Cache, RAM max. x4, Datei 256 MB, kein Surface-Scan" }
+        [pscustomobject]@{ Key = "2"; Name = "Standard"; Label = "Mittel"; Summary = "je 20 Min. CPU/Cache, RAM max. x8, Datei 1 GB, Surface-Scan der Windows-Platte" }
+        [pscustomobject]@{ Key = "3"; Name = "Extended"; Label = "Lang";   Summary = "je 60 Min. CPU/Cache, RAM max. x16, Datei 4 GB, voller Surface-Scan, erweiterter SMART-Test" }
     )
 }
 

@@ -264,6 +264,11 @@ function Invoke-HsGpuLoadThermalValidation {
         DeviceLost = $false
         PeakTemperature = $null
         Reason = ""
+        Rounds = 0
+        VerifiedValues = 0
+        HeavyKernel = $false
+        UsedWarp = $false
+        Notes = ""
     }
 
     try {
@@ -281,18 +286,46 @@ function Invoke-HsGpuLoadThermalValidation {
     $deviceLost = $false
     $peakTemp = $null
     $cancelled = $false
+    $rounds = 0
+    $verified = [int64]0
+    $heavyKernel = $true
+    $lastError = ""
+    $sliceSeed = 4242
 
     while ([datetime]::Now -lt $deadline) {
-        $data = New-Object uint32[] $ElementCount
-        $rnd = New-Object Random
-        for ($i = 0; $i -lt $ElementCount; $i++) { $data[$i] = [uint32]$rnd.Next() }
-        $r = [PCDiagnose.HardwareStability.D3D11ComputeVerifier]::RunVerification($data)
-        if (-not $r.Success) {
-            if ($r.DeviceLost) { $deviceLost = $true }
-            break
+        $remainingMs = [int][math]::Max(250, ($deadline - [datetime]::Now).TotalMilliseconds)
+        if ($heavyKernel) {
+            # Full-load path: one device per 3 s slice, calibrated heavy kernel,
+            # sampled bit-exact verification (see RunLoadSlice in the .cs file).
+            $slice = [PCDiagnose.HardwareStability.D3D11ComputeVerifier]::RunLoadSlice(1048576, $rounds, [math]::Min(3000, $remainingMs), 4096, $sliceSeed)
+            $sliceSeed++
+            if (-not $slice.Success) {
+                if ($slice.DeviceLost) { $deviceLost = $true; $lastError = $slice.ErrorMessage; break }
+                # Heavy kernel not usable on this driver: keep the stage useful
+                # with the original light verification loop instead of failing.
+                $heavyKernel = $false
+                $lastError = $slice.ErrorMessage
+                continue
+            }
+            $rounds = $slice.Rounds
+            $iterations += [int]$slice.Dispatches
+            $mismatches += $slice.MismatchCount
+            $verified += $slice.VerifiedValues
+            $result.UsedWarp = $slice.UsedWarp
+        } else {
+            $data = New-Object uint32[] $ElementCount
+            $rnd = New-Object Random
+            for ($i = 0; $i -lt $ElementCount; $i++) { $data[$i] = [uint32]$rnd.Next() }
+            $r = [PCDiagnose.HardwareStability.D3D11ComputeVerifier]::RunVerification($data)
+            if (-not $r.Success) {
+                if ($r.DeviceLost) { $deviceLost = $true }
+                $lastError = $r.ErrorMessage
+                break
+            }
+            $mismatches += $r.MismatchCount
+            $verified += $r.ElementCount
+            $iterations++
         }
-        $mismatches += $r.MismatchCount
-        $iterations++
 
         if ($TelemetrySample) {
             $rows = & $TelemetrySample "GPU_LOAD_THERMAL"
@@ -303,12 +336,17 @@ function Invoke-HsGpuLoadThermalValidation {
         if (-not $Quiet) {
             $tp = Get-HsTimeProgress -ElapsedSeconds $loadWatch.Elapsed.TotalSeconds -TotalSeconds $DurationSeconds
             $tempText = if ($null -ne $peakTemp) { ", Spitze $peakTemp C" } else { "" }
-            Write-HsStageProgress -Activity $ProgressLabel -Status "$iterations Durchlaeufe, $($tp.Text)$tempText" -Percent $tp.Percent -SecondsRemaining $tp.Remaining
+            $modeText = if ($heavyKernel) { "$iterations Dispatches (je 1M Threads x $rounds Runden)" } else { "$iterations Durchlaeufe (leichter Modus)" }
+            Write-HsStageProgress -Activity $ProgressLabel -Status "$modeText, $($tp.Text)$tempText" -Percent $tp.Percent -SecondsRemaining $tp.Remaining
         }
 
         if (& $CancelCheck) { $cancelled = $true; break }
     }
     if (-not $Quiet) { Write-HsStageProgress -Activity $ProgressLabel -Completed }
+    $result.Rounds = $rounds
+    $result.VerifiedValues = $verified
+    $result.HeavyKernel = $heavyKernel
+    if (-not $heavyKernel -and $lastError) { $result.Notes = "Heavy load kernel unavailable ($lastError); light verification loop used." }
 
     $result.Iterations = $iterations
     $result.Mismatches = $mismatches
@@ -329,7 +367,12 @@ function Invoke-HsGpuLoadThermalValidation {
         $result.Reason = "No iterations completed."
     } else {
         $result.Status = "PASS"
-        $result.Reason = "$iterations sustained load iteration(s) completed with 0 mismatches and no device loss."
+        if ($heavyKernel) {
+            $warpNote = if ($result.UsedWarp) { " Software WARP renderer was used (no hardware GPU path)." } else { "" }
+            $result.Reason = "$iterations full-load dispatch(es) (1M threads x $rounds rounds each) with $verified sampled value(s) verified bit-exact: 0 mismatches, no device loss.$warpNote"
+        } else {
+            $result.Reason = "$iterations sustained load iteration(s) completed with 0 mismatches and no device loss. $($result.Notes)".Trim()
+        }
     }
 
     return $result

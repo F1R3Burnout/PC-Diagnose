@@ -652,10 +652,22 @@ function Invoke-HsComponentStages {
                 Invoke-HsStageWrapper -StageName "RAM" -Component "RAM$StageSuffix" -Tool "MemoryChecker" -Action {
                     param($stage)
                     $ramSeconds = [int][math]::Round([double]$StageProfile.RamDurationMinutes * 60)
-                    $r = Invoke-HsRamVerification -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory $StageDirs.Ram `
-                        -Passes $StageProfile.RamPasses -PercentOfPhysicalRam $StageProfile.RamPercentOfPhysical `
-                        -DurationSeconds $ramSeconds -NoDownload:$NoDownload `
-                        -CancelCheck { Test-HsThermalAbortOrCancel -StageName "RAM" } -ProgressLabel "RAM$StageSuffix (MemoryChecker)"
+                    # As much RAM as is available right now; if MemoryChecker
+                    # still cannot allocate it (memory taken meanwhile), retry
+                    # with 10 points less instead of reporting nothing.
+                    $ramTarget = Get-HsMaxRamPercent -MaxPercent ([int]$StageProfile.RamPercentOfPhysical)
+                    $ramPercent = [int]$ramTarget.Percent
+                    Write-Progress2 ("RAM: {0} MB available of {1} MB, testing {2}% (reserve {3} MB for Windows)" -f $ramTarget.FreeMB, $ramTarget.TotalMB, $ramPercent, $ramTarget.ReserveMB) "Gray"
+                    for ($attempt = 1; $attempt -le 3; $attempt++) {
+                        $r = Invoke-HsRamVerification -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory $StageDirs.Ram `
+                            -Passes $StageProfile.RamPasses -PercentOfPhysicalRam $ramPercent `
+                            -DurationSeconds $ramSeconds -NoDownload:$NoDownload `
+                            -CancelCheck { Test-HsThermalAbortOrCancel -StageName "RAM" } -ProgressLabel "RAM$StageSuffix (MemoryChecker, $ramPercent%)"
+                        if ($r.Status -ne "BLOCKED" -or [string]$r.Reason -notmatch "(?i)allocat|not enough|exceeds" -or $ramPercent -le 20) { break }
+                        Add-HsNote -Stage $stage -Note "Could not allocate $ramPercent% of RAM; retrying with $($ramPercent - 10)%."
+                        Write-Progress2 "RAM: $ramPercent% could not be allocated - retrying with $($ramPercent - 10)%" "Yellow"
+                        $ramPercent -= 10
+                    }
                     $stage.Tool = $r.Tool; $stage.ToolVersion = $r.ToolVersion; $stage.Command = $r.Command
                     $stage.Coverage = if ($ramSeconds -gt 0) { "$($r.TargetPercent)% of physical RAM, continuous for $([math]::Round($r.DurationSeconds/60,1)) minute(s)" } else { "$($r.TargetPercent)% of physical RAM, $($r.Passes) pass(es)" }
                     $stage.ExitCode = $r.ExitCode
@@ -691,7 +703,7 @@ function Invoke-HsComponentStages {
                 $r = Invoke-HsGpuLoadThermalValidation -DurationSeconds ([int][math]::Round([double]$StageProfile.GpuLoadMinutes * 60)) `
                     -TelemetrySample { param($s) Get-HsTelemetrySampleForStage -StageName $s } `
                     -CancelCheck { Test-HsThermalAbortOrCancel -StageName "GPU_LOAD_THERMAL" } -ProgressLabel "GPU Last / Temperatur$StageSuffix"
-                $stage.Coverage = "$($r.Iterations) sustained load iteration(s)"
+                $stage.Coverage = if ($r.HeavyKernel) { "$($r.Iterations) full-load dispatch(es), 1M threads x $($r.Rounds) rounds, $($r.VerifiedValues) value(s) verified" } else { "$($r.Iterations) sustained load iteration(s) (light mode)" }
                 $stage.PeakTemperature = $r.PeakTemperature
                 Complete-HsStage $stage -Status $r.Status -Assessment $r.Reason
             } | Out-Null
@@ -792,8 +804,11 @@ function Invoke-HsComponentStages {
                 # or memory controller often only shows up with all three busy.
                 # MemoryChecker runs in this process (registered for Ctrl+C
                 # cleanup), the GPU load in a background job, Prime95 blocks.
+                # Available RAM minus an extra 1.5 GB for Prime95 and the GPU job.
+                $systemRamTarget = Get-HsMaxRamPercent -ExtraReserveMB 1536 -MaxPercent ([int]$StageProfile.SystemStabilityRamPercent)
+                $systemRamPercent = [int]$systemRamTarget.Percent
                 $ramLoad = Start-HsRamBackgroundLoad -ConfigPath $ConfigPath -ToolCacheRoot $ToolCacheRoot -OutputDirectory $StageDirs.Ram `
-                    -PercentOfPhysicalRam $StageProfile.SystemStabilityRamPercent -NoDownload:$NoDownload
+                    -PercentOfPhysicalRam $systemRamPercent -NoDownload:$NoDownload
                 $gpuJob = $null
                 $ramResult = $null
                 try {
@@ -815,7 +830,7 @@ function Invoke-HsComponentStages {
                 }
                 $gpuResult = Receive-Job -Job $gpuJob -Wait -AutoRemoveJob | Select-Object -Last 1
 
-                $stage.Coverage = "CPU: $($cpuResult.Workers) worker(s); GPU: $($gpuResult.Iterations) iteration(s); RAM: $($StageProfile.SystemStabilityRamPercent)% continuous, $($ramResult.Passes) complete pass(es)"
+                $stage.Coverage = "CPU: $($cpuResult.Workers) worker(s); GPU: $($gpuResult.Iterations) iteration(s); RAM: $systemRamPercent% continuous, $($ramResult.Passes) complete pass(es)"
                 $partsText = "CPU: $($cpuResult.Status), GPU: $($gpuResult.Status), RAM: $($ramResult.Status)"
                 if ($cpuResult.Status -eq "FAIL" -or $gpuResult.Status -eq "FAIL" -or $ramResult.Status -eq "FAIL") {
                     $ramDetail = if ($ramResult.Status -eq "FAIL") { " RAM: $($ramResult.Reason)" } else { "" }

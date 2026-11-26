@@ -179,6 +179,19 @@ Assert-True (@($filled | Where-Object { $_.StatusDescription -match "\d+:\d\d vo
 Assert-True (@($filled | Where-Object { $_.StatusDescription -match "Phase noch \d+:\d\d" -and $_.StatusDescription -match "Gesamt noch mind\. 1\d:\d\d \+ RAM" }).Count -ge 1) "HS-061 Status shows remaining stage time and remaining total (planned later stages + unknown parts) ($(@($filled)[0].StatusDescription))"
 Assert-True (@($filled | Where-Object { $_.CurrentOperation -eq "Temperaturen: CPU 50 C" }).Count -ge 1) "HS-061 Current temperatures are shown under the bar"
 
+Write-Host "`n=== HS-062 Maximum load: heavy GPU kernel and available-RAM sizing ===" -ForegroundColor Cyan
+$gpuHeavy = Invoke-HsGpuLoadThermalValidation -DurationSeconds 5 -Quiet
+if ($gpuHeavy.Status -eq "UNSUPPORTED") {
+    Assert-True $true "HS-062 GPU load reports UNSUPPORTED on a machine without Direct3D 11 compute ($($gpuHeavy.Reason))"
+} else {
+    Assert-True ($gpuHeavy.Status -eq "PASS" -and $gpuHeavy.HeavyKernel) "HS-062 Sustained GPU load uses the calibrated heavy kernel and PASSes (got $($gpuHeavy.Status), heavy=$($gpuHeavy.HeavyKernel): $($gpuHeavy.Reason))"
+    Assert-True ($gpuHeavy.Rounds -ge 16 -and $gpuHeavy.Iterations -ge 3 -and $gpuHeavy.VerifiedValues -gt 0) "HS-062 Heavy kernel ran calibrated dispatches with sampled bit-exact verification ($($gpuHeavy.Iterations) dispatches x $($gpuHeavy.Rounds) rounds, $($gpuHeavy.VerifiedValues) values)"
+}
+$ramMax = Get-HsMaxRamPercent
+Assert-True ($ramMax.Percent -ge 10 -and $ramMax.Percent -le 90 -and $ramMax.TotalMB -gt 0) "HS-062 RAM share is sized from the available memory ($($ramMax.Percent)% of $($ramMax.TotalMB) MB, $($ramMax.FreeMB) MB available)"
+$ramMaxSystem = Get-HsMaxRamPercent -ExtraReserveMB 1536
+Assert-True ($ramMaxSystem.Percent -le $ramMax.Percent) "HS-062 The combined test keeps extra headroom for Prime95 and the GPU load"
+
 Write-Host "`n=== HS-052 / HS-053 Tool integrity checks ===" -ForegroundColor Cyan
 $nugetBase64 = "NXcNYlWoXe5cz9sb8Huo6x2dCZVYkhwKtgE00n/MoI8V4ZI/7/t+EI5bOhQFlZfFjjqM8+U6prjU/aARt7H/tA=="
 Assert-True ((ConvertTo-HsHexHash -Value $nugetBase64 -ByteLength 64) -eq "35770d6255a85dee5ccfdb1bf07ba8eb1d9d099558921c0ab60134d27fcca08f15e1923feffb7e108e5b3a14059597c58e3a8cf3e53aa6b8d4fda011b7b1ffb4") "HS-052 NuGet base64 SHA512 is converted to the matching hex digest"

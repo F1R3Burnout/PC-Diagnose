@@ -168,8 +168,10 @@ error, or a real read/write error was actually detected.
   read Prime95's own `results.txt` for `FATAL ERROR` / `ROUND OFF` / `SUMOUT`
   evidence.
 - **RAM** - [MemoryChecker](https://github.com/lordmulder/MemoryChecker)
-  writes a pattern to a configurable share of physical RAM, reads it back,
-  and compares. A Windows user-space test cannot cover 100% of installed
+  writes a pattern to as much RAM as is available at stage start (available
+  memory minus a reserve of max(1.5 GB, 6%) for Windows, capped at 90%),
+  reads it back, and compares. If the allocation still fails it retries with
+  10 points less. A Windows user-space test cannot cover 100% of installed
   RAM (some is reserved by Windows itself); for full offline coverage, use
   [MemTest86](https://www.memtest86.com/) instead.
 - **GPU Compute** - a small Direct3D 11 compute-shader verifier built into
@@ -182,9 +184,13 @@ error, or a real read/write error was actually detected.
 - **VRAM** - [memtest_vulkan](https://github.com/GpuZelenograd/memtest_vulkan)
   writes and reads back GPU memory. Reports `UNSUPPORTED` (not a failure) on
   systems without a usable Vulkan runtime/driver.
-- **GPU Load / Thermal Validation** - reuses the same verified GPU compute
-  kernel in a sustained loop to produce real load while temperature and
-  device-loss (TDR) are monitored.
+- **GPU Load / Thermal Validation** - full GPU load: a heavy integer
+  kernel (1M threads, each looping a calibrated number of rounds so one
+  dispatch takes about 150 ms - far below the 2 s TDR limit) runs back to
+  back on one device; every third dispatch a rotating sample of results is
+  compared bit-exactly with the CPU reference. Temperature and device loss
+  (TDR) are monitored. Falls back to the light verification loop if the
+  driver rejects the heavy kernel.
 - **Storage SMART** - [smartmontools](https://www.smartmontools.org/)
   (`smartctl -x`) on every physical disk, the Windows disk first; the SMART
   self-test and the surface scan use the Windows disk. Drives/controllers
@@ -202,8 +208,9 @@ error, or a real read/write error was actually detected.
   17/18/19/20) recorded during other stages. A single corrected PCIe error
   is reported as a possible cause among several (GPU, slot, mainboard, power
   delivery, signal integrity) - never as a definitive mainboard diagnosis.
-- **System Stability** - runs CPU (Prime95), GPU (D3D11 load) and RAM
-  (MemoryChecker, continuous, 40/50/60% of physical RAM) concurrently to
+- **System Stability** - runs CPU (Prime95, all cores), GPU (heavy D3D11
+  kernel) and RAM (MemoryChecker, continuous, available RAM minus an extra
+  1.5 GB for the other two) concurrently to
   check whether components that pass individually remain stable together.
   PASS requires all three workloads to have run without a verified error. If
   an unexpected reset happens here, the report explicitly says PSU/VRM/
